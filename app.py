@@ -162,7 +162,7 @@ def rolling_fc(s, n_roll, max_steps, d, manual):
 
 
 @st.cache_data(show_spinner="Rolling ARIMA forecast for R / Y / B …")
-def balance(df, freq, auto, p, q, test_hours, thr, min_consec, min_load):
+def balance(df, freq, p, d, q, test_hours, thr, min_consec, min_load):
     step = pd.Timedelta(freq).total_seconds() / 60
     hz = {k: max(1, round(v / step)) for k, v in HORIZONS_MIN.items()}
     x = df.set_index("Timestamps")[PHASES].apply(pd.to_numeric, errors="coerce").resample(freq).mean()
@@ -177,11 +177,10 @@ def balance(df, freq, auto, p, q, test_hours, thr, min_consec, min_load):
 
     mean_s = full[PHASES].mean(axis=1, skipna=False)
     try:
-        fc_mean, o_mean = rolling_fc(mean_s, n_roll, max_steps, 1, None if auto else (p, 1, q))
+        fc_mean, o_mean = rolling_fc(mean_s, n_roll, max_steps, d, (p, d, q))
         fc, orders = {}, {"mean": o_mean}
         for f in PHASES:
-            fc[f], orders[f] = rolling_fc(full[f] - mean_s, n_roll, max_steps, 0, None if auto else (p, 0, q))
-    except ValueError as e:
+            fc[f], orders[f] = rolling_fc(full[f] - mean_s, n_roll, max_steps, 0, (p, 0, q))    except ValueError as e:
         return dict(error=str(e), **base)
 
     preds = {}
@@ -250,6 +249,14 @@ with tab1:
             col.plotly_chart(style(f, 360, False, top=60), width="stretch")
 
 with tab2:
+    c = st.columns(3)
+    p2 = c[0].number_input("p (AR)", 0, 6, 1, key="p2")
+    d2 = c[1].number_input("d (diff)", 0, 2, 1, key="d2")
+    q2 = c[2].number_input("q (MA)", 0, 6, 1, key="q2")
+    freq, hrs, thr, minc, minl = "30min", 24, 5.0, 2, 10.0     # fixed, same as the notebook
+    B = balance(df, freq, int(p2), int(d2), int(q2), hrs, thr, minc, minl)
+    if "error" in B:
+        st.error(B["error"]); st.stop()
     test, obs, det, met, hz = B["test"], B["obs"], B["det"], B["metrics"], list(HORIZONS_MIN)
     tone = "good" if B["latest"] < thr * .6 else ("warn" if B["latest"] < thr else "bad")
     k = st.columns(4)
