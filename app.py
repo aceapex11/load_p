@@ -257,7 +257,7 @@ with tab2:
     hrs = c[3].slider("Test window (hours)", 12, 168, 24, 12); thr = c[4].slider("Alert threshold %", 1.0, 15.0, 5.0, .5)
     c = st.columns(6)
     minc = c[0].number_input("Alert needs N consecutive bins", 1, 6, 2); minl = c[1].number_input("Ignore load below (kW)", 0.0, 100.0, 10.0, 1.0)
-  freq = "30min"
+    freq = "30min"
     B = balance(df, freq, auto, int(p2), int(q2), hrs, thr, int(minc), float(minl))
     if "error" in B:
         st.error(B["error"]); st.stop()
