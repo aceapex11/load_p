@@ -250,14 +250,14 @@ with tab1:
             col.plotly_chart(style(f, 360, False, top=60), width="stretch")
 
 with tab2:
-  with st.expander("ARIMA & balance settings", expanded=True):
-    c = st.columns(6)
-    auto = c[0].toggle("Auto order (AIC, train only)", True)
-    p2 = c[1].number_input("p (AR)", 0, 4, 1, key="p2", disabled=auto); q2 = c[2].number_input("q (MA)", 0, 4, 1, key="q2", disabled=auto)
-    c = st.columns(6)
-    minc = c[0].number_input("Alert needs N consecutive bins", 1, 6, 2); minl = c[1].number_input("Ignore load below (kW)", 0.0, 100.0, 10.0, 1.0)
-    freq = "30min"
-    B = balance(df, freq, auto, int(p2), int(q2), int(minc), float(minl))
+    with st.expander("ARIMA & balance settings", expanded=True):
+        c = st.columns(6)
+        auto = c[0].toggle("Auto order (AIC, train only)", True)
+        p2 = c[1].number_input("p (AR)", 0, 4, 1, key="p2", disabled=auto); q2 = c[2].number_input("q (MA)", 0, 4, 1, key="q2", disabled=auto)
+        freq = c[3].selectbox("Smoothing", ["30min", "15min"]); hrs = c[4].slider("Test window (hours)", 12, 168, 24, 12); thr = c[5].slider("Alert threshold %", 1.0, 15.0, 5.0, .5)
+        c = st.columns(6)
+        minc = c[0].number_input("Alert needs N consecutive bins", 1, 6, 2); minl = c[1].number_input("Ignore load below (kW)", 0.0, 100.0, 10.0, 1.0)
+    B = balance(df, freq, auto, int(p2), int(q2), hrs, thr, int(minc), float(minl))
     if "error" in B:
         st.error(B["error"]); st.stop()
     test, obs, det, met, hz = B["test"], B["obs"], B["det"], B["metrics"], list(HORIZONS_MIN)
