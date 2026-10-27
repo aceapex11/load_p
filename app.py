@@ -257,7 +257,7 @@ with tab2:
     c = st.columns(6)
     minc = c[0].number_input("Alert needs N consecutive bins", 1, 6, 2); minl = c[1].number_input("Ignore load below (kW)", 0.0, 100.0, 10.0, 1.0)
     freq = "30min"
-    B = balance(df, freq, auto, int(p2), int(q2), hrs, thr, int(minc), float(minl))
+    B = balance(df, freq, auto, int(p2), int(q2), int(minc), float(minl))
     if "error" in B:
         st.error(B["error"]); st.stop()
     test, obs, det, met, hz = B["test"], B["obs"], B["det"], B["metrics"], list(HORIZONS_MIN)
