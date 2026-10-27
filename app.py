@@ -102,23 +102,51 @@ def load(upload=None):
 
 
 # ------------------------------------------------------------------ Load prediction
+# ------------------------------------------------------------------ Load prediction
 @st.cache_data(show_spinner="Fitting ARIMA on the training data…")
-def predict_kw(df, order, split_pct, block, win):
-    series = df.set_index("Timestamps")["KW"].rolling(win, min_periods=win).mean().dropna().astype(float)
-    split = int(len(series) * split_pct / 100); train, test = series.iloc[:split], series.iloc[split:]
-    train_reset = pd.Series(train.to_numpy(), name="KW")
-    fit = ARIMA(train_reset, order=order, enforce_stationarity=False, enforce_invertibility=False).fit()
-    fitted = np.asarray(fit.predict(start=0, end=len(train_reset) - 1, dynamic=False)).reshape(-1)
-    tr = pd.DataFrame({"Timestamp": train.index, "Actual": train.to_numpy(), "Fitted": fitted}); tr["Residual"] = tr.Actual - tr.Fitted
-    cur, pred, act, tim = len(train_reset), [], [], []
-    res = fit
-    for s in range(0, len(test), block):                    # forecast a whole block BEFORE seeing it, then append actuals (no refit)
-        b = test.iloc[s:s + block]; pred.extend(np.asarray(res.forecast(steps=len(b))).reshape(-1)); act.extend(b.to_numpy()); tim.extend(b.index)
-        res = res.append(pd.Series(b.to_numpy(), index=range(cur, cur + len(b)), name="KW"), refit=False); cur += len(b)
-    te = pd.DataFrame({"Timestamp": tim, "Actual": act, "Forecast": pred}).sort_values("Timestamp").reset_index(drop=True); te["Residual"] = te.Actual - te.Forecast
-    m = lambda a, p: dict(RMSE=float(np.sqrt(mean_squared_error(a, p))), MAE=float(mean_absolute_error(a, p)), R2=float(r2_score(a, p)))
-    return dict(train=tr, test=te, m_train=m(tr.Actual, tr.Fitted), m_test=m(te.Actual, te.Forecast), n=len(series),
-                t0=train.index[0], t1=train.index[-1], t2=test.index[0], t3=test.index[-1])
+def predict_kw(meter_df, arima_order, train_split_pct, forecast_block_min, rolling_window_min):
+    # 1) smooth the 1-minute KW into a rolling average (the series ARIMA actually models)
+    rolling_kw = (meter_df.set_index("Timestamps")["KW"]
+                  .rolling(rolling_window_min, min_periods=rolling_window_min).mean().dropna().astype(float))
+
+    # 2) chronological train / test split
+    n_train = int(len(rolling_kw) * train_split_pct / 100)
+    train_series, test_series = rolling_kw.iloc[:n_train], rolling_kw.iloc[n_train:]
+    train_values = pd.Series(train_series.to_numpy(), name="KW")       # plain 0..n index so ARIMA can append later
+
+    # 3) fit ARIMA on the training data and get its in-sample (fitted) values
+    arima_fit = ARIMA(train_values, order=arima_order, enforce_stationarity=False, enforce_invertibility=False).fit()
+    train_fitted = np.asarray(arima_fit.predict(start=0, end=len(train_values) - 1, dynamic=False)).reshape(-1)
+    train_table = pd.DataFrame({"Timestamp": train_series.index, "Actual": train_series.to_numpy(), "Fitted": train_fitted})
+    train_table["Residual"] = train_table.Actual - train_table.Fitted
+
+    # 4) test: forecast one block BEFORE seeing it, then reveal the actual values to the model (no refit)
+    next_position = len(train_values)
+    forecast_values, actual_values, block_timestamps = [], [], []
+    running_fit = arima_fit
+    for block_start in range(0, len(test_series), forecast_block_min):
+        actual_block = test_series.iloc[block_start:block_start + forecast_block_min]
+        forecast_values.extend(np.asarray(running_fit.forecast(steps=len(actual_block))).reshape(-1))
+        actual_values.extend(actual_block.to_numpy())
+        block_timestamps.extend(actual_block.index)
+        running_fit = running_fit.append(
+            pd.Series(actual_block.to_numpy(), index=range(next_position, next_position + len(actual_block)), name="KW"), refit=False)
+        next_position += len(actual_block)
+    test_table = (pd.DataFrame({"Timestamp": block_timestamps, "Actual": actual_values, "Forecast": forecast_values})
+                  .sort_values("Timestamp").reset_index(drop=True))
+    test_table["Residual"] = test_table.Actual - test_table.Forecast
+
+    def score(actual, predicted):
+        return dict(RMSE=float(np.sqrt(mean_squared_error(actual, predicted))),
+                    MAE=float(mean_absolute_error(actual, predicted)),
+                    R2=float(r2_score(actual, predicted)))
+
+    return dict(train=train_table, test=test_table,
+                m_train=score(train_table.Actual, train_table.Fitted),
+                m_test=score(test_table.Actual, test_table.Forecast),
+                n=len(rolling_kw),
+                t0=train_series.index[0], t1=train_series.index[-1],
+                t2=test_series.index[0], t3=test_series.index[-1])
 
 
 # ------------------------------------------------------------------ Load balance 
