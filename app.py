@@ -102,7 +102,6 @@ def load(upload=None):
 
 
 # ------------------------------------------------------------------ Load prediction
-# ------------------------------------------------------------------ Load prediction
 @st.cache_data(show_spinner="Fitting ARIMA on the training data…")
 def predict_kw(meter_df, arima_order, train_split_pct, forecast_block_min, rolling_window_min):
     # 1) smooth the 1-minute KW into a rolling average (the series ARIMA actually models)
