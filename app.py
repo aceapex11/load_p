@@ -180,7 +180,8 @@ def balance(df, freq, p, d, q, test_hours, thr, min_consec, min_load):
         fc_mean, o_mean = rolling_fc(mean_s, n_roll, max_steps, d, (p, d, q))
         fc, orders = {}, {"mean": o_mean}
         for f in PHASES:
-            fc[f], orders[f] = rolling_fc(full[f] - mean_s, n_roll, max_steps, 0, (p, 0, q))    except ValueError as e:
+            fc[f], orders[f] = rolling_fc(full[f] - mean_s, n_roll, max_steps, 0, (p, 0, q))    
+    except ValueError as e:
         return dict(error=str(e), **base)
 
     preds = {}
