@@ -181,7 +181,8 @@ def balance(df, freq, auto, p, d, q, test_hours, thr, min_consec, min_load):
         fc, orders = {}, {"mean": o_mean}
         for f in PHASES:
             fc[f], orders[f] = rolling_fc(full[f] - mean_s, n_roll, max_steps, 0, None if auto else (p, 0, q))
-
+    except ValueError as e:
+        return dict(error=str(e), **base)
     preds = {}
     for k, s in hz.items():
         o = warm + np.arange(test_steps) - s + 1
