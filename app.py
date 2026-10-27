@@ -30,7 +30,7 @@ st.markdown("""
 :root { color-scheme: light; }
 html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"], [data-testid="stMain"] { background:#F6F7FB !important; color:#0F172A !important; font-family:'Space Grotesk',sans-serif; }
 [data-testid="stHeader"] { height:0; } #MainMenu, footer { visibility:hidden; }
-.block-container { max-width:1240px; padding-top:1.4rem; padding-bottom:3rem; }
+.block-container, [data-testid="stMainBlockContainer"] { max-width:100% !important; padding:3.2rem 2.5rem 3rem 2.5rem !important; }
 .stApp p, .stApp label, .stApp li, .stApp h1, .stApp h2, .stApp h3, [data-testid="stWidgetLabel"] p, [data-testid="stCaptionContainer"] { color:#0F172A !important; }
 [data-testid="stCaptionContainer"] p { color:#64748B !important; }
 [data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="base-input"], input, [data-testid="stNumberInputContainer"] { background:#FFFFFF !important; color:#0F172A !important; border-color:#D9DEEA !important; }
@@ -48,7 +48,7 @@ button[kind], .stButton button, [data-testid="stBaseButton-secondary"] { backgro
 .hero { padding:1.5rem 1.7rem; border-radius:18px; border:1px solid #E2E6F0; margin-bottom:1.1rem; box-shadow:0 1px 3px rgba(15,23,42,.05);
   background: radial-gradient(900px 260px at 92% -30%, rgba(232,146,12,.22), transparent 60%), radial-gradient(700px 240px at 0% 130%, rgba(8,145,178,.12), transparent 60%), #FFFFFF; }
 .hero h1 { margin:0; font-size:2rem; font-weight:700; letter-spacing:-.5px; color:#0F172A !important; }
-.hero p { margin:.4rem 0 0; color:#475569 !important; max-width:72ch; }
+.hero p { margin:.4rem 0 0; color:#475569 !important; max-width:90ch; }
 .chip { display:inline-block; padding:.18rem .65rem; border-radius:999px; font-size:.75rem; border:1px solid #D9DEEA; background:#F3F5FA; color:#475569 !important; margin:.8rem .4rem 0 0; }
 .kpi { background:#FFFFFF; border:1px solid #E2E6F0; border-radius:14px; padding:.9rem 1.05rem; box-shadow:0 1px 3px rgba(15,23,42,.05); height:100%; }
 .kpi .l { color:#64748B !important; font-size:.8rem; } .kpi .s { color:#64748B !important; font-size:.78rem; margin-top:.1rem; }
@@ -74,10 +74,12 @@ def table(df, nd=3):
     st.markdown('<div class="tblwrap">' + "".join(x.strip() for x in html.splitlines()) + "</div>", unsafe_allow_html=True)
 
 
-def style(fig, h=440, legend=True):
-    fig.update_layout(height=h, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", hovermode="x unified",
-                      font=dict(family="Space Grotesk, sans-serif", size=13, color="#334155"), margin=dict(l=10, r=10, t=50, b=10),
-                      legend=dict(orientation="h", y=1.12, x=0, bgcolor="rgba(0,0,0,0)"), showlegend=legend)
+def style(fig, h=440, legend=True, legend_y=1.02, top=95):
+    """Title sits at the top-left; the legend gets its own row just above the plot, so they never overlap."""
+    fig.update_layout(height=h + (top - 50), template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", hovermode="x unified",
+                      font=dict(family="Space Grotesk, sans-serif", size=13, color="#334155"), margin=dict(l=10, r=10, t=top, b=10),
+                      title=dict(x=0, xanchor="left", y=0.985, yanchor="top", font=dict(size=16, color=INK)),
+                      legend=dict(orientation="h", x=0, xanchor="left", y=legend_y, yanchor="bottom", bgcolor="rgba(0,0,0,0)"), showlegend=legend)
     fig.update_xaxes(gridcolor="#E6EAF2", zeroline=False); fig.update_yaxes(gridcolor="#E6EAF2", zeroline=False)
     return fig
 
@@ -164,7 +166,7 @@ st.markdown(f"""<div class="hero"><h1>⚡ GridSense</h1><p>Load prediction and t
 tab1, tab2 = st.tabs(["Load Prediction", "Load Balance"])
 
 with tab1:
-    with st.expander("ARIMA settings", expanded=False):
+    with st.expander("ARIMA settings", expanded=True):
         c = st.columns(6)
         p, d_, q = c[0].number_input("p (AR)", 0, 6, 2), c[1].number_input("d (diff)", 0, 2, 0), c[2].number_input("q (MA)", 0, 6, 2)
         win = c[3].number_input("Rolling window (min)", 1, 120, 30); split_pct = c[4].slider("Train split %", 50, 90, 80, 5); block = c[5].number_input("Forecast block (min)", 5, 240, 30, 5)
@@ -193,13 +195,13 @@ with tab1:
         for col, frame, name, color in ((a, R["train"], "Training", CYAN), (b, R["test"], "Test", VIOLET)):
             t, r = gaps(frame.Timestamp, frame.Residual); f = go.Figure(go.Scatter(x=t, y=r, line=dict(color=color, width=1.3), connectgaps=False))
             f.add_hline(y=0, line_dash="dash", line_color=GREY); f.update_layout(title=f"{name} residuals (actual − predicted)", yaxis_title="kW")
-            col.plotly_chart(style(f, 360, False), width="stretch")
+            col.plotly_chart(style(f, 360, False, top=60), width="stretch")
 
 with tab2:
-    with st.expander("Balance settings", expanded=False):
+    with st.expander("ARIMA & balance settings", expanded=True):
         c = st.columns(6)
-        freq = c[0].selectbox("Smoothing", ["30min", "15min"]); p2, d2, q2 = c[1].number_input("p (AR)", 0, 5, 1, key="p2"), c[2].number_input("d (diff)", 0, 2, 1, key="d2"), c[3].number_input("q (MA)", 0, 5, 1, key="q2")
-        hrs = c[4].slider("Test window (hours)", 12, 168, 24, 12); thr = c[5].slider("Alert threshold %", 1.0, 15.0, 5.0, .5)
+        p2, d2, q2 = c[0].number_input("p (AR)", 0, 6, 1, key="p2"), c[1].number_input("d (diff)", 0, 2, 1, key="d2"), c[2].number_input("q (MA)", 0, 6, 1, key="q2")
+        freq = c[3].selectbox("Smoothing", ["30min", "15min"]); hrs = c[4].slider("Test window (hours)", 12, 168, 24, 12); thr = c[5].slider("Alert threshold %", 1.0, 15.0, 5.0, .5)
         mo = st.toggle("Score only on measured bins (ignore interpolated gaps)", False)
     B = balance(df, freq, (p2, d2, q2), hrs, thr, mo); test, det, met, hz = B["test"], B["det"], B["metrics"], list(HORIZONS_MIN)
     tone = "good" if B["latest"] < thr * .6 else ("warn" if B["latest"] < thr else "bad")
@@ -214,11 +216,11 @@ with tab2:
     u1, u2, u3, u4 = st.tabs(["Phase forecasts", "Imbalance alerts", "Accuracy", "Tables"])
     cols = [BLUE, "#D97706", "#059669", VIOLET]
     with u1:
-        f = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=PHASES, vertical_spacing=.07)
+        f = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=PHASES, vertical_spacing=.09)
         for i, ph in enumerate(PHASES, 1):
             f.add_scatter(x=test.index, y=test[ph], name="Actual", line=dict(color=INK, width=2), legendgroup="a", showlegend=i == 1, row=i, col=1)
             for j, h in enumerate(hz): f.add_scatter(x=test.index, y=B["preds"][h][ph], name=f"ARIMA {h}", line=dict(color=cols[j], width=1.5), legendgroup=h, showlegend=i == 1, row=i, col=1)
-        f.update_layout(title=f"{freq} smoothing · ARIMA{(p2, d2, q2)} forecast per phase"); st.plotly_chart(style(f, 760), width="stretch")
+        f.update_layout(title=f"{freq} smoothing · ARIMA{(p2, d2, q2)} forecast per phase"); st.plotly_chart(style(f, 760, legend_y=1.0, top=130), width="stretch")
     with u2:
         f = go.Figure(); f.add_scatter(x=test.index, y=B["act"], name="Actual", line=dict(color=INK, width=2.4))
         for j, h in enumerate(hz):
@@ -231,7 +233,7 @@ with tab2:
         f = go.Figure()
         for ph in PHASES:
             g = met[met.phase == ph]; f.add_bar(x=g.horizon, y=g.R2, name=ph, marker_color=PHASE_COL[ph])
-        f.update_layout(barmode="group", title="R² by horizon and phase", yaxis_title="R²", hovermode="closest"); st.plotly_chart(style(f, 400), width="stretch")
+        f.update_layout(barmode="group", title="R² by horizon and phase", yaxis_title="R²"); st.plotly_chart(style(f, 400).update_layout(hovermode="closest"), width="stretch")
         st.caption("R² falls as the horizon grows: ARIMA is reliable a few steps ahead and drifts toward the mean at 3–6 hours.")
     with u4:
         st.markdown("**Forecast accuracy**"); table(met, 3)
