@@ -101,7 +101,7 @@ def load(upload=None):
     return df.dropna(subset=["Timestamps", "KW"]).sort_values("Timestamps").drop_duplicates("Timestamps").reset_index(drop=True)
 
 
-# ------------------------------------------------------------------ Load prediction (Untitled20 notebook)
+# ------------------------------------------------------------------ Load prediction
 @st.cache_data(show_spinner="Fitting ARIMA on the training data…")
 def predict_kw(df, order, split_pct, block, win):
     series = df.set_index("Timestamps")["KW"].rolling(win, min_periods=win).mean().dropna().astype(float)
