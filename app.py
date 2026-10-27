@@ -121,41 +121,93 @@ def predict_kw(df, order, split_pct, block, win):
                 t0=train.index[0], t1=train.index[-1], t2=test.index[0], t3=test.index[-1])
 
 
-# ------------------------------------------------------------------ Load balance (imbalance_arima_forecasting notebook)
+# ------------------------------------------------------------------ Load balance (imbalance_arima_forecasting_v3 notebook)
+MIN_TRAIN_BINS, MIN_OBS_TEST, TOL_BINS = 60, 12, 1
+
+
 def imbalance_pct(frame):
     mean = frame[PHASES].mean(axis=1).replace(0, np.nan)
     return frame[PHASES].sub(mean, axis=0).abs().max(axis=1) / mean * 100
 
 
+def alert_flags(frame, thr, min_load, min_consec, valid):
+    raw = (imbalance_pct(frame) > thr) & (frame[PHASES].mean(axis=1) >= min_load) & valid
+    run_end = raw.astype(int).rolling(min_consec, min_periods=min_consec).sum() == min_consec
+    sus = run_end.copy()
+    for k in range(1, min_consec):
+        sus = sus | run_end.shift(-k, fill_value=False)
+    return sus
+
+
+def select_order(s, d):
+    best, best_aic = (1, d, 1), np.inf
+    for p, q in itertools.product(range(3), range(3)):
+        try: aic = ARIMA(s, order=(p, d, q)).fit().aic
+        except Exception: continue
+        if aic < best_aic: best, best_aic = (p, d, q), aic
+    return best
+
+
+def rolling_fc(s, n_roll, max_steps, d, manual):
+    fe = len(s) - n_roll
+    if s.iloc[:fe].notna().sum() < MIN_TRAIN_BINS:
+        raise ValueError(f"Fewer than {MIN_TRAIN_BINS} measured training bins - shorten the test window.")
+    order = manual if manual else select_order(s.iloc[:fe], d)
+    r = ARIMA(s.iloc[:fe], order=order).fit()
+    out = np.full((n_roll, max_steps), np.nan)
+    for i in range(n_roll):
+        out[i] = r.forecast(max_steps).values
+        r = r.append(s.iloc[[fe + i]], refit=False)
+    return out, order
+
+
 @st.cache_data(show_spinner="Rolling ARIMA forecast for R / Y / B …")
-def balance(df, freq, order, test_hours, thr, measured_only):
+def balance(df, freq, auto, p, q, test_hours, thr, min_consec, min_load):
     step = pd.Timedelta(freq).total_seconds() / 60
     hz = {k: max(1, round(v / step)) for k, v in HORIZONS_MIN.items()}
     x = df.set_index("Timestamps")[PHASES].apply(pd.to_numeric, errors="coerce").resample(freq).mean()
-    measured = x.notna().all(axis=1); data = x.interpolate(limit_direction="both")
+    x = x.where(x.notna().all(axis=1))
+    ok = x.notna().all(axis=1)
+    full = x.loc[ok[ok].index[0]:ok[ok].index[-1]]
     test_steps = int(test_hours * 60 / step); max_steps = max(hz.values()); warm = max_steps - 1; n_roll = test_steps + warm
-    test = data.iloc[-test_steps:]; mask = measured.iloc[-test_steps:].values
+    test = full.iloc[-test_steps:]; obs = test.notna().all(axis=1)
+    base = dict(share=float(ok.mean()), latest=float(imbalance_pct(df.tail(1)).iloc[0]))
+    if int(obs.sum()) < MIN_OBS_TEST:
+        return dict(error=f"Only {int(obs.sum())} measured bins in the last {test_hours} h (need {MIN_OBS_TEST}). Increase the test window.", **base)
 
-    def rolling(s):
-        fe = len(s) - n_roll; r = ARIMA(s.iloc[:fe], order=order).fit(); out = np.full((n_roll, max_steps), np.nan)
-        for i in range(n_roll):
-            out[i] = r.forecast(max_steps).values; r = r.append(s.iloc[[fe + i]], refit=False)
-        return out
+    mean_s = full[PHASES].mean(axis=1, skipna=False)
+    try:
+        fc_mean, o_mean = rolling_fc(mean_s, n_roll, max_steps, 1, None if auto else (p, 1, q))
+        fc, orders = {}, {"mean": o_mean}
+        for f in PHASES:
+            fc[f], orders[f] = rolling_fc(full[f] - mean_s, n_roll, max_steps, 0, None if auto else (p, 0, q))
+    except ValueError as e:
+        return dict(error=str(e), **base)
 
-    raw = {f: rolling(data[f]) for f in PHASES}
-    preds = {k: pd.DataFrame({f: raw[f][warm + np.arange(test_steps) - s + 1, s - 1] for f in PHASES}, index=test.index) for k, s in hz.items()}
-    use = mask if (measured_only and mask.sum() >= 8) else np.ones(len(test), bool)
+    preds = {}
+    for k, s in hz.items():
+        o = warm + np.arange(test_steps) - s + 1
+        dev = np.column_stack([fc[f][o, s - 1] for f in PHASES]); dev = dev - dev.mean(axis=1, keepdims=True)
+        preds[k] = pd.DataFrame(fc_mean[o, s - 1][:, None] + dev, index=test.index, columns=PHASES)
+
+    act = imbalance_pct(test); a_strict = (act > thr) & obs
+    a_sus = alert_flags(test, thr, min_load, min_consec, obs)
+    near = lambda v: np.convolve(v.astype(int), np.ones(2 * TOL_BINS + 1), mode="same") > 0
     rows, det = [], []
-    act = imbalance_pct(test); aflag = (act > thr).values
     for k, fr in preds.items():
         for f in PHASES:
-            a, p = test[f].values[use], fr[f].values[use]
-            rows.append(dict(horizon=k, phase=f, MAE=mean_absolute_error(a, p), RMSE=np.sqrt(mean_squared_error(a, p)), R2=r2_score(a, p)))
-        imb = imbalance_pct(fr); flag = (imb > thr).values; tp = int((flag & aflag & use).sum()); pf = int((flag & use).sum()); af = int((aflag & use).sum())
-        det.append({"horizon": k, "mean imbalance %": imb.values[use].mean(), "max imbalance %": imb.values[use].max(), "actual alerts": af, "predicted alerts": pf,
-                    "hits": tp, "precision": tp / pf if pf else np.nan, "recall": tp / af if af else np.nan})
-    return dict(test=test, mask=mask, use=use, preds=preds, metrics=pd.DataFrame(rows), det=pd.DataFrame(det), act=act, share=float(measured.mean()), latest=float(imbalance_pct(df.tail(1)).iloc[0]))
-
+            a, pr = test[f][obs], fr[f][obs]
+            rows.append(dict(horizon=k, phase=f, MAE=mean_absolute_error(a, pr), RMSE=np.sqrt(mean_squared_error(a, pr)), R2=r2_score(a, pr)))
+        imb = imbalance_pct(fr); p_sus = alert_flags(fr, thr, min_load, min_consec, obs); av, pv = a_sus.values, p_sus.values
+        hp, ha = int((pv & near(av)).sum()), int((av & near(pv)).sum())
+        prec = hp / pv.sum() if pv.sum() else np.nan; rec = ha / av.sum() if av.sum() else np.nan
+        f1 = 2 * prec * rec / (prec + rec) if (prec == prec and rec == rec and prec + rec > 0) else 0.0
+        s_tp = int(((imb > thr) & obs & a_strict).sum()); s_p = int(((imb > thr) & obs).sum()); s_a = int(a_strict.sum())
+        det.append({"horizon": k, "mean imbalance %": imb[obs].mean(), "max imbalance %": imb[obs].max(), "actual alerts": int(av.sum()), "predicted alerts": int(pv.sum()),
+                    "precision": prec, "recall": rec, "F1": f1,
+                    "strict precision": s_tp / s_p if s_p else np.nan, "strict recall": s_tp / s_a if s_a else np.nan})
+    return dict(test=test, obs=obs, preds=preds, metrics=pd.DataFrame(rows), det=pd.DataFrame(det), act=act, a_sus=a_sus, orders=orders,
+                n_obs=int(obs.sum()), n_alerts=int(a_sus.sum()), **base)
 
 # ------------------------------------------------------------------ page
 up = st.session_state.get("upload")
@@ -200,47 +252,51 @@ with tab1:
 with tab2:
     with st.expander("ARIMA & balance settings", expanded=True):
         c = st.columns(6)
-        p2, d2, q2 = c[0].number_input("p (AR)", 0, 6, 1, key="p2"), c[1].number_input("d (diff)", 0, 2, 1, key="d2"), c[2].number_input("q (MA)", 0, 6, 1, key="q2")
+        auto = c[0].toggle("Auto order (AIC, train only)", True)
+        p2 = c[1].number_input("p (AR)", 0, 4, 1, key="p2", disabled=auto); q2 = c[2].number_input("q (MA)", 0, 4, 1, key="q2", disabled=auto)
         freq = c[3].selectbox("Smoothing", ["30min", "15min"]); hrs = c[4].slider("Test window (hours)", 12, 168, 24, 12); thr = c[5].slider("Alert threshold %", 1.0, 15.0, 5.0, .5)
-        mo = st.toggle("Score only on measured bins (ignore interpolated gaps)", False)
-    B = balance(df, freq, (p2, d2, q2), hrs, thr, mo); test, det, met, hz = B["test"], B["det"], B["metrics"], list(HORIZONS_MIN)
+        c = st.columns(6)
+        minc = c[0].number_input("Alert needs N consecutive bins", 1, 6, 2); minl = c[1].number_input("Ignore load below (kW)", 0.0, 100.0, 10.0, 1.0)
+    B = balance(df, freq, auto, int(p2), int(q2), hrs, thr, int(minc), float(minl))
+    if "error" in B:
+        st.error(B["error"]); st.stop()
+    test, obs, det, met, hz = B["test"], B["obs"], B["det"], B["metrics"], list(HORIZONS_MIN)
     tone = "good" if B["latest"] < thr * .6 else ("warn" if B["latest"] < thr else "bad")
     k = st.columns(4)
     with k[0]: kpi("Imbalance — latest reading", f"{B['latest']:.1f} %", "Balanced" if tone == "good" else "Watch" if tone == "warn" else "Imbalanced", tone)
-    with k[1]: kpi("Peak actual imbalance", f"{B['act'][B['use']].max():.1f} %", f"{int((B['act'] > thr)[B['use']].sum())} bins above {thr:g} %", "warn" if B["act"][B["use"]].max() > thr else "good")
-    with k[2]: kpi("Mean R² (30 min ahead)", f"{met[met.horizon == hz[0]].R2.mean():.2f}", "average of R / Y / B", "info")
-    with k[3]: kpi("Measured bins", f"{B['share'] * 100:.0f} %", f"{int(B['use'].sum())} of {len(test)} scored", "warn" if B["share"] < .5 else "good")
-    if B["share"] < .5:
-        note(f"Only <b>{B['share'] * 100:.0f} %</b> of {freq} bins in the file are real measurements; the rest are filled by interpolation (as in the notebook). Accuracy is flattered by interpolated bins — switch on <i>Score only on measured bins</i> for an honest figure.")
+    with k[1]: kpi("Peak actual imbalance", f"{B['act'][obs].max():.1f} %", f"{B['n_alerts']} bins in sustained alerts", "warn" if B["act"][obs].max() > thr else "good")
+    with k[2]: kpi("Mean R² (30 min ahead)", f"{met[met.horizon == hz[0]].R2.mean():.2f}", "average of R / Y / B · measured bins only", "info")
+    with k[3]: kpi("Measured bins scored", f"{B['n_obs']} of {len(test)}", f"{B['share'] * 100:.0f} % of {freq} bins in the file are measured", "warn" if B["n_obs"] < 30 else "good")
+    note(f"Gaps are <b>not</b> interpolated: the model is trained and scored on measured bins only. The test window holds <b>{B['n_obs']}</b> measured bins and "
+         f"<b>{B['n_alerts']}</b> actual alert bins, so treat every accuracy and alert figure as indicative, not conclusive. "
+         f"Forecast at origin T−h uses data up to T−h only; parameters are fitted once on the training slice and never refit. "
+         f"Orders: mean {B['orders']['mean']}, " + ", ".join(f"{ph} {B['orders'][ph]}" for ph in PHASES) + ".")
+    xr = [test.index[obs.values].min(), test.index[obs.values].max()]
     st.write("")
     u1, u2, u3, u4 = st.tabs(["Phase forecasts", "Imbalance alerts", "Accuracy", "Tables"])
     cols = [BLUE, "#D97706", "#059669", VIOLET]
     with u1:
         f = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=PHASES, vertical_spacing=.09)
         for i, ph in enumerate(PHASES, 1):
-            f.add_scatter(x=test.index, y=test[ph], name="Actual", line=dict(color=INK, width=2), legendgroup="a", showlegend=i == 1, row=i, col=1)
-            for j, h in enumerate(hz): f.add_scatter(x=test.index, y=B["preds"][h][ph], name=f"ARIMA {h}", line=dict(color=cols[j], width=1.5), legendgroup=h, showlegend=i == 1, row=i, col=1)
-        f.update_layout(title=f"{freq} smoothing · ARIMA{(p2, d2, q2)} forecast per phase"); st.plotly_chart(style(f, 760, legend_y=1.0, top=130), width="stretch")
+            f.add_scatter(x=test.index, y=test[ph], name="Actual", mode="lines+markers", marker=dict(size=4), line=dict(color=INK, width=2), legendgroup="a", showlegend=i == 1, row=i, col=1)
+            for j, h in enumerate(hz): f.add_scatter(x=test.index, y=B["preds"][h][ph].where(obs), name=f"ARIMA {h}", line=dict(color=cols[j], width=1.5), legendgroup=h, showlegend=i == 1, row=i, col=1)
+        f.update_layout(title=f"{freq} smoothing · ARIMA forecast per phase (measured bins only)"); f.update_xaxes(range=xr); st.plotly_chart(style(f, 760, legend_y=1.0, top=130), width="stretch")
     with u2:
-        f = go.Figure(); f.add_scatter(x=test.index, y=B["act"], name="Actual", line=dict(color=INK, width=2.4))
+        f = go.Figure(); f.add_scatter(x=test.index, y=B["act"], name="Actual", mode="lines+markers", marker=dict(size=4), line=dict(color=INK, width=2.4))
+        aa = B["act"][B["a_sus"]]; f.add_scatter(x=aa.index, y=aa, mode="markers", name="actual alert", marker=dict(symbol="circle-open", size=12, color=INK))
         for j, h in enumerate(hz):
-            im = imbalance_pct(B["preds"][h]); fl = im[im > thr]
+            im = imbalance_pct(B["preds"][h]).where(obs); fl = im[alert_flags(B["preds"][h], thr, float(minl), int(minc), obs)]
             f.add_scatter(x=im.index, y=im, name=f"ARIMA {h}", line=dict(color=cols[j], width=1.5)); f.add_scatter(x=fl.index, y=fl, mode="markers", name=f"{h} flagged", marker=dict(symbol="x", size=9, color=cols[j]), showlegend=False)
-        f.add_hrect(y0=thr, y1=max(thr * 2, float(B["act"].max()) * 1.1), fillcolor="rgba(225,29,72,.07)", line_width=0); f.add_hline(y=thr, line_dash="dash", line_color=RED, annotation_text=f"threshold {thr:g} %")
-        f.update_layout(title="Load imbalance % on actual vs forecast data (✕ = flagged)", yaxis_title="imbalance %"); st.plotly_chart(style(f, 480), width="stretch")
-        note("Imbalance % = largest phase deviation from the 3-phase mean ÷ the mean × 100. A window is flagged when it crosses the threshold.")
+        f.add_hrect(y0=thr, y1=max(thr * 2, float(B["act"][obs].max()) * 1.1), fillcolor="rgba(225,29,72,.07)", line_width=0); f.add_hline(y=thr, line_dash="dash", line_color=RED, annotation_text=f"threshold {thr:g} %")
+        f.update_layout(title="Load imbalance % on actual vs forecast data (✕ = sustained alert on forecast, ○ = actual sustained alert)", yaxis_title="imbalance %"); f.update_xaxes(range=xr)
+        st.plotly_chart(style(f, 480), width="stretch")
+        note(f"Imbalance % = largest phase deviation from the 3-phase mean ÷ the mean × 100. An alert needs the threshold crossed in ≥ {int(minc)} consecutive measured bins at ≥ {minl:g} kW; a predicted alert is a hit if an actual one is within ±{TOL_BINS} bin.")
     with u3:
         f = go.Figure()
         for ph in PHASES:
             g = met[met.phase == ph]; f.add_bar(x=g.horizon, y=g.R2, name=ph, marker_color=PHASE_COL[ph])
-        f.update_layout(barmode="group", title="R² by horizon and phase", yaxis_title="R²"); st.plotly_chart(style(f, 400).update_layout(hovermode="closest"), width="stretch")
-        st.caption("R² falls as the horizon grows: ARIMA is reliable a few steps ahead and drifts toward the mean at 3–6 hours.")
+        f.update_layout(barmode="group", title="R² by horizon and phase (measured bins only)", yaxis_title="R²"); st.plotly_chart(style(f, 400).update_layout(hovermode="closest"), width="stretch")
+        st.caption("R² below 0 means worse than predicting the window's average. Scored on measured bins only.")
     with u4:
         st.markdown("**Forecast accuracy**"); table(met, 3)
         st.markdown("**Imbalance detection on forecasts**"); table(det, 3)
-
-with st.expander("Use your own meter file"):
-    f_ = st.file_uploader("Upload .xlsx (same columns: Timestamps, KW, RKW, YKW, BKW)", type=["xlsx"])
-    if f_ is not None and st.session_state.get("upload") != f_.getvalue(): st.session_state["upload"] = f_.getvalue(); st.rerun()
-    if up is not None and st.button("Back to bundled dataset"): del st.session_state["upload"]; st.rerun()
-    st.caption("Using: " + ("uploaded file" if up is not None else "bundled SecureElite · Device 19"))
