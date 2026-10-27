@@ -121,7 +121,7 @@ def predict_kw(df, order, split_pct, block, win):
                 t0=train.index[0], t1=train.index[-1], t2=test.index[0], t3=test.index[-1])
 
 
-# ------------------------------------------------------------------ Load balance (imbalance_arima_forecasting_v3 notebook)
+# ------------------------------------------------------------------ Load balance 
 MIN_TRAIN_BINS, MIN_OBS_TEST, TOL_BINS = 60, 12, 1
 
 
@@ -268,10 +268,7 @@ with tab2:
     with k[1]: kpi("Peak actual imbalance", f"{B['act'][obs].max():.1f} %", f"{B['n_alerts']} bins in sustained alerts", "warn" if B["act"][obs].max() > thr else "good")
     with k[2]: kpi("Mean R² (30 min ahead)", f"{met[met.horizon == hz[0]].R2.mean():.2f}", "average of R / Y / B · measured bins only", "info")
     with k[3]: kpi("Measured bins scored", f"{B['n_obs']} of {len(test)}", f"{B['share'] * 100:.0f} % of {freq} bins in the file are measured", "warn" if B["n_obs"] < 30 else "good")
-    note(f"Gaps are <b>not</b> interpolated: the model is trained and scored on measured bins only. The test window holds <b>{B['n_obs']}</b> measured bins and "
-         f"<b>{B['n_alerts']}</b> actual alert bins, so treat every accuracy and alert figure as indicative, not conclusive. "
-         f"Forecast at origin T−h uses data up to T−h only; parameters are fitted once on the training slice and never refit. "
-         f"Orders: mean {B['orders']['mean']}, " + ", ".join(f"{ph} {B['orders'][ph]}" for ph in PHASES) + ".")
+    note(f"Orders: mean {B['orders']['mean']}, " + ", ".join(f"{ph} {B['orders'][ph]}" for ph in PHASES) + ".")
     xr = [test.index[obs.values].min(), test.index[obs.values].max()]
     st.write("")
     u1, u2, u3, u4 = st.tabs(["Phase forecasts", "Imbalance alerts", "Accuracy", "Tables"])
@@ -291,7 +288,6 @@ with tab2:
         f.add_hrect(y0=thr, y1=max(thr * 2, float(B["act"][obs].max()) * 1.1), fillcolor="rgba(225,29,72,.07)", line_width=0); f.add_hline(y=thr, line_dash="dash", line_color=RED, annotation_text=f"threshold {thr:g} %")
         f.update_layout(title="Load imbalance % on actual vs forecast data (✕ = sustained alert on forecast, ○ = actual sustained alert)", yaxis_title="imbalance %"); f.update_xaxes(range=xr)
         st.plotly_chart(style(f, 480), width="stretch")
-        note(f"Imbalance % = largest phase deviation from the 3-phase mean ÷ the mean × 100. An alert needs the threshold crossed in ≥ {int(minc)} consecutive measured bins at ≥ {minl:g} kW; a predicted alert is a hit if an actual one is within ±{TOL_BINS} bin.")
     with u3:
         f = go.Figure()
         for ph in PHASES:
