@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 HERE = Path(__file__).resolve().parent
-FILE = HERE / "SecureElite_DeviceID19_KW_gt_1.xlsx"            # running data only (KW > 1)  -> used for prediction + load balance
+FILE = HERE / "SecureElite_DeviceID19_KW_gt_1.xlsx"            # running data only (KW > 1)  -> used for prediction + balance
 TIMELINE_PARQUET = HERE / "SecureElite_DeviceID19_sorted.parquet"  # full minute data incl. zeros (fast)
 TIMELINE_XLSX = HERE / "SecureElite_DeviceID19_sorted.xlsx"        # same data as xlsx (slow to read, used only if parquet is missing)
 PHASES = ["RKW", "YKW", "BKW"]
@@ -334,32 +334,43 @@ GREY = MUTED
 
 
 # ------------------------------------------------------------------ NEW: future forecasts
-@st.cache_data(show_spinner="Forecasting the next 30 minutes…")
-def forecast_next(meter_df, arima_order, rolling_window_min, horizon_min):
-    """Fit ARIMA on ALL running data and forecast `horizon_min` minutes beyond the last running reading (95 % interval)."""
+@st.cache_data(show_spinner="Forecasting ahead…")
+def forecast_next(meter_df, arima_order, rolling_window_min, max_horizon_min=1440):
+    """Fit ARIMA once on ALL running data and forecast up to 24 h beyond the last running reading (95 % interval).
+    The page then slices out as much as the user asks for."""
     rolling_kw = (meter_df.set_index("Timestamps")["KW"]
                   .rolling(rolling_window_min, min_periods=rolling_window_min).mean().dropna().astype(float))
     arima_fit = ARIMA(rolling_kw.to_numpy(), order=arima_order, enforce_stationarity=False, enforce_invertibility=False).fit()
-    forecast = arima_fit.get_forecast(steps=horizon_min)
+    forecast = arima_fit.get_forecast(steps=max_horizon_min)
     band = np.asarray(forecast.conf_int(alpha=0.05))
     last_time = rolling_kw.index[-1]
-    return dict(times=pd.date_range(last_time + pd.Timedelta(minutes=1), periods=horizon_min, freq="min"),
+    return dict(times=pd.date_range(last_time + pd.Timedelta(minutes=1), periods=max_horizon_min, freq="min"),
                 mean=np.asarray(forecast.predicted_mean), lower=band[:, 0], upper=band[:, 1],
-                last_time=last_time, last_value=float(rolling_kw.iloc[-1]), history=rolling_kw.tail(120))
+                last_time=last_time, last_value=float(rolling_kw.iloc[-1]), history=rolling_kw.tail(720))
 
 
-@st.cache_data(show_spinner="Forecasting the next 30 minutes of phase load…")
-def balance_outlook(df, freq, orders, steps):
-    """Fit the (already selected) ARIMA orders on the full phase series and forecast the next `steps` bins."""
+@st.cache_data(show_spinner="Forecasting phase load ahead…")
+def balance_outlook(df, freq, orders, steps, roll_bins):
+    """Fit the (already selected) ARIMA orders on the full R/Y/B series and forecast `steps` bins ahead.
+    Phase = three-phase mean + its deviation (same construction as the backtest). Phase range is an approximation:
+    sqrt(mean_sd^2 + deviation_sd^2). Also returns recent actuals and their rolling mean for the chart."""
     x = df.set_index("Timestamps")[PHASES].apply(pd.to_numeric, errors="coerce").resample(freq).mean()
     x = x.where(x.notna().all(axis=1)); ok = x.notna().all(axis=1)
     full = x.loc[ok[ok].index[0]:ok[ok].index[-1]]
     mean_series = full[PHASES].mean(axis=1, skipna=False)
-    mean_forecast = ARIMA(mean_series, order=orders["mean"]).fit().forecast(steps)
-    deviation = np.column_stack([ARIMA(full[ph] - mean_series, order=orders[ph]).fit().forecast(steps).to_numpy() for ph in PHASES])
-    deviation = deviation - deviation.mean(axis=1, keepdims=True)
-    forecast = pd.DataFrame(mean_forecast.to_numpy()[:, None] + deviation, index=mean_forecast.index, columns=PHASES)
-    return dict(forecast=forecast, latest=full.iloc[-1], latest_time=full.index[-1])
+    z = 1.96
+    mean_fc = ARIMA(mean_series, order=orders["mean"]).fit().get_forecast(steps)
+    mean_pred, mean_ci = mean_fc.predicted_mean, np.asarray(mean_fc.conf_int(alpha=0.05))
+    mean_sd = (mean_ci[:, 1] - mean_ci[:, 0]) / (2 * z)
+    dev_pred, dev_sd = [], []
+    for ph in PHASES:
+        dev_fc = ARIMA(full[ph] - mean_series, order=orders[ph]).fit().get_forecast(steps)
+        ci = np.asarray(dev_fc.conf_int(alpha=0.05)); dev_pred.append(dev_fc.predicted_mean.to_numpy()); dev_sd.append((ci[:, 1] - ci[:, 0]) / (2 * z))
+    dev = np.column_stack(dev_pred); dev = dev - dev.mean(axis=1, keepdims=True)
+    forecast = pd.DataFrame(mean_pred.to_numpy()[:, None] + dev, index=mean_pred.index, columns=PHASES)
+    sd = pd.DataFrame(np.sqrt(mean_sd[:, None] ** 2 + np.column_stack(dev_sd) ** 2), index=mean_pred.index, columns=PHASES)
+    rolling = full.rolling(roll_bins, min_periods=1).mean().where(full.notna())
+    return dict(forecast=forecast, sd=sd, hist=full.tail(48), roll=rolling.tail(48), latest_time=full.index[-1])
 
 
 # ------------------------------------------------------------------ page
@@ -465,33 +476,50 @@ with tab_live:
 # ================================================================== LOAD PREDICTION (running data only)
 with tab_pred:
     with st.expander("ARIMA settings", expanded=False):
-        c = st.columns(7)
+        c = st.columns(6)
         p, d_, q = c[0].number_input("p (AR)", 0, 6, 2), c[1].number_input("d (diff)", 0, 2, 0), c[2].number_input("q (MA)", 0, 6, 2)
         win = c[3].number_input("Rolling window (min)", 1, 120, 30); split_pct = c[4].slider("Train split %", 50, 90, 80, 5); block = c[5].number_input("Backtest block (min)", 5, 240, 30, 5)
-        horizon = c[6].number_input("Forecast ahead (min)", 5, 120, 30, 5)
     R = predict_kw(df, (p, d_, q), split_pct, int(block), int(win)); mt, mr = R["m_test"], R["m_train"]
-    NX = forecast_next(df, (p, d_, q), int(win), int(horizon))
+    NX = forecast_next(df, (p, d_, q), int(win))
+    last_time = NX["last_time"]; default_until = last_time + pd.Timedelta(minutes=30)
+    LENGTHS = {"30 minutes": 30, "1 hour": 60, "3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}
+    STEPS = {"1 min": 1, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "1 hour": 60}
+    HISTS = {"1 hour": 60, "3 hours": 180, "6 hours": 360, "12 hours": 720}
 
-    # ---- next-30-minute forecast
-    end_value, lo, hi = NX["mean"][-1], NX["lower"][-1], NX["upper"][-1]; chg = (end_value - NX["last_value"]) / NX["last_value"] * 100
-    with panel(f"Next {int(horizon)} minutes", f"ARIMA{(p, d_, q)} forecast from the last running reading · {NX['last_time']:%d %b %Y %H:%M}", key="next"):
+    # ---- future forecast with user-chosen end time, number of points and history
+    with panel("Forecast ahead", f"ARIMA{(p, d_, q)} from the last running reading · {last_time:%d %b %Y %H:%M}", key="next"):
+        c = st.columns(5)
+        length_choice = c[0].selectbox("Forecast length", list(LENGTHS) + ["Custom date & time"], key="len_pred")
+        step_choice = c[1].selectbox("Show a point every", list(STEPS), index=1, key="step_pred")
+        hist_choice = c[2].selectbox("History shown", list(HISTS), index=1, key="hist_pred")
+        custom = length_choice == "Custom date & time"
+        until_date = c[3].date_input("Until date", value=default_until.date(), min_value=last_time.date(), max_value=(last_time + pd.Timedelta(days=1)).date(), disabled=not custom, key="until_date_pred")
+        until_time = c[4].time_input("Until time", value=default_until.time(), step=300, disabled=not custom, key="until_time_pred")
+        horizon = int((pd.Timestamp.combine(until_date, until_time) - last_time).total_seconds() // 60) if custom else LENGTHS[length_choice]
+        horizon = int(min(max(horizon, 1), 1440)); step = min(STEPS[step_choice], horizon)
+        idx = np.unique(np.r_[np.arange(step - 1, horizon, step), horizon - 1])           # which forecast minutes to display
+        t_f, m_f, lo_f, hi_f = NX["times"][idx], NX["mean"][idx], NX["lower"][idx], NX["upper"][idx]
+        end_value, lo, hi = NX["mean"][horizon - 1], NX["lower"][horizon - 1], NX["upper"][horizon - 1]
+        chg = (end_value - NX["last_value"]) / NX["last_value"] * 100
         left, right = st.columns([1, 2.4])
         with left:
-            st.markdown(f"""<div class="hero-f"><div class="l">Expected load</div><div class="big">{end_value:,.0f}<small> kW</small></div>
-<div class="r">95 % range <b>{lo:,.0f} – {hi:,.0f} kW</b> at {NX['times'][-1]:%H:%M}</div><span class="badge flat">{'▲' if chg > 0 else '▼'} {abs(chg):.1f} % vs last {int(win)}-min average</span>
-<div class="mini"><div><b>{NX['last_value']:,.0f}</b><span>last {int(win)}-min avg kW</span></div><div><b>±{mt['RMSE']:.1f}</b><span>typical test error kW</span></div><div><b>{int(horizon)} min</b><span>horizon</span></div></div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="hero-f"><div class="l">Expected load · {NX['times'][horizon - 1]:%d %b %H:%M}</div><div class="big">{end_value:,.0f}<small> kW</small></div>
+<div class="r">95 % range <b>{lo:,.0f} – {hi:,.0f} kW</b></div><span class="badge flat">{'▲' if chg > 0 else '▼'} {abs(chg):.1f} % vs last {int(win)}-min average</span>
+<div class="mini"><div><b>{NX['mean'][:horizon].mean():,.0f}</b><span>average over period kW</span></div><div><b>{len(idx)}</b><span>points shown</span></div><div><b>{horizon / 60:.1f} h</b><span>ahead</span></div></div></div>""", unsafe_allow_html=True)
         with right:
-            hist = NX["history"]; raw_tail = df[df.Timestamps > hist.index[0]]; f = go.Figure()
-            f.add_shape(type="rect", xref="x", yref="paper", x0=NX["last_time"], x1=NX["times"][-1], y0=0, y1=1, fillcolor="rgba(99,102,241,.06)", line_width=0)
-            f.add_scatter(x=raw_tail.Timestamps, y=raw_tail.KW, name="Recorded KW (1 min)", line=dict(color="#CBD5E1", width=1))
-            f.add_scatter(x=hist.index, y=hist.values, name=f"Rolling {int(win)}-min KW", line=dict(color=INK, width=2.2))
-            f.add_scatter(x=list(NX["times"]) + list(NX["times"][::-1]), y=list(NX["upper"]) + list(NX["lower"][::-1]), fill="toself", fillcolor="rgba(99,102,241,.16)", line=dict(width=0), name="95 % range", hoverinfo="skip")
-            f.add_scatter(x=NX["times"], y=NX["mean"], name="Forecast", line=dict(color=FORECAST, width=3))
-            f.add_shape(type="line", xref="x", yref="paper", x0=NX["last_time"], x1=NX["last_time"], y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
-            f.add_annotation(x=NX["last_time"], yref="paper", y=1.0, text="last running reading", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED))
+            hist = NX["history"][NX["history"].index > last_time - pd.Timedelta(minutes=HISTS[hist_choice])]; raw_tail = df[df.Timestamps > last_time - pd.Timedelta(minutes=HISTS[hist_choice])]
+            f = go.Figure()
+            f.add_shape(type="rect", xref="x", yref="paper", x0=last_time, x1=t_f[-1], y0=0, y1=1, fillcolor="rgba(99,102,241,.06)", line_width=0)
+            f.add_scatter(x=raw_tail.Timestamps, y=raw_tail.KW, name="Actual KW (raw, 1 min)", line=dict(color="#CBD5E1", width=1))
+            f.add_scatter(x=hist.index, y=hist.values, name=f"Actual rolling mean ({int(win)} min)", line=dict(color=INK, width=2.2))
+            f.add_scatter(x=list(t_f) + list(t_f[::-1]), y=list(hi_f) + list(lo_f[::-1]), fill="toself", fillcolor="rgba(99,102,241,.16)", line=dict(width=0), name="95 % range", hoverinfo="skip")
+            f.add_scatter(x=t_f, y=m_f, name=f"Forecast ({len(idx)} points)", mode="lines+markers" if len(idx) <= 120 else "lines", line=dict(color=FORECAST, width=3), marker=dict(size=6, color="#fff", line=dict(color=FORECAST, width=2)))
+            f.add_shape(type="line", xref="x", yref="paper", x0=last_time, x1=last_time, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
+            f.add_annotation(x=last_time, yref="paper", y=1.0, text="last running reading", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED))
             f.update_yaxes(title="kW"); show(style(f, 340, True, top=70))
-        with st.expander(f"Forecast table · every 5 minutes"):
-            table(pd.DataFrame({"Time": [t.strftime("%d %b %H:%M") for t in NX["times"][4::5]], "Forecast kW": NX["mean"][4::5], "Lower 95 %": NX["lower"][4::5], "Upper 95 %": NX["upper"][4::5]}), 1)
+        with st.expander(f"Forecast table · {len(idx)} points"):
+            table(pd.DataFrame({"Time": [t.strftime("%d %b %H:%M") for t in t_f], "Forecast kW": m_f, "Lower 95 %": lo_f, "Upper 95 %": hi_f}).head(300), 1)
+        if horizon > 120: note("ARIMA is a short-term model: beyond roughly 1–2 hours the forecast flattens towards the long-run average and the range keeps widening, so treat far-ahead points as a guide, not a prediction.")
     if not S["now_running"]:
         note(f"The meter's last <b>running</b> reading is <b>{S['last_run']:%d %b %Y %H:%M}</b>; from then until {S['last_seen']:%d %b} it logs zero (machine off). This forecast therefore shows what the load would be "
              f"<i>if the machine kept running</i> from its last operating state. With live data, it would update from the newest reading.", "amber")
@@ -507,7 +535,9 @@ with tab_pred:
 
     def line_pair(frame, a, b, title, name_b):
         t, ya, yb = gaps(frame.Timestamp, frame[a], frame[b]); f = go.Figure()
-        f.add_scatter(x=t, y=ya, name="Actual rolling KW", line=dict(color=INK, width=1.8), connectgaps=False)
+        raw = df[(df.Timestamps >= frame.Timestamp.min()) & (df.Timestamps <= frame.Timestamp.max())]; rt, ry = gaps(raw.Timestamps, raw.KW)
+        f.add_scatter(x=rt, y=ry, name="Actual KW (raw, 1 min)", line=dict(color="#CBD5E1", width=1), connectgaps=False)
+        f.add_scatter(x=t, y=ya, name=f"Actual rolling mean ({int(win)} min)", line=dict(color=INK, width=1.8), connectgaps=False)
         f.add_scatter(x=t, y=yb, name=name_b, line=dict(color=FORECAST, width=2, dash="dash"), connectgaps=False)
         f.update_layout(title=title, yaxis_title="Rolling KW"); f.update_xaxes(rangeslider_visible=True); return f
 
@@ -539,23 +569,61 @@ with tab_bal:
     test, obs, det, met, hz = B["test"], B["obs"], B["det"], B["metrics"], list(HORIZONS_MIN)
     tone = "good" if B["latest"] < thr * .6 else ("warn" if B["latest"] < thr else "bad")
 
-    # ---- next-30-minute phase forecast
-    OUT = balance_outlook(df, freq, B["orders"], 2); nxt = OUT["forecast"].iloc[0]; imb_next = float(imbalance_pct(nxt.to_frame().T).iloc[0]); t_next = OUT["forecast"].index[0]
-    gtone = "run" if imb_next < thr * .6 else "warn" if imb_next < thr else "bad"; gtxt = "Balanced" if gtone == "run" else "Watch" if gtone == "warn" else "Imbalanced"
-    with panel("Next 30 minutes", f"forecast for {t_next:%d %b %H:%M} – {(t_next + pd.Timedelta(freq)):%H:%M} · from the last running data ({OUT['latest_time']:%d %b %H:%M})", key="bal_next"):
-        g, pcol = st.columns([1, 1.5])
-        with g:
-            gmax = max(10.0, thr * 2, imb_next * 1.3)
-            f = go.Figure(go.Indicator(mode="gauge+number", value=imb_next, number=dict(suffix=" %", font=dict(size=40, family="JetBrains Mono")),
+    # ---- future phase-load + imbalance forecast with user-chosen end time, number of points, history and rolling mean
+    BIN = pd.Timedelta(freq); last_data_time = df.Timestamps.iloc[-1]; first_bin_start = last_data_time.floor(freq) + BIN
+    LEN_B = {"30 minutes": 1, "1 hour": 2, "3 hours": 6, "6 hours": 12, "12 hours": 24, "24 hours": 48}
+    SHOW_B = {"30 min": 1, "1 hour": 2, "2 hours": 4, "3 hours": 6}
+    HIST_B = {"3 hours": 6, "6 hours": 12, "12 hours": 24, "24 hours": 48}
+    ROLL_B = {"1 hour": 2, "2 hours": 4, "3 hours": 6}
+    with panel("Imbalance forecast", f"ARIMA per phase from the last running data · {last_data_time:%d %b %Y %H:%M} · {freq} bins", key="bal_next"):
+        c = st.columns(3)
+        len_choice = c[0].selectbox("Forecast length", list(LEN_B) + ["Custom date & time"], key="len_bal")
+        custom_b = len_choice == "Custom date & time"; default_b = first_bin_start + BIN
+        until_date_b = c[1].date_input("Until date", value=default_b.date(), min_value=last_data_time.date(), max_value=(last_data_time + pd.Timedelta(days=1)).date(), disabled=not custom_b, key="until_date_bal")
+        until_time_b = c[2].time_input("Until time", value=default_b.time(), step=1800, disabled=not custom_b, key="until_time_bal")
+        c = st.columns(3)
+        show_choice = c[0].selectbox("Show a point every", list(SHOW_B), key="step_bal")
+        hist_choice_b = c[1].selectbox("History shown", list(HIST_B), index=1, key="hist_bal")
+        roll_choice = c[2].selectbox("Rolling mean of actuals", list(ROLL_B), index=1, key="roll_bal")
+        steps = int(np.ceil((pd.Timestamp.combine(until_date_b, until_time_b) - first_bin_start) / BIN)) if custom_b else LEN_B[len_choice]
+        steps = int(min(max(steps, 1), 48)); group = min(SHOW_B[show_choice], steps)
+        OUT = balance_outlook(df, freq, B["orders"], steps, ROLL_B[roll_choice])
+        fc, sd = OUT["forecast"], OUT["sd"]; grp = np.arange(len(fc)) // group
+        agg = fc.groupby(grp).mean(); agg.index = fc.index[::group]; sd_agg = sd.groupby(grp).mean(); sd_agg.index = agg.index
+        imb_f = imbalance_pct(agg); alert_f = (imb_f > thr) & (agg.mean(axis=1) >= minl)
+        peak_imb, peak_time = float(imb_f.max()), imb_f.idxmax()
+        hist, roll = OUT["hist"].tail(HIST_B[hist_choice_b]), OUT["roll"].tail(HIST_B[hist_choice_b])
+        gtone = "run" if peak_imb < thr * .6 else "warn" if peak_imb < thr else "bad"; gtxt = "Balanced" if gtone == "run" else "Watch" if gtone == "warn" else "Imbalanced"
+        left, right = st.columns([1, 2.4])
+        with left:
+            gmax = max(10.0, thr * 2, peak_imb * 1.3)
+            g = go.Figure(go.Indicator(mode="gauge+number", value=peak_imb, number=dict(suffix=" %", font=dict(size=38, family="JetBrains Mono")),
                                        gauge=dict(axis=dict(range=[0, gmax]), bar=dict(color=INK, thickness=.28), bgcolor="#fff", borderwidth=0,
                                                   steps=[dict(range=[0, thr * .6], color="#D1FAE5"), dict(range=[thr * .6, thr], color="#FEF3C7"), dict(range=[thr, gmax], color="#FFE4E6")],
                                                   threshold=dict(line=dict(color=BAD, width=3), thickness=.8, value=thr))))
-            f.update_layout(height=230, margin=dict(l=20, r=20, t=20, b=0), paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter, sans-serif")); show(f, key="gauge")
-            st.markdown(f'<div style="text-align:center"><span class="pill {gtone}">Forecast imbalance · {gtxt}</span></div>', unsafe_allow_html=True)
-        with pcol:
-            st.markdown(phase_bars(list(nxt.values), float(max(nxt.max() * 1.15, 1))), unsafe_allow_html=True)
-            st.markdown("<div style='height:.3rem'></div>" + "".join(f'<span class="chip" style="margin-right:.4rem">{ph[0]}: {nxt[ph] - OUT["latest"][ph]:+.1f} kW vs last bin</span>' for ph in PHASES), unsafe_allow_html=True)
-            st.caption(f"Alert threshold {thr:g} % · imbalance = largest phase deviation from the three-phase mean ÷ the mean.")
+            g.update_layout(height=210, margin=dict(l=20, r=20, t=20, b=0), paper_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter, sans-serif")); show(g, key="gauge")
+            st.markdown(f'<div style="text-align:center"><span class="pill {gtone}">Peak forecast imbalance · {gtxt}</span></div>'
+                        f'<div class="mini" style="justify-content:center"><div><b>{peak_time:%H:%M}</b><span>peak time</span></div><div><b>{int(alert_f.sum())} of {len(agg)}</b><span>points above {thr:g} %</span></div></div>', unsafe_allow_html=True)
+        with right:
+            f = go.Figure()
+            f.add_scatter(x=hist.index, y=imbalance_pct(hist), name="Actual imbalance", mode="lines+markers", line=dict(color=INK, width=1.6), marker=dict(size=4))
+            f.add_scatter(x=roll.index, y=imbalance_pct(roll), name=f"Actual rolling mean ({roll_choice})", line=dict(color="#64748B", width=2, dash="dash"))
+            f.add_scatter(x=agg.index, y=imb_f, name=f"Forecast ({len(agg)} points)", mode="lines+markers", line=dict(color=FORECAST, width=3), marker=dict(size=8, color=[BAD if a_ else "#fff" for a_ in alert_f], line=dict(color=FORECAST, width=2)))
+            f.add_hline(y=thr, line_dash="dash", line_color=BAD, annotation_text=f"alert {thr:g} %")
+            f.add_shape(type="line", xref="x", yref="paper", x0=fc.index[0], x1=fc.index[0], y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
+            f.update_yaxes(title="imbalance %", rangemode="tozero"); show(style(f, 290, True, top=70))
+        f = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=[f"{ph[0]} phase (kW)" for ph in PHASES], vertical_spacing=.09)
+        for i, ph in enumerate(PHASES, 1):
+            up, lo_ = agg[ph] + 1.96 * sd_agg[ph], agg[ph] - 1.96 * sd_agg[ph]
+            f.add_scatter(x=hist.index, y=hist[ph], name="Actual", mode="lines+markers", line=dict(color=INK, width=1.6), marker=dict(size=4), legendgroup="a", showlegend=i == 1, row=i, col=1)
+            f.add_scatter(x=roll.index, y=roll[ph], name=f"Actual rolling mean ({roll_choice})", line=dict(color="#64748B", width=2, dash="dash"), legendgroup="r", showlegend=i == 1, row=i, col=1)
+            f.add_scatter(x=list(agg.index) + list(agg.index[::-1]), y=list(up) + list(lo_[::-1]), fill="toself", fillcolor="rgba(99,102,241,.14)", line=dict(width=0), name="≈95 % range", legendgroup="b", showlegend=i == 1, hoverinfo="skip", row=i, col=1)
+            f.add_scatter(x=agg.index, y=agg[ph], name="Forecast", mode="lines+markers", line=dict(color=FORECAST, width=2.6), marker=dict(size=6, color="#fff", line=dict(color=FORECAST, width=2)), legendgroup="f", showlegend=i == 1, row=i, col=1)
+        f.add_shape(type="line", xref="x", yref="paper", x0=fc.index[0], x1=fc.index[0], y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
+        show(style(f, 620, legend_y=1.0, top=120))
+        with st.expander(f"Forecast table · {len(agg)} points"):
+            table(pd.DataFrame({"Window start": [t.strftime("%d %b %H:%M") for t in agg.index], "R kW": agg.RKW.values, "Y kW": agg.YKW.values, "B kW": agg.BKW.values, "Imbalance %": imb_f.values, "Alert": np.where(alert_f.values, "YES", "–")}), 1)
+        note(f"The range around each phase is approximate. Alerts need imbalance above {thr:g} % <i>and</i> a mean load of at least {minl:g} kW. As with load, far-ahead points drift toward the average.")
     st.write("")
     k = st.columns(4)
     with k[0]: kpi("Imbalance — latest reading", f"{B['latest']:.1f} %", "Balanced" if tone == "good" else "Watch" if tone == "warn" else "Imbalanced", tone, "⚖️")
