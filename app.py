@@ -1,8 +1,7 @@
 """GridSense - machine load intelligence (light mode, ARIMA(2,0,2)).
 Overview     : full minute-level timeline INCLUDING idle (zero) periods   -> SecureElite_DeviceID19_sorted
-Live replay  : stream the recorded data minute by minute                  -> SecureElite_DeviceID19_sorted
-Prediction   : ARIMA(2,0,2) on the 30-min rolling KW, future forecast         -> Untitled20 notebook (sorted file; optional running-only mode)
-Load balance : static ARIMA per phase R/Y/B, outlier-phase alarms, forecast    -> Untitled21 notebook (rows with all phases >= 1 kW)
+Prediction   : ARIMA(2,0,2) on the 30-min rolling KW, future forecast         -> choose dataset: with zeros / without zeros
+Load balance : static ARIMA per phase R/Y/B, outlier-phase alarms, forecast    -> choose dataset: with zeros / without zeros; alert threshold in %
 """
 import io
 import warnings
@@ -201,7 +200,14 @@ LENGTHS = {"30 minutes": 30, "1 hour": 60, "6 hours": 360, "12 hours": 720, "24 
 STEPS = {"1 min": 1, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "1 hour": 60, "3 hours": 180}
 HISTS = {"1 hour": 60, "3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}
 MAX_HORIZON = 10080                                   # 7 days of one-minute steps
-MODE_FULL, MODE_RUN = "Full timeline (as in notebook)", "Running minutes only"
+MODE_FULL, MODE_RUN = "With zeros (full timeline)", "Without zeros (running only, KW > 1)"
+
+
+def dataset_button(label, key):
+    """Button-style switch between the two datasets. Returns MODE_FULL (with zeros) or MODE_RUN (without zeros)."""
+    choice = st.segmented_control(label, [MODE_FULL, MODE_RUN], default=MODE_FULL, key=key,
+                                  help="With zeros = every recorded minute incl. idle (0 kW) time.  Without zeros = only minutes when the machine is running (KW > 1).")
+    return choice or MODE_FULL
 
 # Fitted parameters of the notebook's default model (full timeline, ARIMA(2,0,2), 30-row rolling mean, 95 % train).
 # Fitting that model takes ~65 s, so the app reuses these numbers through model.smooth() - which gives exactly the same
@@ -261,10 +267,12 @@ def predict_kw(meter_df, arima_order, train_split_pct, backtest_block_min, rolli
 
 # ------------------------------------------------------------------ Load balance (Untitled21 notebook)
 @st.cache_data(show_spinner="Preparing the running data…")
-def balance_features(timeline, rolling_minutes):
-    """Rows where ALL three phases are >= 1 kW, then a time-based rolling mean of R / Y / B (first window removed)."""
+def balance_features(timeline, rolling_minutes, with_zeros):
+    """with_zeros=False: only rows where ALL three phases are >= 1 kW.  with_zeros=True: every recorded minute incl. idle zeros.
+    Then a time-based rolling mean of R / Y / B (first window removed)."""
     kept = timeline[["Timestamps"] + PHASES].dropna().sort_values("Timestamps").drop_duplicates("Timestamps", keep="last")
-    kept = kept.loc[(kept[PHASES] >= 1).all(axis=1)].set_index("Timestamps").sort_index()
+    if not with_zeros: kept = kept.loc[(kept[PHASES] >= 1).all(axis=1)]
+    kept = kept.set_index("Timestamps").sort_index()
     rolled = kept[PHASES].rolling(f"{rolling_minutes}min", min_periods=1).mean()
     rolled = rolled.loc[rolled.index >= rolled.index.min() + pd.Timedelta(minutes=rolling_minutes)].dropna()
     return kept, rolled
@@ -303,10 +311,10 @@ S = timeline_summary(tl)
 idle_days = (S["last_seen"] - S["last_run"]).total_seconds() / 86400
 status = (f'<span class="pill run"><span class="dot"></span>Running now</span>' if S["now_running"] else
           f'<span class="pill idle"><span class="dot"></span>Idle · last ran {S["last_run"]:%d %b %H:%M}</span>')
-st.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase balance · live replay</div></div><div class="sp"></div>
+st.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase balance</div></div><div class="sp"></div>
 {status}<span class="chip">Device 19</span><span class="chip">{tl.Timestamps.min():%d %b} → {tl.Timestamps.max():%d %b %Y}</span><span class="chip">{len(tl):,} readings</span></div>""", unsafe_allow_html=True)
 
-tab_overview, tab_live, tab_pred, tab_bal = st.tabs(["Overview", "Live replay", "Load prediction", "Load balance"])
+tab_overview, tab_pred, tab_bal = st.tabs(["Overview", "Load prediction", "Load balance"])
 
 # ================================================================== OVERVIEW (full data incl. zeros)
 with tab_overview:
@@ -343,67 +351,13 @@ with tab_overview:
                              hovertemplate="%{x|%d %b}<br><b>%{y:.1f} h running</b><br>%{customdata[0]:,.0f} kWh · avg %{customdata[1]:.0f} kW<extra></extra>"))
         f.update_layout(hovermode="closest", yaxis_title="hours"); show(style(f, 300, False, top=20))
 
-# ================================================================== LIVE REPLAY (streams the recorded minutes)
-with tab_live:
-    SPEEDS = {"1 min / second": 1, "5 min / second": 5, "15 min / second": 15, "30 min / second": 30}
-    WINDOWS = {"Last 1 hour": 60, "Last 3 hours": 180, "Last 6 hours": 360, "Last 12 hours": 720}
-    on = tl.KW > 1; day_key = tl.Timestamps.dt.date
-    first_on = tl[on].groupby(day_key[on]).apply(lambda g: g.index[0]); minutes_on = on.groupby(day_key).sum()
-    jump_options = {f"{d:%a %d %b} · starts {tl.Timestamps[i]:%H:%M}": max(0, int(i) - 45) for d, i in first_on.items() if minutes_on[d] >= 60}
-    if "cursor" not in st.session_state: st.session_state.cursor, st.session_state.playing = list(jump_options.values())[-1], False
-
-    def toggle_play(): st.session_state.playing = not st.session_state.playing
-    def restart(): st.session_state.cursor, st.session_state.playing = jump_options[st.session_state.jump_sel], False
-    def on_jump(): st.session_state.cursor, st.session_state.playing = jump_options[st.session_state.jump_sel], False
-
-    c = st.columns([1.1, 1, 2.3, 1.5, 1.5])
-    c[0].button("⏸ Pause" if st.session_state.playing else "▶ Start replay", type="primary", on_click=toggle_play, width="stretch")
-    c[1].button("⟲ Restart", on_click=restart, width="stretch")
-    c[2].selectbox("Jump to a running day", list(jump_options), index=len(jump_options) - 1, key="jump_sel", on_change=on_jump)
-    c[3].selectbox("Replay speed", list(SPEEDS), index=1, key="speed_sel")
-    c[4].selectbox("Chart window", list(WINDOWS), index=1, key="win_sel")
-
-    def live_view():
-        cur, step, win = int(st.session_state.cursor), SPEEDS[st.session_state.speed_sel], WINDOWS[st.session_state.win_sel]
-        row, w = tl.iloc[cur], tl.iloc[max(0, cur - win): cur + 1]
-        kw, phases = row.KW, [row.RKW, row.YKW, row.BKW]; is_on = (not pd.isna(kw)) and kw > 1
-        before = tl.KW.iloc[max(0, cur - 5)]
-        delta = "" if pd.isna(kw) or pd.isna(before) else f'<span class="chip">{kw - before:+,.0f} kW vs 5 min ago</span>'
-        mean_ph = np.nanmean(phases) if not np.isnan(phases).all() else np.nan
-        imb = (np.nanmax(np.abs(np.array(phases) - mean_ph)) / mean_ph * 100) if is_on else np.nan
-        imb_tone = "idle" if pd.isna(imb) else "run" if imb < 3 else "warn" if imb < 5 else "bad"
-        pill = ('<span class="pill run"><span class="dot"></span>RUNNING</span>' if is_on else
-                '<span class="pill idle"><span class="dot"></span>NO SIGNAL</span>' if pd.isna(kw) else '<span class="pill idle"><span class="dot"></span>IDLE · 0 kW</span>')
-        left, right = st.columns([1, 2.6])
-        with left:
-            st.markdown(f'<div class="live">{pill}<div class="big">{"–" if pd.isna(kw) else f"{kw:,.0f}"}<small> kW</small></div><div style="color:#64748B;font-size:.85rem">{row.Timestamps:%a %d %b %Y · %H:%M}</div>'
-                        f'<div style="margin:.5rem 0 .9rem">{delta}</div>{phase_bars(phases, 330)}'
-                        f'<div style="margin-top:.9rem" class="pill {imb_tone}">Phase imbalance {"–" if pd.isna(imb) else f"{imb:.1f} %"}</div></div>', unsafe_allow_html=True)
-        with right, st.container(border=True, key="panel_livechart"):
-            f = go.Figure(); f.add_scatter(x=w.Timestamps, y=w.KW, name="Load", line=dict(color=LOAD, width=2.2), fill="tozeroy", fillcolor="rgba(245,158,11,.18)", connectgaps=False)
-            if not pd.isna(kw): f.add_scatter(x=[row.Timestamps], y=[kw], mode="markers", marker=dict(size=13, color=LOAD, line=dict(color="#fff", width=3)), showlegend=False)
-            f.update_yaxes(range=[0, 750], title="kW"); f.update_xaxes(range=[w.Timestamps.iloc[0], w.Timestamps.iloc[0] + pd.Timedelta(minutes=win)])
-            show(style(f, 360, False, top=20), key="live_chart")
-            st.caption(f"Replaying recorded data · minute {cur + 1:,} of {len(tl):,} · stream advances {step} min of data per second")
-        k = st.columns(4)
-        volt = np.nanmean([row.V1, row.V2, row.V3]); amps = np.nanmean([row.I1, row.I2, row.I3])
-        with k[0]: kpi("Voltage (avg)", "–" if pd.isna(volt) else f"{volt:,.0f} V", "three-phase mean", "", "🔌", w[["V1", "V2", "V3"]].mean(axis=1).values, CYAN)
-        with k[1]: kpi("Current (avg)", "–" if pd.isna(amps) else f"{amps:,.0f} A", f"I1 {row.I1:,.0f} · I2 {row.I2:,.0f} · I3 {row.I3:,.0f}" if is_on else "no load", "", "🧲", w[["I1", "I2", "I3"]].mean(axis=1).values, VIOLET)
-        with k[2]: kpi("Power factor", "–" if pd.isna(row.PF) else f"{row.PF:.2f}", "1.00 = ideal", "good" if is_on and row.PF > .9 else "", "🎯")
-        with k[3]: kpi("Apparent power", "–" if pd.isna(row.KVA) else f"{row.KVA:,.0f} kVA", "kW ÷ power factor", "", "⚡", w.KVA.values, LOAD)
-        if st.session_state.playing:
-            if cur >= len(tl) - 1: st.session_state.playing = False; st.rerun()
-            st.session_state.cursor = min(cur + step, len(tl) - 1)
-
-    st.fragment(run_every=1.0 if st.session_state.playing else None)(live_view)()
-
 # ================================================================== LOAD PREDICTION (Untitled20 notebook)
 with tab_pred:
+    data_mode = dataset_button("Dataset to forecast on", "ds_pred")
     with st.expander("ARIMA settings", expanded=False):
-        c = st.columns(7)
-        data_mode = c[0].selectbox("Training data", [MODE_FULL, MODE_RUN], help="The notebook trains on the full sorted file, which is mostly idle (zero) minutes. 'Running minutes only' trains on the KW > 1 file instead.")
-        p, d_, q = c[1].number_input("p (AR)", 0, 6, 2), c[2].number_input("d (diff)", 0, 2, 0), c[3].number_input("q (MA)", 0, 6, 2)
-        win = c[4].number_input("Rolling window (min)", 1, 120, 30); split_pct = c[5].slider("Train split %", 50, 99, 95); block = c[6].number_input("Backtest block (min)", 5, 240, 60, 5)
+        c = st.columns(6)
+        p, d_, q = c[0].number_input("p (AR)", 0, 6, 2), c[1].number_input("d (diff)", 0, 2, 0), c[2].number_input("q (MA)", 0, 6, 2)
+        win = c[3].number_input("Rolling window (min)", 1, 120, 30); split_pct = c[4].slider("Train split %", 50, 99, 95); block = c[5].number_input("Backtest block (min)", 5, 240, 60, 5)
     src = tl if data_mode == MODE_FULL else df
     R = predict_kw(src[["Timestamps", "KW"]], (p, d_, q), split_pct, int(block), int(win)); mt, mr = R["m_test"], R["m_train"]
     NX = R["future"]; last_time = NX["last_time"]; default_until = last_time + pd.Timedelta(minutes=30)
@@ -456,7 +410,7 @@ with tab_pred:
         if horizon > 120: note("ARIMA is a short-term model: beyond roughly 1–2 hours the forecast flattens towards the long-run average and the range keeps widening, so treat far-ahead points as a guide, not a prediction.")
     if data_mode == MODE_FULL and R["idle_share"] > .5:
         note(f"<b>Why the forecast is near zero:</b> as in your notebook, the model is trained on the full timeline, which is <b>{R['idle_share'] * 100:.0f} % idle (0 kW)</b>. The data ends in an idle period "
-             f"({last_time:%d %b}), so the forecast starts near 0 kW and only drifts towards the long-run average of about {R['level']:.0f} kW. For a forecast of the machine's <i>running</i> load, set <b>Training data → Running minutes only</b> in the settings above.", "amber")
+             f"({last_time:%d %b}), so the forecast starts near 0 kW and only drifts towards the long-run average of about {R['level']:.0f} kW. For a forecast of the machine's <i>running</i> load, switch the dataset button above to <b>Without zeros</b>.", "amber")
 
     st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b><span>how well the same ARIMA predicted data it had not seen</span></div>', unsafe_allow_html=True)
     k = st.columns(4)
@@ -492,12 +446,17 @@ with tab_pred:
 
 # ================================================================== LOAD BALANCE (Untitled21 notebook)
 with tab_bal:
-    with st.expander("ARIMA & alert settings", expanded=False):
-        c = st.columns(5)
+    top = st.columns([2.4, 1.1])
+    with top[0]: bal_mode = dataset_button("Dataset to forecast on", "ds_bal")
+    thr = top[1].number_input("Alert threshold (%)", 0.5, 100.0, 5.0, 0.5, format="%.1f", key="thr_b",
+                              help="A phase raises an alarm when it differs from the average of the other two phases by more than this percentage.")
+    with st.expander("ARIMA settings", expanded=False):
+        c = st.columns(4)
         pb, db, qb = c[0].number_input("p (AR)", 0, 6, 2, key="pb"), c[1].number_input("d (diff)", 0, 2, 0, key="db"), c[2].number_input("q (MA)", 0, 6, 2, key="qb")
-        roll_min = c[3].number_input("Rolling window (min)", 5, 120, 30, key="roll_b"); thr = c[4].slider("Alert threshold %", 1.0, 15.0, 5.0, .5, key="thr_b")
-    raw_b, rolled = balance_features(tl, int(roll_min))
-    if len(rolled) < 200: st.error("Not enough running data (all three phases ≥ 1 kW) to train the phase models."); st.stop()
+        roll_min = c[3].number_input("Rolling window (min)", 5, 120, 30, key="roll_b")
+    with_zeros = bal_mode == MODE_FULL
+    raw_b, rolled = balance_features(tl, int(roll_min), with_zeros)
+    if len(rolled) < 200: st.error("Not enough data in this dataset to train the phase models. Try the other dataset."); st.stop()
     BF = balance_forecast(rolled, (pb, db, qb)); last_b = BF["last_time"]; default_b = last_b + pd.Timedelta(minutes=30)
     if st.session_state.get("anchor_bal") != last_b:
         st.session_state.update(anchor_bal=last_b, until_date_bal=default_b.date(), until_time_bal=default_b.time(), len_bal="30 minutes")
@@ -508,16 +467,20 @@ with tab_bal:
 
     def until_changed_bal(): st.session_state.len_bal = CUSTOM
 
+    idle_share_b = float(raw_b[PHASES].lt(1).all(axis=1).mean())
+    if with_zeros and idle_share_b > .5:
+        note(f"<b>With zeros:</b> this dataset is <b>{idle_share_b * 100:.0f} % idle (0 kW)</b> and it ends in an idle period ({last_b:%d %b}), so the phase forecasts start near 0 kW and drift towards the average. "
+             "Alarms need all phases above 0 kW, so few or none will fire. Switch to <b>Without zeros</b> to forecast the running load.", "amber")
     alarms_30, alarms_60 = (phase_alarms(BF["pred"].iloc[:n_], thr)[1] for n_ in (30, 60))
     k = st.columns(4)
-    with k[0]: kpi("Observations used", f"{len(rolled):,}", f"{int(roll_min)}-min rolling mean · all 3 phases ≥ 1 kW", "info", "🧮")
+    with k[0]: kpi("Observations used", f"{len(rolled):,}", f"{int(roll_min)}-min rolling mean · " + ("incl. idle zero minutes" if with_zeros else "all 3 phases ≥ 1 kW"), "info", "🧮")
     with k[1]: kpi("Training period", f"{rolled.index.min():%d %b} → {last_b:%d %b}", f"static ARIMA{(pb, db, qb)} · trained on 100 % of the data", "", "🗓️")
     with k[2]: kpi("Alarm points · next 30 min", f"{int(alarms_30.to_numpy().sum())}", " · ".join(f"{ph[0]} {int(alarms_30[ph].sum())}" for ph in PHASES), "good" if not alarms_30.to_numpy().any() else "bad", "🚨")
     with k[3]: kpi("Alarm points · next 1 hour", f"{int(alarms_60.to_numpy().sum())}", " · ".join(f"{ph[0]} {int(alarms_60[ph].sum())}" for ph in PHASES), "good" if not alarms_60.to_numpy().any() else "bad", "🚨")
     st.write("")
 
     # ---- phase forecast + alarms with user-chosen end time, number of points and history
-    with panel("Phase forecast & imbalance alarms", f"one ARIMA per phase · one step = one observation (≈ 1 min) · starts after the last running data · {last_b:%d %b %Y %H:%M}", key="bal_next"):
+    with panel("Phase forecast & imbalance alarms", f"one ARIMA per phase · one step = one observation (≈ 1 min) · starts after the last data point · {last_b:%d %b %Y %H:%M}", key="bal_next"):
         c = st.columns(5)
         c[0].selectbox("Forecast length", list(LENGTHS) + [CUSTOM], key="len_bal", on_change=length_changed_bal)
         step_choice_b = c[1].selectbox("Show a point every", list(STEPS), index=1, key="step_bal")
