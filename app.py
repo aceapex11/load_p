@@ -293,19 +293,16 @@ def balance_forecast(rolled, arima_order):
 
 
 def phase_alarms(forecast, threshold):
-    """Notebook rule (+ all-3 rule): a phase is the outlier when the OTHER two phases are within `threshold` % of each other
-    while this phase differs from their average by more than `threshold` %. Returns (gap % per phase, alarm flags per phase)."""
+    """A phase raises an alarm whenever it differs from the average of the OTHER two phases by more than `threshold` %.
+    Each phase is judged on its own, so one, two or all three phases can alarm at the same time.
+    Returns (gap % per phase, alarm flags per phase)."""
     gap, alarm = {}, {}
     for phase in PHASES:
         a, b = [p for p in PHASES if p != phase]
         pair_mean = (forecast[a] + forecast[b]) / 2
-        other_pair_difference = (forecast[a] - forecast[b]).abs() / ((forecast[a] + forecast[b]).abs() / 2).replace(0, np.nan) * 100
         gap[phase] = (forecast[phase] - pair_mean).abs() / pair_mean.abs().replace(0, np.nan) * 100
-        alarm[phase] = ((other_pair_difference <= threshold) & (gap[phase] > threshold) & (forecast[a] > 0) & (forecast[b] > 0) & (pair_mean > 0)).fillna(False)
-    gap, alarm = pd.DataFrame(gap), pd.DataFrame(alarm)
-    all_above = (gap > threshold).all(axis=1)             # extra rule: all 3 phases are above the threshold -> alarm on all 3 phases
-    alarm = alarm.apply(lambda col: col | all_above)
-    return gap, alarm
+        alarm[phase] = ((gap[phase] > threshold) & (pair_mean > 0)).fillna(False)
+    return pd.DataFrame(gap), pd.DataFrame(alarm)
 
 
 # ------------------------------------------------------------------ page
@@ -533,6 +530,5 @@ with tab_bal:
         export = pd.concat([pd.DataFrame({"Timestamp": fc_b.index, "ObservationNo": np.arange(BF["last_observation"] + 1, BF["last_observation"] + horizon_b + 1), "Phase": ph, "Predicted_KW": fc_b[ph].to_numpy(), "ImbalanceAlarm": alarm_b[ph].to_numpy()}) for ph in PHASES], ignore_index=True)
         d1.download_button("⬇ Forecasts + alarms (CSV)", export.to_csv(index=False).encode(), "RYB_ARIMA_Forecasts_Imbalance_Alarms.csv", "text/csv", on_click="ignore", width="stretch")
         d2.download_button(f"⬇ {int(roll_min)}-min rolling features (CSV)", rolled.reset_index().assign(ObservationNo=np.arange(1, len(rolled) + 1)).to_csv(index=False).encode(), "RYB_30min_Rolling_Features.csv", "text/csv", on_click="ignore", width="stretch")
-    note(f"<b>Alarm rule:</b> a phase is flagged when the <i>other two</i> phases are within {thr:g} % of each other, while this phase differs from their average by more than {thr:g} %. "
-         f"<b>Also:</b> when <i>all three</i> phases are more than {thr:g} % away from the average of the other two, all three phases are flagged. "
+    note(f"<b>Alarm rule:</b> a phase is flagged whenever it differs from the average of the <i>other two</i> phases by more than {thr:g} %. Each phase is checked on its own, so one, two or all three can be flagged at the same time. "
          "Steps are observations, assumed one minute apart; the range around each forecast is the model's 95 % interval.")
