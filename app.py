@@ -142,9 +142,9 @@ def show(fig, key=None):
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=key)
 
 
-def gaps(t, *arrays):
-    """Break plot lines wherever the timestamp jumps by more than 1 minute (as in the notebook)."""
-    t = pd.DatetimeIndex(t).values; brk = np.where(np.diff(t) > np.timedelta64(1, "m"))[0] + 1
+def gaps(t, *arrays, step=1):
+    """Break plot lines wherever the timestamp jumps by more than `step` minutes (1 for full data; the thinning step when rows were skipped)."""
+    t = pd.DatetimeIndex(t).values; brk = np.where(np.diff(t) > np.timedelta64(step, "m"))[0] + 1
     if not len(brk): return (t, *[np.asarray(a, float) for a in arrays])
     return (np.insert(t, brk, t[brk - 1] + np.timedelta64(30, "s")), *[np.insert(np.asarray(a, float), brk, np.nan) for a in arrays])
 
@@ -213,6 +213,11 @@ def dataset_button(label, key):
 # Fitting that model takes ~65 s, so the app reuses these numbers through model.smooth() - which gives exactly the same
 # results as .fit(). They are only used when the training series is identical (checked below); every other setting is fitted from scratch.
 SAVED_FIT = dict(order=(2, 0, 2), n_train=92962, train_end="2024-11-06 07:06:00", params=[25.501715174988526, 1.9706117515295842, -0.9707191716482642, -0.6595154250758719, 0.05126904956450774, 0.42126987828231904])
+
+
+def thin_step(frame, max_points=4000):
+    """Every how-many-th row thin() keeps."""
+    return max(1, int(np.ceil(len(frame) / max_points)))
 
 
 def thin(frame, max_points=4000):
@@ -421,7 +426,7 @@ with tab_pred:
     s1, s2, s3 = st.tabs(["Test forecast", "Training fit", "Residuals"])
 
     def line_pair(frame, a, b, title, name_b):
-        shown = thin(frame); t, ya, yb = gaps(shown.Timestamp, shown[a], shown[b]); f = go.Figure()
+        shown = thin(frame); t, ya, yb = gaps(shown.Timestamp, shown[a], shown[b], step=thin_step(frame)); f = go.Figure()
         f.add_scatter(x=t, y=ya, name=f"Actual rolling mean ({int(win)} min)", mode="lines", line=dict(color=INK, width=1.8), connectgaps=False)
         f.add_scatter(x=t, y=yb, name=name_b, mode="lines", line=dict(color=FORECAST, width=2, dash="dash"), connectgaps=False)
         f.update_layout(title=title, yaxis_title="Rolling KW"); f.update_xaxes(rangeslider_visible=True); return f
@@ -436,7 +441,7 @@ with tab_pred:
     with s3:
         a, b = st.columns(2)
         for col, frame, name, color in ((a, R["train"], "Training", CYAN), (b, R["test"], "Test", VIOLET)):
-            shown = thin(frame); t, r = gaps(shown.Timestamp, shown.Residual); f = go.Figure(go.Scatter(x=t, y=r, mode="lines", line=dict(color=color, width=1.3), connectgaps=False))
+            shown = thin(frame); t, r = gaps(shown.Timestamp, shown.Residual, step=thin_step(frame)); f = go.Figure(go.Scatter(x=t, y=r, mode="lines", line=dict(color=color, width=1.3), connectgaps=False))
             f.add_hline(y=0, line_dash="dash", line_color=GREY); f.update_layout(title=f"{name} residuals (actual − predicted)", yaxis_title="kW")
             with col, st.container(border=True, key=f"panel_res_{name}"): show(style(f, 340, False, top=60))
 
