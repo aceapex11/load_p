@@ -393,11 +393,10 @@ with tab_pred:
 <div class="mini"><div><b>{NX['mean'][:horizon].mean():,.1f}</b><span>average over period kW</span></div><div><b>{len(idx)}</b><span>points shown</span></div><div><b>{horizon / 60:.1f} h</b><span>ahead</span></div></div></div>""", unsafe_allow_html=True)
         with right:
             window_start = last_time - pd.Timedelta(minutes=HISTS[hist_choice])
-            hist = NX["history"][NX["history"].index > window_start]; raw_tail = src[src.Timestamps > window_start]
+            hist = NX["history"][NX["history"].index > window_start]
             f = go.Figure()
             f.add_shape(type="rect", xref="x", yref="paper", x0=last_time, x1=t_f[-1], y0=0, y1=1, fillcolor="rgba(99,102,241,.06)", line_width=0)
             anchor_value, tt = NX["last_value"], [last_time] + list(t_f)          # start the forecast exactly at the last actual point (no gap)
-            f.add_scatter(x=raw_tail.Timestamps, y=raw_tail.KW, name="Actual KW (raw, 1 min)", mode="lines", line=dict(color="#CBD5E1", width=1))
             f.add_scatter(x=hist.index, y=hist.values, name=f"Actual rolling mean ({int(win)} min)", mode="lines", line=dict(color=INK, width=2.2))
             f.add_scatter(x=tt + tt[::-1], y=[anchor_value] + list(hi_f) + ([anchor_value] + list(lo_f))[::-1], fill="toself", fillcolor="rgba(99,102,241,.16)", mode="lines", line=dict(width=0), name="95 % range", hoverinfo="skip")
             f.add_scatter(x=tt, y=[anchor_value] + list(m_f), name=f"Forecast ({len(idx)} points)", mode="lines", line=dict(color=FORECAST, width=3))
@@ -423,9 +422,6 @@ with tab_pred:
 
     def line_pair(frame, a, b, title, name_b):
         shown = thin(frame); t, ya, yb = gaps(shown.Timestamp, shown[a], shown[b]); f = go.Figure()
-        if len(frame) <= 20000:                                                  # raw 1-minute KW behind (skipped for the very long training period)
-            raw = src[(src.Timestamps >= frame.Timestamp.min()) & (src.Timestamps <= frame.Timestamp.max())]; rt, ry = gaps(raw.Timestamps, raw.KW)
-            f.add_scatter(x=rt, y=ry, name="Actual KW (raw, 1 min)", mode="lines", line=dict(color="#CBD5E1", width=1), connectgaps=False)
         f.add_scatter(x=t, y=ya, name=f"Actual rolling mean ({int(win)} min)", mode="lines", line=dict(color=INK, width=1.8), connectgaps=False)
         f.add_scatter(x=t, y=yb, name=name_b, mode="lines", line=dict(color=FORECAST, width=2, dash="dash"), connectgaps=False)
         f.update_layout(title=title, yaxis_title="Rolling KW"); f.update_xaxes(rangeslider_visible=True); return f
@@ -499,12 +495,11 @@ with tab_bal:
                         f'<div class="mini"><div><b>{gap_b.max().max():.1f} %</b><span>largest phase gap</span></div><div><b>{thr:g} %</b><span>alarm threshold</span></div></div></div>', unsafe_allow_html=True)
 
         window_start_b = last_b - pd.Timedelta(minutes=HISTS[hist_choice_b])
-        roll_hist, raw_hist = rolled[rolled.index > window_start_b], raw_b[raw_b.index > window_start_b]
+        roll_hist = rolled[rolled.index > window_start_b]
         t_fb = fc_b.index[idx_b]; tt_b = [last_b] + list(t_fb)
         f = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=[f"{ph[0]} phase (kW)" for ph in PHASES], vertical_spacing=.09)
         for i, ph in enumerate(PHASES, 1):
             a_v = float(rolled[ph].iloc[-1]); up_, lo_ = BF["upper"][ph].iloc[:horizon_b].iloc[idx_b], BF["lower"][ph].iloc[:horizon_b].iloc[idx_b]       # forecast starts at the last actual point (no gap)
-            f.add_scatter(x=raw_hist.index, y=raw_hist[ph], name="Actual (raw, 1 min)", mode="lines", line=dict(color="#CBD5E1", width=1), legendgroup="raw", showlegend=i == 1, row=i, col=1)
             f.add_scatter(x=roll_hist.index, y=roll_hist[ph], name=f"Actual rolling mean ({int(roll_min)} min)", mode="lines", line=dict(color=INK, width=2), legendgroup="r", showlegend=i == 1, row=i, col=1)
             f.add_scatter(x=tt_b + tt_b[::-1], y=[a_v] + list(up_) + ([a_v] + list(lo_))[::-1], fill="toself", fillcolor="rgba(99,102,241,.14)", mode="lines", line=dict(width=0), name="95 % range", legendgroup="b", showlegend=i == 1, hoverinfo="skip", row=i, col=1)
             f.add_scatter(x=tt_b, y=[a_v] + list(fc_b[ph].iloc[idx_b]), name="Forecast", mode="lines", line=dict(color=FORECAST, width=2.6), legendgroup="f", showlegend=i == 1, row=i, col=1)
