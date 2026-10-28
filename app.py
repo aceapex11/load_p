@@ -492,20 +492,11 @@ with tab_bal:
         st.caption(f"Forecasting {horizon_b} steps ahead, until {last_b + pd.Timedelta(minutes=horizon_b):%a %d %b %H:%M} · one point every {step_b} min" + (" (capped at 7 days)" if horizon_raw_b > MAX_HORIZON else " (end time was before the last data point, so showing 1 step)" if horizon_raw_b < 1 else ""))
         idx_b = np.unique(np.r_[np.arange(step_b - 1, horizon_b, step_b), horizon_b - 1])
         fc_b = BF["pred"].iloc[:horizon_b]; gap_b, alarm_b = phase_alarms(fc_b, thr); n_alarms = int(alarm_b.to_numpy().sum())
-        left, right = st.columns([1, 2.4])
-        with left:
+        with st.container():
             pill = '<span class="pill run"><span class="dot"></span>No imbalance alarm</span>' if n_alarms == 0 else f'<span class="pill bad"><span class="dot"></span>{n_alarms} alarm points</span>'
             end_vals = list(fc_b.iloc[-1].values)
             st.markdown(f'<div class="live">{pill}<div style="color:#64748B;font-size:.85rem;margin:.6rem 0 .3rem">Forecast at {fc_b.index[-1]:%d %b %H:%M}</div>{phase_bars(end_vals, max(end_vals) * 1.15)}'
                         f'<div class="mini"><div><b>{gap_b.max().max():.1f} %</b><span>largest phase gap</span></div><div><b>{thr:g} %</b><span>alarm threshold</span></div></div></div>', unsafe_allow_html=True)
-        with right:
-            f = go.Figure()
-            for ph in PHASES: f.add_scatter(x=fc_b.index[idx_b], y=gap_b[ph].iloc[idx_b], name=f"{ph[0]} phase", mode="lines", line=dict(color=PHASE_COL[ph], width=2.2))
-            for ph in PHASES:
-                hit = gap_b[ph][alarm_b[ph]]
-                if len(hit): f.add_scatter(x=hit.index, y=hit.values, name=f"{ph[0]} alarm", mode="markers", marker=dict(symbol="x", size=10, color=BAD), hoverinfo="skip")
-            f.add_hline(y=thr, line_dash="dash", line_color=BAD, annotation_text=f"threshold {thr:g} %")
-            f.update_yaxes(title="gap vs the other two phases (%)", rangemode="tozero"); f.update_layout(title="How far each phase is from the average of the other two"); show(style(f, 290, True, top=70))
 
         window_start_b = last_b - pd.Timedelta(minutes=HISTS[hist_choice_b])
         roll_hist, raw_hist = rolled[rolled.index > window_start_b], raw_b[raw_b.index > window_start_b]
