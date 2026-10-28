@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 HERE = Path(__file__).resolve().parent
-FILE = HERE / "SecureElite_DeviceID19_KW_gt_1.xlsx"            # running data only (KW > 1)  -> used for prediction + balance
+FILE = HERE / "SecureElite_DeviceID19_KW_gt_1.xlsx"            # running data only (KW > 1)  -> used for prediction + load balance
 TIMELINE_PARQUET = HERE / "SecureElite_DeviceID19_sorted.parquet"  # full minute data incl. zeros (fast)
 TIMELINE_XLSX = HERE / "SecureElite_DeviceID19_sorted.xlsx"        # same data as xlsx (slow to read, used only if parquet is missing)
 PHASES = ["RKW", "YKW", "BKW"]
