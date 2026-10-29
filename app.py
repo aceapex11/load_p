@@ -99,6 +99,7 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 .bar .trk { height:8px; background:#EEF1F7; border-radius:99px; margin-top:.25rem; overflow:hidden; } .bar .fil { height:100%; border-radius:99px; }
 .note { border-left:3px solid #6366F1; background:#F4F5FF; padding:.7rem 1rem; border-radius:0 12px 12px 0; color:#475569 !important; font-size:.88rem; margin:.5rem 0 .9rem; } .note b, .note i { color:#1E293B !important; }
 .note.amber { border-left-color:#F59E0B; background:#FFF8EB; }
+.note.good { border-left-color:#10B981; background:#E8FAF3; } .note.bad { border-left-color:#F43F5E; background:#FFF1F3; } .note ul { margin:.4rem 0 0 1.1rem; padding:0; } .note li { margin:.15rem 0; }
 .tblwrap { overflow-x:auto; border:1px solid #E6EAF2; border-radius:14px; background:#FFFFFF; margin:.4rem 0 1rem; }
 table.tbl { border-collapse:collapse; width:100%; font-size:.84rem; } table.tbl th { text-align:right; background:#F7F9FC; color:#64748B !important; font-weight:600; padding:.55rem .8rem; border-bottom:1px solid #E6EAF2; white-space:nowrap; }
 table.tbl td { text-align:right; padding:.5rem .8rem; border-bottom:1px solid #F0F3F8; color:#0F172A !important; font-family:'JetBrains Mono',monospace; font-size:.8rem; } table.tbl th:first-child, table.tbl td:first-child { text-align:left; }
@@ -308,6 +309,102 @@ def phase_alarms(forecast, threshold):
     return pd.DataFrame(gap), pd.DataFrame(alarm)
 
 
+# ------------------------------------------------------------------ power summary helpers (energy, first / last point, averaged blocks, advice)
+AVG_BLOCKS = {"30 min": 30, "1 hour": 60, "2 hours": 120, "3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}
+
+
+def span_text(minutes):
+    minutes = int(minutes)
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h" if minutes % 60 == 0 else f"{minutes / 60:.1f} h"
+
+
+def block_averages(values, last_time, minutes):
+    """Average of the 1-minute forecast over consecutive blocks of `minutes` (the last block may be shorter), with the change from block to block."""
+    v = pd.Series(np.asarray(values, float), index=pd.date_range(last_time + pd.Timedelta(minutes=1), periods=len(values), freq="min"))
+    rows = [(v.index[i], v.index[min(i + minutes, len(v)) - 1], float(v.iloc[i:i + minutes].mean()), len(v.iloc[i:i + minutes])) for i in range(0, len(v), minutes)]
+    out = pd.DataFrame(rows, columns=["Start", "End", "Avg kW", "Minutes"])
+    out["Change kW"] = out["Avg kW"].diff()
+    prev = out["Avg kW"].shift(1)
+    out["Change %"] = np.where(prev >= 1, out["Change kW"] / prev * 100, np.nan)
+    return out
+
+
+def block_label(row):
+    return f"{row.Start:%d %b %H:%M} → {row.End:%H:%M}"
+
+
+def trend_kind(first, last):
+    """idle / flat / up / down - a change counts only if it is at least 1 kW and 5 % of the larger value."""
+    top = max(abs(first), abs(last))
+    if top < 1: return "idle"
+    if abs(last - first) < max(1.0, 0.05 * top): return "flat"
+    return "up" if last > first else "down"
+
+
+def pct_change(first, last):
+    return (last - first) / first * 100 if first >= 1 else float("nan")
+
+
+def pct_text(p):
+    return "" if pd.isna(p) else f" ({p:+.1f} %)"
+
+
+def advice_html(head, actions):
+    return f"<b>{head}</b><ul>" + "".join(f"<li>{a}</li>" for a in actions) + "</ul>"
+
+
+def power_advice(kind, first, last, peak, long_horizon):
+    """What to do when the total power requirement is rising / falling / steady. Returns (note tone, headline, actions)."""
+    p = pct_text(pct_change(first, last))
+    if kind == "up":
+        tone, head = "amber", f"Power requirement is rising: {first:,.1f} → {last:,.1f} kW{p}"
+        acts = [f"Check the expected peak (<b>{peak:,.1f} kW</b>) against your sanctioned / contract demand and the rating of the incoming supply, transformer and breakers.",
+                "Stagger the start-up of large motors and move deferrable loads (batch jobs, pumps, charging) to later or off-peak hours.",
+                "Check the power factor and capacitor banks before the rise, so the extra kW does not also push up the kVA demand.",
+                "If the rise continues in the next forecast, plan extra capacity or a load-shedding sequence for non-critical equipment."]
+    elif kind == "down":
+        tone, head = "good", f"Power requirement is falling: {first:,.1f} → {last:,.1f} kW{p}"
+        acts = ["Switch off or park idle auxiliaries, feeders and standby equipment that are no longer needed.",
+                "Check that capacitor banks are not over-compensating at the lower load (a leading power factor can attract penalties).",
+                "Use the low-load window for maintenance or deferrable work - there is spare capacity.",
+                "If the machine should be producing, check for a stoppage or a process problem."]
+    elif kind == "idle":
+        tone, head = "", f"The machine is expected to stay idle (below 1 kW): {first:,.1f} → {last:,.1f} kW"
+        acts = ["No extra power is needed in this window.", "If the machine should be running now, check the supply, the start-up and the process."]
+    else:
+        tone, head = "", f"Power requirement is steady: {first:,.1f} → {last:,.1f} kW{p}"
+        acts = ["No action needed - the change is within 5 %.", "Keep monitoring; the forecast updates as new readings arrive."]
+    if long_horizon: acts.append("ARIMA is a short-term model: beyond 1-2 hours the forecast flattens towards the long-run average, so treat the far end as a guide.")
+    return tone, head, acts
+
+
+def phase_advice(kinds, firsts, lasts, end_vals, gap_first, gap_last, thr, alarm_phases, n_alarms, long_horizon):
+    """Advice for the three phases: trend of each phase, imbalance alarms and which phase to take load from / give load to."""
+    word = {"up": "rising", "down": "falling", "flat": "steady", "idle": "idle"}
+    trend_lines = [f"<b>{ph[0]} phase</b> {word[kinds[ph]]}: {firsts[ph]:,.1f} → {lasts[ph]:,.1f} kW{pct_text(pct_change(firsts[ph], lasts[ph]))}" for ph in PHASES]
+    hi, lo = max(PHASES, key=lambda ph: end_vals[ph]), min(PHASES, key=lambda ph: end_vals[ph])
+    ups, downs = [ph[0] for ph in PHASES if kinds[ph] == "up"], [ph[0] for ph in PHASES if kinds[ph] == "down"]
+    acts = list(trend_lines)
+    if all(kinds[ph] == "idle" for ph in PHASES):
+        return "", "All three phases are expected to stay idle (below 1 kW)", acts + ["No imbalance can build up while the machine is idle."]
+    if n_alarms:
+        tone, head = "bad", f"Imbalance expected: {n_alarms} alarm points above {thr:g} % ({', '.join(p[0] for p in alarm_phases)})"
+        acts += [f"Move single-phase loads from <b>{hi[0]}</b> ({end_vals[hi]:,.1f} kW) to <b>{lo[0]}</b> ({end_vals[lo]:,.1f} kW) until the phases are within {thr:g} %.",
+                 "If one phase stays far from the other two, check for a loose or failed connection, a single-phase fault or a tripped single-phase protection."]
+    elif gap_last > gap_first * 1.05 and gap_last > 0.5 * thr:
+        tone, head = "amber", f"No alarm yet, but the phase gap is widening: {gap_first:.1f} % → {gap_last:.1f} % (threshold {thr:g} %)"
+        acts += [f"Plan to shift some load from <b>{hi[0]}</b> to <b>{lo[0]}</b> before the gap crosses the threshold."]
+    else:
+        tone, head = "good", f"Phases stay balanced: largest gap {gap_first:.1f} % → {gap_last:.1f} % (threshold {thr:g} %)"
+        acts += ["No rebalancing needed."]
+    if len(ups) == 3: acts.append("All three phases are rising - check the peak against the sanctioned demand and the cable / breaker rating of each phase.")
+    elif len(downs) == 3: acts.append("All three phases are falling - switch off idle auxiliaries and check that capacitor banks are not over-compensating.")
+    elif ups and downs: acts.append(f"Phases are moving in different directions ({'/'.join(ups)} rising, {'/'.join(downs)} falling) - this is how imbalance builds up, so rebalance early.")
+    elif ups: acts.append(f"{'/'.join(ups)} is rising while the others are steady - it will drift away from the other phases if nothing is moved.")
+    if long_horizon: acts.append("ARIMA is a short-term model: beyond 1-2 hours the forecasts flatten towards the average, so treat the far end as a guide.")
+    return tone, head, acts
+
+
 # ------------------------------------------------------------------ page
 tl = load_timeline()
 S = timeline_summary(tl)
@@ -413,6 +510,42 @@ with tab_pred:
         with st.expander(f"Forecast table · {len(idx)} points"):
             table(pd.DataFrame({"Time": [t.strftime("%d %b %H:%M") for t in t_f], "Forecast kW": m_f, "Lower 95 %": lo_f, "Upper 95 %": hi_f}).head(300), 2)
         if horizon > 120: note("ARIMA is a short-term model: beyond roughly 1–2 hours the forecast flattens towards the long-run average and the range keeps widening, so treat far-ahead points as a guide, not a prediction.")
+    # ---- how much power is needed in the chosen forecast window (energy, first / last point, averaged blocks, advice)
+    fv = NX["mean"][:horizon]; t_first, t_last = NX["times"][0], NX["times"][horizon - 1]
+    energy_f, avg_f, peak_f = float(fv.sum() / 60), float(fv.mean()), float(fv.max())
+    before = tl[(tl.Timestamps > last_time - pd.Timedelta(minutes=horizon)) & (tl.Timestamps <= last_time)]
+    energy_before = float(before.KW.fillna(0).sum() / 60)
+    with panel("Power needed in the selected period", f"{t_first:%d %b %H:%M} → {t_last:%d %b %H:%M} · {span_text(horizon)} · energy = average kW × hours", key="pw_pred"):
+        pk = st.columns(5)
+        with pk[0]: kpi("Energy needed · forecast", f"{energy_f:,.1f} kWh", f"average {avg_f:,.1f} kW over {span_text(horizon)}", "info", "🔌")
+        diff_e = energy_f - energy_before
+        with pk[1]: kpi("Energy used · previous period", f"{energy_before:,.1f} kWh", (f"forecast is {diff_e:+,.1f} kWh ({diff_e / energy_before * 100:+.0f} %) vs this" if energy_before >= 1 else "the machine was idle in that period") + f" · last {span_text(horizon)} of actual data", "", "📊")
+        with pk[2]: kpi("Power at first point", f"{fv[0]:,.1f} kW", f"{t_first:%d %b %H:%M}", "", "▶️")
+        with pk[3]: kpi("Power at last point", f"{fv[-1]:,.1f} kW", f"{t_last:%d %b %H:%M} · {fv[-1] - fv[0]:+,.1f} kW{pct_text(pct_change(fv[0], fv[-1]))} vs first", "info", "⏹️")
+        with pk[4]: kpi("Average · peak", f"{avg_f:,.1f} kW", f"peak {peak_f:,.1f} kW at {NX['times'][int(np.argmax(fv))]:%H:%M}", "", "📈")
+        st.write("")
+        valid_avg = [name for name, m_ in AVG_BLOCKS.items() if m_ <= horizon] or [list(AVG_BLOCKS)[0]]
+        sel_col, _ = st.columns([1.2, 3])
+        avg_choice = sel_col.selectbox("Show average power every", valid_avg, index=min(1, len(valid_avg) - 1), key="avg_pred", help="Splits the forecast window into blocks of this length and averages the power in each block.")
+        blk = block_averages(fv, last_time, min(AVG_BLOCKS[avg_choice], horizon)); labels = [block_label(r) for r in blk.itertuples()]
+        two = len(blk) >= 2
+        kind = trend_kind(float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else trend_kind(float(fv[0]), float(fv[-1]))
+        first_v, last_v = (float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else (float(fv[0]), float(fv[-1]))
+        slope = float(np.polyfit(np.arange(len(blk)) * (AVG_BLOCKS[avg_choice] / 60), blk["Avg kW"], 1)[0]) if two else float("nan")
+        cl, cr = st.columns([2.2, 1.1])
+        with cl:
+            f = go.Figure(go.Bar(x=labels, y=blk["Avg kW"], marker_color=ACCENT, text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in blk["Change %"]], textposition="outside", cliponaxis=False,
+                                 customdata=np.c_[blk["Change kW"].fillna(0), blk["Minutes"]], hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} min<extra></extra>"))
+            f.update_layout(hovermode="closest", yaxis_title=f"average kW per {avg_choice}", title=f"Average power every {avg_choice}  ·  label = change vs previous block"); f.update_xaxes(type="category")
+            show(style(f, 300, False, top=60))
+            st.caption((f"Average growth: {blk['Change kW'].mean():+,.1f} kW per block · trend {slope:+,.1f} kW per hour" if two else "Only one block fits in this window - pick a shorter interval or a longer forecast.")
+                       + (f" · last block is partial ({int(blk['Minutes'].iloc[-1])} min)" if blk["Minutes"].iloc[-1] < blk["Minutes"].iloc[0] else ""))
+        with cr:
+            tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 120)
+            note(advice_html(head_a, acts_a), tone_a)
+        with st.expander(f"Average power table · every {avg_choice}"):
+            table(pd.DataFrame({"Period": labels, "Avg kW": blk["Avg kW"], "Change kW": blk["Change kW"], "Change %": blk["Change %"]}), 2)
+
     if R["idle_share"] > .5:
         note(f"<b>Why the forecast is near zero:</b> as in your notebook, the model is trained on the full timeline, which is <b>{R['idle_share'] * 100:.0f} % idle (0 kW)</b>. The data ends in an idle period "
              f"({last_time:%d %b}), so the forecast starts near 0 kW and only drifts towards the long-run average of about {R['level']:.0f} kW.", "amber")
@@ -520,5 +653,47 @@ with tab_bal:
         export = pd.concat([pd.DataFrame({"Timestamp": fc_b.index, "ObservationNo": np.arange(BF["last_observation"] + 1, BF["last_observation"] + horizon_b + 1), "Phase": ph, "Predicted_KW": fc_b[ph].to_numpy(), "ImbalanceAlarm": alarm_b[ph].to_numpy()}) for ph in PHASES], ignore_index=True)
         d1.download_button("⬇ Forecasts + alarms (CSV)", export.to_csv(index=False).encode(), "RYB_ARIMA_Forecasts_Imbalance_Alarms.csv", "text/csv", on_click="ignore", width="stretch")
         d2.download_button(f"⬇ {int(roll_min)}-min rolling features (CSV)", rolled.reset_index().assign(ObservationNo=np.arange(1, len(rolled) + 1)).to_csv(index=False).encode(), "RYB_30min_Rolling_Features.csv", "text/csv", on_click="ignore", width="stretch")
+    # ---- how much power each phase needs in the chosen forecast window (energy, first / last point, averaged blocks, advice)
+    fvb = {ph: fc_b[ph].to_numpy(float) for ph in PHASES}; totb = sum(fvb.values())
+    before_b = tl[(tl.Timestamps > last_b - pd.Timedelta(minutes=horizon_b)) & (tl.Timestamps <= last_b)]
+    energy_fb = {ph: float(fvb[ph].sum() / 60) for ph in PHASES}; energy_bb = {ph: float(before_b[ph].fillna(0).sum() / 60) for ph in PHASES}
+    with panel("Power needed per phase in the selected period", f"{fc_b.index[0]:%d %b %H:%M} → {fc_b.index[-1]:%d %b %H:%M} · {span_text(horizon_b)} · energy = average kW × hours", key="pw_bal"):
+        pb_ = st.columns(5)
+        sum_f, sum_b = sum(energy_fb.values()), sum(energy_bb.values())
+        with pb_[0]: kpi("Energy needed · forecast", f"{sum_f:,.1f} kWh", f"R + Y + B · average {totb.mean():,.1f} kW over {span_text(horizon_b)}", "info", "🔌")
+        with pb_[1]: kpi("Energy used · previous period", f"{sum_b:,.1f} kWh", (f"forecast is {sum_f - sum_b:+,.1f} kWh ({(sum_f - sum_b) / sum_b * 100:+.0f} %) vs this" if sum_b >= 1 else "the machine was idle in that period") + f" · last {span_text(horizon_b)} of actual data", "", "📊")
+        with pb_[2]: kpi("Total power at first point", f"{totb[0]:,.1f} kW", f"{fc_b.index[0]:%d %b %H:%M}", "", "▶️")
+        with pb_[3]: kpi("Total power at last point", f"{totb[-1]:,.1f} kW", f"{fc_b.index[-1]:%d %b %H:%M} · {totb[-1] - totb[0]:+,.1f} kW{pct_text(pct_change(totb[0], totb[-1]))} vs first", "info", "⏹️")
+        with pb_[4]: kpi("Total average · peak", f"{totb.mean():,.1f} kW", f"peak {totb.max():,.1f} kW at {fc_b.index[int(np.argmax(totb))]:%H:%M}", "", "📈")
+        st.write("")
+        table(pd.DataFrame({"Phase": [f"{ph[0]} phase" for ph in PHASES] + ["Total"],
+                            "First point kW": [fvb[ph][0] for ph in PHASES] + [totb[0]], "Last point kW": [fvb[ph][-1] for ph in PHASES] + [totb[-1]],
+                            "Change %": [pct_change(fvb[ph][0], fvb[ph][-1]) for ph in PHASES] + [pct_change(totb[0], totb[-1])],
+                            "Average kW": [fvb[ph].mean() for ph in PHASES] + [totb.mean()], "Peak kW": [fvb[ph].max() for ph in PHASES] + [totb.max()],
+                            "Energy needed kWh": [energy_fb[ph] for ph in PHASES] + [sum_f], "Energy used before kWh": [energy_bb[ph] for ph in PHASES] + [sum_b]}), 1)
+        valid_avg_b = [name for name, m_ in AVG_BLOCKS.items() if m_ <= horizon_b] or [list(AVG_BLOCKS)[0]]
+        sel_col_b, _ = st.columns([1.2, 3])
+        avg_choice_b = sel_col_b.selectbox("Show average power every", valid_avg_b, index=min(1, len(valid_avg_b) - 1), key="avg_bal", help="Splits the forecast window into blocks of this length and averages each phase's power in each block.")
+        blk_b = {ph: block_averages(fvb[ph], last_b, min(AVG_BLOCKS[avg_choice_b], horizon_b)) for ph in PHASES}; labels_b = [block_label(r) for r in blk_b[PHASES[0]].itertuples()]
+        two_b = len(labels_b) >= 2
+        firsts = {ph: float(blk_b[ph]["Avg kW"].iloc[0]) if two_b else float(fvb[ph][0]) for ph in PHASES}; lasts = {ph: float(blk_b[ph]["Avg kW"].iloc[-1]) if two_b else float(fvb[ph][-1]) for ph in PHASES}
+        kinds = {ph: trend_kind(firsts[ph], lasts[ph]) for ph in PHASES}
+        cl_b, cr_b = st.columns([2.2, 1.1])
+        with cl_b:
+            f = go.Figure()
+            for ph in PHASES:
+                f.add_bar(x=labels_b, y=blk_b[ph]["Avg kW"], name=f"{ph[0]} phase", marker_color=PHASE_COL[ph], customdata=np.c_[blk_b[ph]["Change kW"].fillna(0), blk_b[ph]["Change %"].fillna(0)],
+                          hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>change vs previous block %{customdata[0]:+,.1f} kW (%{customdata[1]:+.1f} %)<extra></extra>")
+            f.update_layout(barmode="group", hovermode="closest", yaxis_title=f"average kW per {avg_choice_b}", title=f"Average power per phase every {avg_choice_b}"); f.update_xaxes(type="category")
+            show(style(f, 320, True, top=80))
+            st.caption(("Average growth per block: " + " · ".join(f"{ph[0]} {blk_b[ph]['Change kW'].mean():+,.1f} kW" for ph in PHASES)) if two_b else "Only one block fits in this window - pick a shorter interval or a longer forecast.")
+        with cr_b:
+            gmax = gap_b.max(axis=1)
+            tone_b, head_b, acts_b = phase_advice(kinds, firsts, lasts, {ph: float(fvb[ph][-1]) for ph in PHASES}, float(gmax.iloc[0]), float(gmax.iloc[-1]), thr,
+                                                  [ph for ph in PHASES if alarm_b[ph].any()], n_alarms, horizon_b > 120)
+            note(advice_html(head_b, acts_b), tone_b)
+        with st.expander(f"Average power table per phase · every {avg_choice_b}"):
+            table(pd.concat([pd.DataFrame({"_t": blk_b[ph]["Start"], "Period": labels_b, "Phase": f"{ph[0]} phase", "Avg kW": blk_b[ph]["Avg kW"], "Change kW": blk_b[ph]["Change kW"], "Change %": blk_b[ph]["Change %"]}) for ph in PHASES]).sort_values("_t", kind="stable").drop(columns="_t"), 2)
+
     note(f"<b>Alarm rule:</b> a phase is flagged whenever it differs from the average of the <i>other two</i> phases by more than {thr:g} %. Each phase is checked on its own, so one, two or all three can be flagged at the same time. "
          "Steps are observations, assumed one minute apart; the range around each forecast is the model's 95 % interval.")
