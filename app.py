@@ -37,7 +37,7 @@ LOAD = FORECAST = VIOLET = ACCENT
 CYAN = ACCENT_LIGHT
 GOOD, WARN, BAD = "#10B981", "#F59E0B", "#F43F5E"
 AMBER, RED, BLUE = WARN, BAD, "#3B82F6"
-IDLE, NODATA, AXIS = "#CBD5E1", "#F1F5F9", "#E2E8F0"                 # slate tints: idle share, no-data share, axis lines / empty bars
+IDLE, NODATA, AXIS = "#CBD5E1", BAD, "#E2E8F0"            # idle share (slate), NO DATA (red), axis lines / empty bars
 
 
 def tint(hex_color, alpha):
@@ -194,6 +194,7 @@ def timeline_summary(tl):
     daily = pd.DataFrame({"day": day, "kwh": tl.KW.fillna(0) / 60, "run_h": running / 60}).groupby("day").sum()
     daily["avg_run"] = tl[running].groupby(day[running]).KW.mean().reindex(daily.index)
     heat = tl.assign(day=day, hour=tl.Timestamps.dt.hour).pivot_table(index="day", columns="hour", values="KW", aggfunc="mean")
+    heat = heat.reindex(index=[d.date() for d in pd.date_range(heat.index.min(), heat.index.max())], columns=range(24))   # every day x every hour; NaN = no data
     last_run = tl.Timestamps[running].max(); last_seen = tl.Timestamps[measured].max()
     return dict(energy=float(tl.KW.fillna(0).sum() / 60), run_min=int(running.sum()), idle_min=int((measured & ~running).sum()),
                 nodata_min=max(0, span_min - int(measured.sum())), peak=float(tl.KW.max()), avg_run=float(tl.KW[running].mean()),
@@ -326,21 +327,24 @@ with tab_overview:
     with k[1]: kpi("Machine uptime", f"{S['util']:.1f} %", f"{S['run_min'] / 60:,.0f} h on · {S['idle_min'] / 60:,.0f} h idle", "info", "⏱️", daily.run_h.values, FORECAST)
     with k[2]: kpi("Peak load", f"{S['peak']:,.0f} kW", "highest 1-minute reading", "", "📈")
     with k[3]: kpi("Average load · running", f"{S['avg_run']:,.0f} kW", "only while the machine is on", "", "⚙️", daily.avg_run.values, CYAN)
-    with k[4]: kpi("Last running reading", f"{S['last_run']:%d %b}", f"{S['last_run']:%H:%M} · idle for {idle_days:.0f} days since", "warn" if not S["now_running"] else "good", "🕒")
+    with k[4]: kpi("Last running reading", f"{S['last_run']:%d %b}", f"{S['last_run']:%H:%M} · idle for {idle_days:.0f} days since", "good" if S["now_running"] else "info", "🕒")
     st.write("")
     with panel("Load timeline", "10-minute averages · zeros are real idle time, gaps are missing data", key="timeline"):
         signal = st.selectbox("Signal", ["Total load (kW)", "Phase load R / Y / B (kW)", "Phase current (A)", "Voltage (V)"], label_visibility="collapsed")
         cols = {"Total load (kW)": ["KW"], "Phase load R / Y / B (kW)": PHASES, "Phase current (A)": ["I1", "I2", "I3"], "Voltage (V)": ["V1", "V2", "V3"]}[signal]
         ten = tl.set_index("Timestamps")[cols].resample("10min").mean(); f = go.Figure()
         palette = [LOAD] if cols == ["KW"] else [PHASE_COL["RKW"], PHASE_COL["YKW"], PHASE_COL["BKW"]]
-        for col_name, color in zip(cols, palette):
+        for i_, (col_name, color) in enumerate(zip(cols, palette)):
+            f.add_scatter(x=ten.index, y=ten[col_name], name="No data (gap)", mode="lines", line=dict(color=NODATA, width=1.6, dash="dot"), connectgaps=True, legendgroup="nodata", showlegend=i_ == 0, hoverinfo="skip")
             f.add_scatter(x=ten.index, y=ten[col_name], name=col_name, line=dict(color=color, width=1.4), fill="tozeroy" if len(cols) == 1 else None, fillcolor=tint(ACCENT, .14), connectgaps=False)
-        f.update_xaxes(rangeslider_visible=True, rangeslider_thickness=.07); show(style(f, 400, legend=len(cols) > 1, top=40))
+        f.update_xaxes(rangeslider_visible=True, rangeslider_thickness=.07); show(style(f, 400, legend=True, top=40))
     a, b = st.columns([2.1, 1])
-    with a, panel("Activity calendar", "average kW per hour of day · grey = idle, white = no data", key="heat"):
-        heat = S["heat"]; f = go.Figure(go.Heatmap(z=heat.values, x=[f"{h:02d}:00" for h in heat.columns], y=[f"{d:%d %b}" for d in heat.index], zmin=0, zmax=650, xgap=2, ygap=2,
+    with a, panel("Activity calendar", "average kW per hour of day · grey = idle, red = no data", key="heat"):
+        heat = S["heat"]; xs, ys = [f"{h:02d}:00" for h in heat.columns], [f"{d:%d %b}" for d in heat.index]
+        f = go.Figure(go.Heatmap(z=np.where(np.isnan(heat.values), 1.0, np.nan), x=xs, y=ys, xgap=2, ygap=2, showscale=False, hoverinfo="skip", colorscale=[[0, tint(NODATA, .45)], [1, tint(NODATA, .45)]], zmin=0, zmax=1))
+        f.add_trace(go.Heatmap(z=heat.values, x=xs, y=ys, zmin=0, zmax=650, xgap=2, ygap=2,
                                                    colorscale=[[0, GRID], [.02, tint(ACCENT, .2)], [.5, ACCENT], [1, ACCENT_DARK]], colorbar=dict(title="kW", thickness=10, len=.6),
-                                                   hovertemplate="%{y} · %{x}<br><b>%{z:.0f} kW</b><extra></extra>"))
+                                                   hoverongaps=False, hovertemplate="%{y} · %{x}<br><b>%{z:.0f} kW</b><extra></extra>"))
         f.update_yaxes(autorange="reversed", dtick=3); f.update_layout(hovermode="closest"); show(style(f, 520, False, top=20))
     with b, panel("Where the time went", "share of all minutes", key="donut"):
         f = go.Figure(go.Pie(labels=["Running", "Idle (zero load)", "No data"], values=[S["run_min"], S["idle_min"], S["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD, IDLE, NODATA], line=dict(color="#fff", width=2)),
@@ -351,7 +355,9 @@ with tab_overview:
     with panel("Running hours per day", "hover for energy and average load", key="daily"):
         f = go.Figure(go.Bar(x=daily.index, y=daily.run_h, marker_color=[LOAD if v > 0 else AXIS for v in daily.run_h], customdata=np.c_[daily.kwh, daily.avg_run],
                              hovertemplate="%{x|%d %b}<br><b>%{y:.1f} h running</b><br>%{customdata[0]:,.0f} kWh · avg %{customdata[1]:.0f} kW<extra></extra>"))
-        f.update_layout(hovermode="closest", yaxis_title="hours"); show(style(f, 300, False, top=20))
+        missing = pd.date_range(daily.index.min(), daily.index.max()).difference(pd.DatetimeIndex(daily.index))
+        if len(missing): f.add_bar(x=missing, y=[max(float(daily.run_h.max()), 1.0)] * len(missing), marker_color=NODATA, name="No data", hovertemplate="%{x|%d %b}<br><b>no data this day</b><extra></extra>")
+        f.update_layout(hovermode="closest", yaxis_title="hours", showlegend=False); show(style(f, 300, False, top=20))
 
 # ================================================================== LOAD PREDICTION (Untitled20 notebook)
 with tab_pred:
@@ -415,7 +421,7 @@ with tab_pred:
     k = st.columns(4)
     with k[0]: kpi("Test RMSE", f"{mt['RMSE']:.2f} kW", f"{len(R['test']):,} forecast points", "info", "🎯")
     with k[1]: kpi("Test MAE", f"{mt['MAE']:.2f} kW", f"{mt['MAE'] / max(R['test'].Actual.mean(), 1e-9) * 100:.1f} % of mean test load" if R["test"].Actual.mean() >= 1 else "test period has ~0 kW load", "", "📏")
-    with k[2]: kpi("Test R²", f"{mt['R2']:.3f}", "test period is constant → R² not meaningful" if R["test_constant"] else "1 = perfect · 0 = no better than the average", "warn" if R["test_constant"] else "good" if mt["R2"] > .5 else "warn", "✅")
+    with k[2]: kpi("Test R²", f"{mt['R2']:.3f}", "test period is constant → R² not meaningful" if R["test_constant"] else "1 = perfect · 0 = no better than the average", "info" if R["test_constant"] else "good" if mt["R2"] > .5 else "warn", "✅")
     with k[3]: kpi("Train fit R²", f"{mr['R2']:.3f}", f"RMSE {mr['RMSE']:.2f} kW · {len(R['train']):,} points", "", "🧪")
     st.write("")
     s1, s2, s3 = st.tabs(["Test forecast", "Training fit", "Residuals"])
