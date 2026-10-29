@@ -1,7 +1,8 @@
 """GridSense - machine load intelligence (light mode, ARIMA(2,0,2)).
-Overview     : full minute-level timeline INCLUDING idle (zero) periods   -> SecureElite_DeviceID19_sorted
-Prediction   : ARIMA(2,0,2) on the 30-min rolling KW, future forecast         -> choose dataset: with zeros / without zeros
-Load balance : static ARIMA per phase R/Y/B, outlier-phase alarms, forecast    -> choose dataset: with zeros / without zeros; alert threshold in %
+Data         : SecureElite_DeviceID19_sorted.parquet - the full minute-level timeline INCLUDING idle (zero) periods
+Overview     : load timeline, activity calendar, uptime
+Prediction   : ARIMA(2,0,2) on the 30-min rolling KW, future forecast (Untitled20 notebook)
+Load balance : static ARIMA per phase R/Y/B, per-phase alarms above a % threshold, forecast (Untitled21 notebook)
 """
 import io
 import warnings
@@ -21,7 +22,6 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 HERE = Path(__file__).resolve().parent
-FILE = HERE / "SecureElite_DeviceID19_KW_gt_1.xlsx"            # running data only (KW > 1)  -> used for prediction + balance
 TIMELINE_PARQUET = HERE / "SecureElite_DeviceID19_sorted.parquet"  # full minute data incl. zeros (fast)
 TIMELINE_XLSX = HERE / "SecureElite_DeviceID19_sorted.xlsx"        # same data as xlsx (slow to read, used only if parquet is missing)
 PHASES = ["RKW", "YKW", "BKW"]
@@ -37,6 +37,14 @@ LOAD = FORECAST = VIOLET = ACCENT
 CYAN = ACCENT_LIGHT
 GOOD, WARN, BAD = "#10B981", "#F59E0B", "#F43F5E"
 AMBER, RED, BLUE = WARN, BAD, "#3B82F6"
+IDLE, NODATA, AXIS = "#CBD5E1", "#F1F5F9", "#E2E8F0"                 # slate tints: idle share, no-data share, axis lines / empty bars
+
+
+def tint(hex_color, alpha):
+    """'#6366F1', .16  ->  'rgba(99,102,241,.16)'  (transparent fills that follow the theme colours)."""
+    h = hex_color.lstrip("#"); return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{alpha})"
+
+
 GREY = MUTED
 PHASE_COL = {"RKW": "#F43F5E", "YKW": "#F59E0B", "BKW": "#3B82F6"}
 
@@ -100,8 +108,6 @@ table.tbl td { text-align:right; padding:.5rem .8rem; border-bottom:1px solid #F
 [data-baseweb="popover"] *, ul[role="listbox"], li[role="option"] { background:#FFFFFF !important; color:#0F172A !important; } li[role="option"]:hover { background:#F1F3FF !important; }
 [data-testid="stExpander"] { background:#FFFFFF; border:1px solid #E6EAF2 !important; border-radius:14px; } [data-testid="stExpander"] summary, [data-testid="stExpander"] summary p { color:#0F172A !important; font-weight:600; }
 [data-testid="stBaseButton-secondary"] { background:#FFFFFF !important; color:#0F172A !important; border:1px solid #DDE2EE !important; border-radius:10px !important; font-weight:600; }
-[data-testid="stBaseButton-segmented_control"] { background:#FFFFFF !important; border:1px solid #DDE2EE !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-segmented_control"] p { color:#0F172A !important; }
-[data-testid="stBaseButton-segmented_controlActive"] { background:#6366F1 !important; border:1px solid #6366F1 !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-segmented_controlActive"] p { color:#FFFFFF !important; }
 input:focus, [data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within { border-color:#6366F1 !important; box-shadow:0 0 0 1px #6366F1 !important; }
 [data-testid="stSlider"] [role="slider"] { background-color:#6366F1 !important; box-shadow:none !important; } [data-testid="stSliderThumbValue"], [data-testid="stSliderThumbValue"] * { color:#4F46E5 !important; }
 [data-testid="stBaseButton-primary"] { background:#0F172A !important; color:#FFFFFF !important; border:0 !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-primary"] p { color:#FFFFFF !important; }
@@ -141,11 +147,11 @@ def panel(title, sub="", key="p"):
 def style(fig, h=440, legend=True, legend_y=1.02, top=95):
     """Title sits at the top-left; the legend gets its own row just above the plot, so they never overlap."""
     fig.update_layout(height=h + (top - 50), template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", hovermode="x unified",
-                      font=dict(family="Inter, sans-serif", size=12.5, color="#334155"), margin=dict(l=10, r=10, t=top, b=10),
+                      font=dict(family="Inter, sans-serif", size=12.5, color=INK), margin=dict(l=10, r=10, t=top, b=10),
                       title=dict(x=0, xanchor="left", y=0.985, yanchor="top", font=dict(size=15, color=INK)),
-                      hoverlabel=dict(bgcolor="#FFFFFF", bordercolor="#E2E8F0", font=dict(family="Inter, sans-serif", size=12, color=INK)),
+                      hoverlabel=dict(bgcolor="#FFFFFF", bordercolor=AXIS, font=dict(family="Inter, sans-serif", size=12, color=INK)),
                       legend=dict(orientation="h", x=0, xanchor="left", y=legend_y, yanchor="bottom", bgcolor="rgba(0,0,0,0)"), showlegend=legend)
-    fig.update_xaxes(gridcolor=GRID, zeroline=False, linecolor="#E2E8F0", showspikes=False); fig.update_yaxes(gridcolor=GRID, zeroline=False)
+    fig.update_xaxes(gridcolor=GRID, zeroline=False, linecolor=AXIS, showspikes=False, tickfont=dict(color=MUTED), title_font=dict(color=MUTED)); fig.update_yaxes(gridcolor=GRID, zeroline=False, tickfont=dict(color=MUTED), title_font=dict(color=MUTED))
     return fig
 
 
@@ -172,22 +178,12 @@ def phase_bars(values, scale):
 # ------------------------------------------------------------------ data
 @st.cache_data(show_spinner="Reading the full minute-level timeline…")
 def load_timeline():
-    """FULL data incl. zero (idle) minutes and missing minutes -> used for plotting / replay only."""
+    """FULL data incl. zero (idle) minutes and missing minutes -> used by every tab."""
     cols = ["Timestamps", "KW", "RKW", "YKW", "BKW", "KVA", "PF", "I1", "I2", "I3", "V1", "V2", "V3", "F"]
     tl = pd.read_parquet(TIMELINE_PARQUET) if TIMELINE_PARQUET.exists() else pd.read_excel(TIMELINE_XLSX, usecols=cols)
     tl["Timestamps"] = pd.to_datetime(tl["Timestamps"])
     for c in cols[1:]: tl[c] = pd.to_numeric(tl[c], errors="coerce").astype(float) + 0.0
     return tl[cols].sort_values("Timestamps").drop_duplicates("Timestamps").reset_index(drop=True)
-
-
-@st.cache_data(show_spinner="Reading running-data file…")
-def load():
-    """Running data only (KW > 1) -> used for prediction + load balance."""
-    df = pd.read_excel(FILE)
-    df.columns = df.columns.astype(str).str.strip()
-    df["Timestamps"] = pd.to_datetime(df["Timestamps"], errors="coerce")
-    for c in ["KW"] + PHASES: df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna(subset=["Timestamps", "KW"]).sort_values("Timestamps").drop_duplicates("Timestamps").reset_index(drop=True)
 
 
 @st.cache_data
@@ -211,14 +207,6 @@ LENGTHS = {"30 minutes": 30, "1 hour": 60, "6 hours": 360, "12 hours": 720, "24 
 STEPS = {"1 min": 1, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "1 hour": 60, "3 hours": 180}
 HISTS = {"1 hour": 60, "3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}
 MAX_HORIZON = 10080                                   # 7 days of one-minute steps
-MODE_FULL, MODE_RUN = "With zeros (full timeline)", "Without zeros (running only, KW > 1)"
-
-
-def dataset_button(label, key):
-    """Button-style switch between the two datasets. Returns MODE_FULL (with zeros) or MODE_RUN (without zeros)."""
-    choice = st.segmented_control(label, [MODE_FULL, MODE_RUN], default=MODE_FULL, key=key,
-                                  help="With zeros = every recorded minute incl. idle (0 kW) time.  Without zeros = only minutes when the machine is running (KW > 1).")
-    return choice or MODE_FULL
 
 # Fitted parameters of the notebook's default model (full timeline, ARIMA(2,0,2), 30-row rolling mean, 95 % train).
 # Fitting that model takes ~65 s, so the app reuses these numbers through model.smooth() - which gives exactly the same
@@ -282,12 +270,10 @@ def predict_kw(meter_df, arima_order, train_split_pct, backtest_block_min, rolli
 
 
 # ------------------------------------------------------------------ Load balance (Untitled21 notebook)
-@st.cache_data(show_spinner="Preparing the running data…")
-def balance_features(timeline, rolling_minutes, with_zeros):
-    """with_zeros=False: only rows where ALL three phases are >= 1 kW.  with_zeros=True: every recorded minute incl. idle zeros.
-    Then a time-based rolling mean of R / Y / B (first window removed)."""
+@st.cache_data(show_spinner="Preparing the phase data…")
+def balance_features(timeline, rolling_minutes):
+    """Every recorded minute (idle zeros included), then a time-based rolling mean of R / Y / B (first window removed)."""
     kept = timeline[["Timestamps"] + PHASES].dropna().sort_values("Timestamps").drop_duplicates("Timestamps", keep="last")
-    if not with_zeros: kept = kept.loc[(kept[PHASES] >= 1).all(axis=1)]
     kept = kept.set_index("Timestamps").sort_index()
     rolled = kept[PHASES].rolling(f"{rolling_minutes}min", min_periods=1).mean()
     rolled = rolled.loc[rolled.index >= rolled.index.min() + pd.Timedelta(minutes=rolling_minutes)].dropna()
@@ -322,7 +308,7 @@ def phase_alarms(forecast, threshold):
 
 
 # ------------------------------------------------------------------ page
-tl, df = load_timeline(), load()
+tl = load_timeline()
 S = timeline_summary(tl)
 idle_days = (S["last_seen"] - S["last_run"]).total_seconds() / 86400
 status = (f'<span class="pill run"><span class="dot"></span>Running now</span>' if S["now_running"] else
@@ -348,36 +334,34 @@ with tab_overview:
         ten = tl.set_index("Timestamps")[cols].resample("10min").mean(); f = go.Figure()
         palette = [LOAD] if cols == ["KW"] else [PHASE_COL["RKW"], PHASE_COL["YKW"], PHASE_COL["BKW"]]
         for col_name, color in zip(cols, palette):
-            f.add_scatter(x=ten.index, y=ten[col_name], name=col_name, line=dict(color=color, width=1.4), fill="tozeroy" if len(cols) == 1 else None, fillcolor="rgba(245,158,11,.16)", connectgaps=False)
+            f.add_scatter(x=ten.index, y=ten[col_name], name=col_name, line=dict(color=color, width=1.4), fill="tozeroy" if len(cols) == 1 else None, fillcolor=tint(ACCENT, .14), connectgaps=False)
         f.update_xaxes(rangeslider_visible=True, rangeslider_thickness=.07); show(style(f, 400, legend=len(cols) > 1, top=40))
     a, b = st.columns([2.1, 1])
     with a, panel("Activity calendar", "average kW per hour of day · grey = idle, white = no data", key="heat"):
         heat = S["heat"]; f = go.Figure(go.Heatmap(z=heat.values, x=[f"{h:02d}:00" for h in heat.columns], y=[f"{d:%d %b}" for d in heat.index], zmin=0, zmax=650, xgap=2, ygap=2,
-                                                   colorscale=[[0, "#EBEEF5"], [.02, "#E0E7FF"], [.5, "#6366F1"], [1, "#312E81"]], colorbar=dict(title="kW", thickness=10, len=.6),
+                                                   colorscale=[[0, GRID], [.02, tint(ACCENT, .2)], [.5, ACCENT], [1, ACCENT_DARK]], colorbar=dict(title="kW", thickness=10, len=.6),
                                                    hovertemplate="%{y} · %{x}<br><b>%{z:.0f} kW</b><extra></extra>"))
         f.update_yaxes(autorange="reversed", dtick=3); f.update_layout(hovermode="closest"); show(style(f, 520, False, top=20))
     with b, panel("Where the time went", "share of all minutes", key="donut"):
-        f = go.Figure(go.Pie(labels=["Running", "Idle (zero load)", "No data"], values=[S["run_min"], S["idle_min"], S["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD, "#CBD5E1", "#F1F5F9"], line=dict(color="#fff", width=2)),
+        f = go.Figure(go.Pie(labels=["Running", "Idle (zero load)", "No data"], values=[S["run_min"], S["idle_min"], S["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD, IDLE, NODATA], line=dict(color="#fff", width=2)),
                              textinfo="percent", hovertemplate="%{label}<br>%{value:,} min<extra></extra>"))
-        f.update_layout(hovermode="closest", annotations=[dict(text=f"<b>{S['util']:.1f}%</b><br><span style='font-size:11px;color:#64748B'>uptime</span>", showarrow=False, font=dict(size=22))])
+        f.update_layout(hovermode="closest", annotations=[dict(text=f"<b>{S['util']:.1f}%</b><br><span style='font-size:11px;color:{MUTED}'>uptime</span>", showarrow=False, font=dict(size=22))])
         show(style(f, 300, True, top=20).update_layout(legend=dict(orientation="h", y=-0.05, x=0)))
-        st.markdown(f'<div class="note amber" style="margin-top:.2rem">Most of the file is the machine being <b>off</b> (zeros). Prediction and balance only use the <b>running</b> minutes.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="note amber" style="margin-top:.2rem">Most of the file is the machine being <b>off</b> (zeros). Prediction and balance use all of it, idle minutes included.</div>', unsafe_allow_html=True)
     with panel("Running hours per day", "hover for energy and average load", key="daily"):
-        f = go.Figure(go.Bar(x=daily.index, y=daily.run_h, marker_color=[LOAD if v > 0 else "#E2E8F0" for v in daily.run_h], customdata=np.c_[daily.kwh, daily.avg_run],
+        f = go.Figure(go.Bar(x=daily.index, y=daily.run_h, marker_color=[LOAD if v > 0 else AXIS for v in daily.run_h], customdata=np.c_[daily.kwh, daily.avg_run],
                              hovertemplate="%{x|%d %b}<br><b>%{y:.1f} h running</b><br>%{customdata[0]:,.0f} kWh · avg %{customdata[1]:.0f} kW<extra></extra>"))
         f.update_layout(hovermode="closest", yaxis_title="hours"); show(style(f, 300, False, top=20))
 
 # ================================================================== LOAD PREDICTION (Untitled20 notebook)
 with tab_pred:
-    data_mode = dataset_button("Dataset to forecast on", "ds_pred")
     with st.expander("ARIMA settings", expanded=False):
         c = st.columns(6)
         p, d_, q = c[0].number_input("p (AR)", 0, 6, 2), c[1].number_input("d (diff)", 0, 2, 0), c[2].number_input("q (MA)", 0, 6, 2)
         win = c[3].number_input("Rolling window (min)", 1, 120, 30); split_pct = c[4].slider("Train split %", 50, 99, 95); block = c[5].number_input("Backtest block (min)", 5, 240, 60, 5)
-    src = tl if data_mode == MODE_FULL else df
-    R = predict_kw(src[["Timestamps", "KW"]], (p, d_, q), split_pct, int(block), int(win)); mt, mr = R["m_test"], R["m_train"]
+    R = predict_kw(tl[["Timestamps", "KW"]], (p, d_, q), split_pct, int(block), int(win)); mt, mr = R["m_test"], R["m_train"]
     NX = R["future"]; last_time = NX["last_time"]; default_until = last_time + pd.Timedelta(minutes=30)
-    if st.session_state.get("anchor_pred") != last_time:      # data changed (e.g. other training data) -> reset the end time
+    if st.session_state.get("anchor_pred") != last_time:      # data changed -> reset the end time
         st.session_state.update(anchor_pred=last_time, until_date_pred=default_until.date(), until_time_pred=default_until.time(), len_pred="30 minutes")
 
     def length_changed_pred():                      # picking a length fills in the end date + time
@@ -411,10 +395,10 @@ with tab_pred:
             window_start = last_time - pd.Timedelta(minutes=HISTS[hist_choice])
             hist = NX["history"][NX["history"].index > window_start]
             f = go.Figure()
-            f.add_shape(type="rect", xref="x", yref="paper", x0=last_time, x1=t_f[-1], y0=0, y1=1, fillcolor="rgba(99,102,241,.06)", line_width=0)
+            f.add_shape(type="rect", xref="x", yref="paper", x0=last_time, x1=t_f[-1], y0=0, y1=1, fillcolor=tint(ACCENT, .06), line_width=0)
             anchor_value, tt = NX["last_value"], [last_time] + list(t_f)          # start the forecast exactly at the last actual point (no gap)
             f.add_scatter(x=hist.index, y=hist.values, name=f"Actual rolling mean ({int(win)} min)", mode="lines", line=dict(color=INK, width=2.2))
-            f.add_scatter(x=tt + tt[::-1], y=[anchor_value] + list(hi_f) + ([anchor_value] + list(lo_f))[::-1], fill="toself", fillcolor="rgba(99,102,241,.16)", mode="lines", line=dict(width=0), name="95 % range", hoverinfo="skip")
+            f.add_scatter(x=tt + tt[::-1], y=[anchor_value] + list(hi_f) + ([anchor_value] + list(lo_f))[::-1], fill="toself", fillcolor=tint(ACCENT, .16), mode="lines", line=dict(width=0), name="95 % range", hoverinfo="skip")
             f.add_scatter(x=tt, y=[anchor_value] + list(m_f), name=f"Forecast ({len(idx)} points)", mode="lines", line=dict(color=FORECAST, width=3))
             if len(idx) <= 120: f.add_scatter(x=t_f, y=m_f, mode="markers", marker=dict(size=6, color="#fff", line=dict(color=FORECAST, width=2)), showlegend=False, hoverinfo="skip")
             f.add_shape(type="line", xref="x", yref="paper", x0=last_time, x1=last_time, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
@@ -423,9 +407,9 @@ with tab_pred:
         with st.expander(f"Forecast table · {len(idx)} points"):
             table(pd.DataFrame({"Time": [t.strftime("%d %b %H:%M") for t in t_f], "Forecast kW": m_f, "Lower 95 %": lo_f, "Upper 95 %": hi_f}).head(300), 2)
         if horizon > 120: note("ARIMA is a short-term model: beyond roughly 1–2 hours the forecast flattens towards the long-run average and the range keeps widening, so treat far-ahead points as a guide, not a prediction.")
-    if data_mode == MODE_FULL and R["idle_share"] > .5:
+    if R["idle_share"] > .5:
         note(f"<b>Why the forecast is near zero:</b> as in your notebook, the model is trained on the full timeline, which is <b>{R['idle_share'] * 100:.0f} % idle (0 kW)</b>. The data ends in an idle period "
-             f"({last_time:%d %b}), so the forecast starts near 0 kW and only drifts towards the long-run average of about {R['level']:.0f} kW. For a forecast of the machine's <i>running</i> load, switch the dataset button above to <b>Without zeros</b>.", "amber")
+             f"({last_time:%d %b}), so the forecast starts near 0 kW and only drifts towards the long-run average of about {R['level']:.0f} kW.", "amber")
 
     st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b><span>how well the same ARIMA predicted data it had not seen</span></div>', unsafe_allow_html=True)
     k = st.columns(4)
@@ -458,17 +442,15 @@ with tab_pred:
 
 # ================================================================== LOAD BALANCE (Untitled21 notebook)
 with tab_bal:
-    top = st.columns([2.4, 1.1])
-    with top[0]: bal_mode = dataset_button("Dataset to forecast on", "ds_bal")
-    thr = top[1].number_input("Alert threshold (%)", 0.5, 100.0, 5.0, 0.5, format="%.1f", key="thr_b",
+    top = st.columns([1.1, 3.4])
+    thr = top[0].number_input("Alert threshold (%)", 0.5, 100.0, 5.0, 0.5, format="%.1f", key="thr_b",
                               help="A phase raises an alarm when it differs from the average of the other two phases by more than this percentage.")
     with st.expander("ARIMA settings", expanded=False):
         c = st.columns(4)
         pb, db, qb = c[0].number_input("p (AR)", 0, 6, 2, key="pb"), c[1].number_input("d (diff)", 0, 2, 0, key="db"), c[2].number_input("q (MA)", 0, 6, 2, key="qb")
         roll_min = c[3].number_input("Rolling window (min)", 5, 120, 30, key="roll_b")
-    with_zeros = bal_mode == MODE_FULL
-    raw_b, rolled = balance_features(tl, int(roll_min), with_zeros)
-    if len(rolled) < 200: st.error("Not enough data in this dataset to train the phase models. Try the other dataset."); st.stop()
+    raw_b, rolled = balance_features(tl, int(roll_min))
+    if len(rolled) < 200: st.error("Not enough data to train the phase models."); st.stop()
     BF = balance_forecast(rolled, (pb, db, qb)); last_b = BF["last_time"]; default_b = last_b + pd.Timedelta(minutes=30)
     if st.session_state.get("anchor_bal") != last_b:
         st.session_state.update(anchor_bal=last_b, until_date_bal=default_b.date(), until_time_bal=default_b.time(), len_bal="30 minutes")
@@ -480,12 +462,12 @@ with tab_bal:
     def until_changed_bal(): st.session_state.len_bal = CUSTOM
 
     idle_share_b = float(raw_b[PHASES].lt(1).all(axis=1).mean())
-    if with_zeros and idle_share_b > .5:
-        note(f"<b>With zeros:</b> this dataset is <b>{idle_share_b * 100:.0f} % idle (0 kW)</b> and it ends in an idle period ({last_b:%d %b}), so the phase forecasts start near 0 kW and drift towards the average. "
-             "Alarms need all phases above 0 kW, so few or none will fire. Switch to <b>Without zeros</b> to forecast the running load.", "amber")
+    if idle_share_b > .5:
+        note(f"<b>Idle time included:</b> this data is <b>{idle_share_b * 100:.0f} % idle (0 kW)</b> and it ends in an idle period ({last_b:%d %b}), so the phase forecasts start near 0 kW and drift towards the average. "
+             "Alarms need the other two phases above 0 kW, so few or none will fire.", "amber")
     alarms_30, alarms_60 = (phase_alarms(BF["pred"].iloc[:n_], thr)[1] for n_ in (30, 60))
     k = st.columns(4)
-    with k[0]: kpi("Observations used", f"{len(rolled):,}", f"{int(roll_min)}-min rolling mean · " + ("incl. idle zero minutes" if with_zeros else "all 3 phases ≥ 1 kW"), "info", "🧮")
+    with k[0]: kpi("Observations used", f"{len(rolled):,}", f"{int(roll_min)}-min rolling mean · incl. idle zero minutes", "info", "🧮")
     with k[1]: kpi("Training period", f"{rolled.index.min():%d %b} → {last_b:%d %b}", f"static ARIMA{(pb, db, qb)} · trained on 100 % of the data", "", "🗓️")
     with k[2]: kpi("Alarm points · next 30 min", f"{int(alarms_30.to_numpy().sum())}", " · ".join(f"{ph[0]} {int(alarms_30[ph].sum())}" for ph in PHASES), "good" if not alarms_30.to_numpy().any() else "bad", "🚨")
     with k[3]: kpi("Alarm points · next 1 hour", f"{int(alarms_60.to_numpy().sum())}", " · ".join(f"{ph[0]} {int(alarms_60[ph].sum())}" for ph in PHASES), "good" if not alarms_60.to_numpy().any() else "bad", "🚨")
@@ -507,7 +489,7 @@ with tab_bal:
         with st.container():
             pill = '<span class="pill run"><span class="dot"></span>No imbalance alarm</span>' if n_alarms == 0 else f'<span class="pill bad"><span class="dot"></span>{n_alarms} alarm points</span>'
             end_vals = list(fc_b.iloc[-1].values)
-            st.markdown(f'<div class="live">{pill}<div style="color:#64748B;font-size:.85rem;margin:.6rem 0 .3rem">Forecast at {fc_b.index[-1]:%d %b %H:%M}</div>{phase_bars(end_vals, max(end_vals) * 1.15)}'
+            st.markdown(f'<div class="live">{pill}<div style="color:{MUTED};font-size:.85rem;margin:.6rem 0 .3rem">Forecast at {fc_b.index[-1]:%d %b %H:%M}</div>{phase_bars(end_vals, max(end_vals) * 1.15)}'
                         f'<div class="mini"><div><b>{gap_b.max().max():.1f} %</b><span>largest phase gap</span></div><div><b>{thr:g} %</b><span>alarm threshold</span></div></div></div>', unsafe_allow_html=True)
 
         window_start_b = last_b - pd.Timedelta(minutes=HISTS[hist_choice_b])
@@ -517,12 +499,12 @@ with tab_bal:
         for i, ph in enumerate(PHASES, 1):
             a_v = float(rolled[ph].iloc[-1]); up_, lo_ = BF["upper"][ph].iloc[:horizon_b].iloc[idx_b], BF["lower"][ph].iloc[:horizon_b].iloc[idx_b]       # forecast starts at the last actual point (no gap)
             f.add_scatter(x=roll_hist.index, y=roll_hist[ph], name=f"Actual rolling mean ({int(roll_min)} min)", mode="lines", line=dict(color=INK, width=2), legendgroup="r", showlegend=i == 1, row=i, col=1)
-            f.add_scatter(x=tt_b + tt_b[::-1], y=[a_v] + list(up_) + ([a_v] + list(lo_))[::-1], fill="toself", fillcolor="rgba(99,102,241,.14)", mode="lines", line=dict(width=0), name="95 % range", legendgroup="b", showlegend=i == 1, hoverinfo="skip", row=i, col=1)
+            f.add_scatter(x=tt_b + tt_b[::-1], y=[a_v] + list(up_) + ([a_v] + list(lo_))[::-1], fill="toself", fillcolor=tint(ACCENT, .14), mode="lines", line=dict(width=0), name="95 % range", legendgroup="b", showlegend=i == 1, hoverinfo="skip", row=i, col=1)
             f.add_scatter(x=tt_b, y=[a_v] + list(fc_b[ph].iloc[idx_b]), name="Forecast", mode="lines", line=dict(color=FORECAST, width=2.6), legendgroup="f", showlegend=i == 1, row=i, col=1)
             hit = fc_b[ph][alarm_b[ph]]
             if len(hit): f.add_scatter(x=hit.index, y=hit.values, name="Imbalance alarm", mode="markers", marker=dict(symbol="x", size=10, color=BAD), legendgroup="al", showlegend=i == 1, hoverinfo="skip", row=i, col=1)
         f.add_shape(type="line", xref="x", yref="paper", x0=last_b, x1=last_b, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
-        show(style(f, 640, legend_y=1.0, top=120))
+        style(f, 640, legend_y=1.0, top=120); f.update_annotations(font=dict(size=13, color=INK)); show(f)
         with st.expander(f"Alarm points · {n_alarms}"):
             if n_alarms == 0: st.caption("No phase is flagged as an outlier anywhere in the chosen forecast window.")
             else:
