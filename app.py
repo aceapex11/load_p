@@ -26,14 +26,21 @@ TIMELINE_PARQUET = HERE / "SecureElite_DeviceID19_sorted.parquet"  # full minute
 TIMELINE_XLSX = HERE / "SecureElite_DeviceID19_sorted.xlsx"        # same data as xlsx (slow to read, used only if parquet is missing)
 PHASES = ["RKW", "YKW", "BKW"]
 
-# colour roles (used consistently everywhere)
+# COLOUR THEME  (one palette everywhere)
+#   neutrals : slate  (INK text / actual values, MUTED secondary, GRID lines)
+#   accent   : indigo (ACCENT = measured load + forecasts + selected buttons; ACCENT_LIGHT / ACCENT_DARK = its tints)
+#   status   : green = good, amber = warning, rose = alarm / bad   (status only)
+#   phases   : R rose, Y amber, B blue                              (phase charts only)
 INK, MUTED, GRID = "#0F172A", "#64748B", "#EDF0F6"
-LOAD, FORECAST, GOOD, WARN, BAD, CYAN, VIOLET = "#F59E0B", "#6366F1", "#10B981", "#F59E0B", "#F43F5E", "#06B6D4", "#8B5CF6"
-AMBER, RED, BLUE = LOAD, BAD, "#3B82F6"
+ACCENT, ACCENT_LIGHT, ACCENT_DARK = "#6366F1", "#818CF8", "#4F46E5"
+LOAD = FORECAST = VIOLET = ACCENT
+CYAN = ACCENT_LIGHT
+GOOD, WARN, BAD = "#10B981", "#F59E0B", "#F43F5E"
+AMBER, RED, BLUE = WARN, BAD, "#3B82F6"
 GREY = MUTED
 PHASE_COL = {"RKW": "#F43F5E", "YKW": "#F59E0B", "BKW": "#3B82F6"}
 
-# ------------------------------------------------------------------ design system -------------------------------------------------------
+# ------------------------------------------------------------------ design system (light + indigo accent, forced in CSS - no config file needed)
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
@@ -46,7 +53,7 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 
 /* app bar */
 .appbar { display:flex; align-items:center; gap:.9rem; background:#FFFFFF; border:1px solid #E6EAF2; border-radius:18px; padding:.85rem 1.2rem; margin-bottom:1rem; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 8px 24px -12px rgba(15,23,42,.10); }
-.appbar .logo { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:1.3rem; background:linear-gradient(135deg,#FBBF24,#F97316 55%,#F43F5E); box-shadow:0 6px 16px -6px rgba(249,115,22,.7); }
+.appbar .logo { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:1.3rem; background:linear-gradient(135deg,#818CF8,#6366F1 55%,#4F46E5); box-shadow:0 6px 16px -6px rgba(99,102,241,.7); }
 .appbar .t { font-weight:800; font-size:1.2rem; letter-spacing:-.4px; color:#0F172A !important; } .appbar .s { font-size:.78rem; color:#64748B !important; margin-top:-1px; }
 .appbar .sp { flex:1; }
 .chip { display:inline-flex; align-items:center; gap:.35rem; padding:.28rem .7rem; border-radius:999px; font-size:.76rem; font-weight:500; border:1px solid #E6EAF2; background:#F8FAFD; color:#475569 !important; }
@@ -78,7 +85,7 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 .hero-f .r { color:#475569 !important; font-size:.86rem; margin-top:.35rem; }
 .badge { display:inline-block; padding:.18rem .55rem; border-radius:8px; font-size:.78rem; font-weight:600; margin-top:.6rem; } .badge.up { background:#E8FAF3; color:#047857 !important; } .badge.down { background:#FFE9ED; color:#BE123C !important; } .badge.flat { background:#F1F4F9; color:#475569 !important; }
 .mini { display:flex; gap:1.3rem; margin-top:1rem; padding-top:.9rem; border-top:1px dashed #DDE2F3; } .mini div b { display:block; font-family:'JetBrains Mono',monospace; font-size:1rem; color:#0F172A !important; } .mini div span { font-size:.74rem; color:#64748B !important; }
-.live { border-radius:18px; padding:1.2rem 1.3rem; background:linear-gradient(180deg,#FFFFFF,#FFFBF2); border:1px solid #F5E6C8; height:100%; }
+.live { border-radius:18px; padding:1.2rem 1.3rem; background:linear-gradient(180deg,#FFFFFF,#F7F8FF); border:1px solid #E3E6FA; height:100%; }
 .live .big { font-family:'JetBrains Mono',monospace; font-size:3.2rem; font-weight:600; letter-spacing:-2px; color:#0F172A !important; line-height:1; margin:.7rem 0 .2rem; } .live .big small { font-size:1.1rem; color:#64748B !important; }
 .bar { margin:.55rem 0; } .bar .row { display:flex; justify-content:space-between; font-size:.8rem; color:#475569 !important; font-weight:500; } .bar .row b { font-family:'JetBrains Mono',monospace; color:#0F172A !important; }
 .bar .trk { height:8px; background:#EEF1F7; border-radius:99px; margin-top:.25rem; overflow:hidden; } .bar .fil { height:100%; border-radius:99px; }
@@ -93,11 +100,15 @@ table.tbl td { text-align:right; padding:.5rem .8rem; border-bottom:1px solid #F
 [data-baseweb="popover"] *, ul[role="listbox"], li[role="option"] { background:#FFFFFF !important; color:#0F172A !important; } li[role="option"]:hover { background:#F1F3FF !important; }
 [data-testid="stExpander"] { background:#FFFFFF; border:1px solid #E6EAF2 !important; border-radius:14px; } [data-testid="stExpander"] summary, [data-testid="stExpander"] summary p { color:#0F172A !important; font-weight:600; }
 [data-testid="stBaseButton-secondary"] { background:#FFFFFF !important; color:#0F172A !important; border:1px solid #DDE2EE !important; border-radius:10px !important; font-weight:600; }
+[data-testid="stBaseButton-segmented_control"] { background:#FFFFFF !important; border:1px solid #DDE2EE !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-segmented_control"] p { color:#0F172A !important; }
+[data-testid="stBaseButton-segmented_controlActive"] { background:#6366F1 !important; border:1px solid #6366F1 !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-segmented_controlActive"] p { color:#FFFFFF !important; }
+input:focus, [data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within { border-color:#6366F1 !important; box-shadow:0 0 0 1px #6366F1 !important; }
+[data-testid="stSlider"] [role="slider"] { background-color:#6366F1 !important; box-shadow:none !important; } [data-testid="stSliderThumbValue"], [data-testid="stSliderThumbValue"] * { color:#4F46E5 !important; }
 [data-testid="stBaseButton-primary"] { background:#0F172A !important; color:#FFFFFF !important; border:0 !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-primary"] p { color:#FFFFFF !important; }
 </style>""", unsafe_allow_html=True)
 
 
-# ------------------------------------------------------------------ UI helpers ------------------------------------------------
+# ------------------------------------------------------------------ UI helpers
 def spark(values, color):
     v = np.asarray(values, float); v = v[~np.isnan(v)]
     if len(v) < 2: return ""
@@ -158,7 +169,7 @@ def phase_bars(values, scale):
     return out
 
 
-# ------------------------------------------------------------------ data -------------------------------------------------------------------
+# ------------------------------------------------------------------ data
 @st.cache_data(show_spinner="Reading the full minute-level timeline…")
 def load_timeline():
     """FULL data incl. zero (idle) minutes and missing minutes -> used for plotting / replay only."""
@@ -194,7 +205,7 @@ def timeline_summary(tl):
                 now_running=bool(tl.KW[measured].iloc[-1] > 1))
 
 
-# ------------------------------------------------------------------ shared forecast-control options ---------------------------------------------------------------
+# ------------------------------------------------------------------ shared forecast-control options
 CUSTOM = "Custom date & time"
 LENGTHS = {"30 minutes": 30, "1 hour": 60, "6 hours": 360, "12 hours": 720, "24 hours": 1440, "3 days": 4320, "7 days": 10080}
 STEPS = {"1 min": 1, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "1 hour": 60, "3 hours": 180}
@@ -225,7 +236,7 @@ def thin(frame, max_points=4000):
     k = int(np.ceil(len(frame) / max_points)); return frame.iloc[::k] if k > 1 else frame
 
 
-# ------------------------------------------------------------------ Load prediction-------------------------------------------------------------------------------
+# ------------------------------------------------------------------ Load prediction (Untitled20 notebook)
 @st.cache_data(show_spinner="Training ARIMA and forecasting…")
 def predict_kw(meter_df, arima_order, train_split_pct, backtest_block_min, rolling_window_min):
     # 1) clean + rolling mean of KW (the series ARIMA models) - same steps as the notebook
@@ -270,7 +281,7 @@ def predict_kw(meter_df, arima_order, train_split_pct, backtest_block_min, rolli
                             lower=np.maximum(band[:, 0], 0), upper=band[:, 1], last_time=last_time, last_value=float(test_series.iloc[-1]), history=rolling_kw.tail(1440)))
 
 
-# ------------------------------------------------------------------ Load balance --------------------------------------------------------------------------------------------
+# ------------------------------------------------------------------ Load balance (Untitled21 notebook)
 @st.cache_data(show_spinner="Preparing the running data…")
 def balance_features(timeline, rolling_minutes, with_zeros):
     """with_zeros=False: only rows where ALL three phases are >= 1 kW.  with_zeros=True: every recorded minute incl. idle zeros.
@@ -310,7 +321,7 @@ def phase_alarms(forecast, threshold):
     return pd.DataFrame(gap), pd.DataFrame(alarm)
 
 
-# ------------------------------------------------------------------ page ------------------------------------------------------------------------------------
+# ------------------------------------------------------------------ page
 tl, df = load_timeline(), load()
 S = timeline_summary(tl)
 idle_days = (S["last_seen"] - S["last_run"]).total_seconds() / 86400
@@ -321,7 +332,7 @@ st.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="
 
 tab_overview, tab_pred, tab_bal = st.tabs(["Overview", "Load prediction", "Load balance"])
 
-# ================================================================== OVERVIEW ============================================================================================
+# ================================================================== OVERVIEW (full data incl. zeros)
 with tab_overview:
     daily = S["daily"]; total_h = (S["run_min"] + S["idle_min"]) / 60
     k = st.columns(5)
@@ -342,7 +353,7 @@ with tab_overview:
     a, b = st.columns([2.1, 1])
     with a, panel("Activity calendar", "average kW per hour of day · grey = idle, white = no data", key="heat"):
         heat = S["heat"]; f = go.Figure(go.Heatmap(z=heat.values, x=[f"{h:02d}:00" for h in heat.columns], y=[f"{d:%d %b}" for d in heat.index], zmin=0, zmax=650, xgap=2, ygap=2,
-                                                   colorscale=[[0, "#EBEEF5"], [.02, "#FDE9BF"], [.5, "#F59E0B"], [1, "#B45309"]], colorbar=dict(title="kW", thickness=10, len=.6),
+                                                   colorscale=[[0, "#EBEEF5"], [.02, "#E0E7FF"], [.5, "#6366F1"], [1, "#312E81"]], colorbar=dict(title="kW", thickness=10, len=.6),
                                                    hovertemplate="%{y} · %{x}<br><b>%{z:.0f} kW</b><extra></extra>"))
         f.update_yaxes(autorange="reversed", dtick=3); f.update_layout(hovermode="closest"); show(style(f, 520, False, top=20))
     with b, panel("Where the time went", "share of all minutes", key="donut"):
@@ -356,7 +367,7 @@ with tab_overview:
                              hovertemplate="%{x|%d %b}<br><b>%{y:.1f} h running</b><br>%{customdata[0]:,.0f} kWh · avg %{customdata[1]:.0f} kW<extra></extra>"))
         f.update_layout(hovermode="closest", yaxis_title="hours"); show(style(f, 300, False, top=20))
 
-# ================================================================== LOAD PREDICTION ==============================================================================================
+# ================================================================== LOAD PREDICTION (Untitled20 notebook)
 with tab_pred:
     data_mode = dataset_button("Dataset to forecast on", "ds_pred")
     with st.expander("ARIMA settings", expanded=False):
@@ -440,12 +451,12 @@ with tab_pred:
             show(style(line_pair(R["train"], "Actual", "Fitted", "", "ARIMA fitted"), 440, top=60))
     with s3:
         a, b = st.columns(2)
-        for col, frame, name, color in ((a, R["train"], "Training", CYAN), (b, R["test"], "Test", VIOLET)):
+        for col, frame, name, color in ((a, R["train"], "Training", CYAN), (b, R["test"], "Test", ACCENT_DARK)):
             shown = thin(frame); t, r = gaps(shown.Timestamp, shown.Residual, step=thin_step(frame)); f = go.Figure(go.Scatter(x=t, y=r, mode="lines", line=dict(color=color, width=1.3), connectgaps=False))
             f.add_hline(y=0, line_dash="dash", line_color=GREY); f.update_layout(title=f"{name} residuals (actual − predicted)", yaxis_title="kW")
             with col, st.container(border=True, key=f"panel_res_{name}"): show(style(f, 340, False, top=60))
 
-# ================================================================== LOAD BALANCE ========================================================================================================
+# ================================================================== LOAD BALANCE (Untitled21 notebook)
 with tab_bal:
     top = st.columns([2.4, 1.1])
     with top[0]: bal_mode = dataset_button("Dataset to forecast on", "ds_bal")
