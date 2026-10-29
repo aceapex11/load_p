@@ -33,7 +33,7 @@ AMBER, RED, BLUE = LOAD, BAD, "#3B82F6"
 GREY = MUTED
 PHASE_COL = {"RKW": "#F43F5E", "YKW": "#F59E0B", "BKW": "#3B82F6"}
 
-# ------------------------------------------------------------------ design system (light, forced - no config file needed)
+# ------------------------------------------------------------------ design system -------------------------------------------------------
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
@@ -97,7 +97,7 @@ table.tbl td { text-align:right; padding:.5rem .8rem; border-bottom:1px solid #F
 </style>""", unsafe_allow_html=True)
 
 
-# ------------------------------------------------------------------ UI helpers
+# ------------------------------------------------------------------ UI helpers ------------------------------------------------
 def spark(values, color):
     v = np.asarray(values, float); v = v[~np.isnan(v)]
     if len(v) < 2: return ""
@@ -158,7 +158,7 @@ def phase_bars(values, scale):
     return out
 
 
-# ------------------------------------------------------------------ data
+# ------------------------------------------------------------------ data -------------------------------------------------------------------
 @st.cache_data(show_spinner="Reading the full minute-level timeline…")
 def load_timeline():
     """FULL data incl. zero (idle) minutes and missing minutes -> used for plotting / replay only."""
@@ -194,7 +194,7 @@ def timeline_summary(tl):
                 now_running=bool(tl.KW[measured].iloc[-1] > 1))
 
 
-# ------------------------------------------------------------------ shared forecast-control options
+# ------------------------------------------------------------------ shared forecast-control options ---------------------------------------------------------------
 CUSTOM = "Custom date & time"
 LENGTHS = {"30 minutes": 30, "1 hour": 60, "6 hours": 360, "12 hours": 720, "24 hours": 1440, "3 days": 4320, "7 days": 10080}
 STEPS = {"1 min": 1, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "1 hour": 60, "3 hours": 180}
@@ -225,7 +225,7 @@ def thin(frame, max_points=4000):
     k = int(np.ceil(len(frame) / max_points)); return frame.iloc[::k] if k > 1 else frame
 
 
-# ------------------------------------------------------------------ Load prediction (Untitled20 notebook)
+# ------------------------------------------------------------------ Load prediction-------------------------------------------------------------------------------
 @st.cache_data(show_spinner="Training ARIMA and forecasting…")
 def predict_kw(meter_df, arima_order, train_split_pct, backtest_block_min, rolling_window_min):
     # 1) clean + rolling mean of KW (the series ARIMA models) - same steps as the notebook
@@ -270,7 +270,7 @@ def predict_kw(meter_df, arima_order, train_split_pct, backtest_block_min, rolli
                             lower=np.maximum(band[:, 0], 0), upper=band[:, 1], last_time=last_time, last_value=float(test_series.iloc[-1]), history=rolling_kw.tail(1440)))
 
 
-# ------------------------------------------------------------------ Load balance (Untitled21 notebook)
+# ------------------------------------------------------------------ Load balance --------------------------------------------------------------------------------------------
 @st.cache_data(show_spinner="Preparing the running data…")
 def balance_features(timeline, rolling_minutes, with_zeros):
     """with_zeros=False: only rows where ALL three phases are >= 1 kW.  with_zeros=True: every recorded minute incl. idle zeros.
@@ -310,7 +310,7 @@ def phase_alarms(forecast, threshold):
     return pd.DataFrame(gap), pd.DataFrame(alarm)
 
 
-# ------------------------------------------------------------------ page
+# ------------------------------------------------------------------ page ------------------------------------------------------------------------------------
 tl, df = load_timeline(), load()
 S = timeline_summary(tl)
 idle_days = (S["last_seen"] - S["last_run"]).total_seconds() / 86400
@@ -321,7 +321,7 @@ st.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="
 
 tab_overview, tab_pred, tab_bal = st.tabs(["Overview", "Load prediction", "Load balance"])
 
-# ================================================================== OVERVIEW (full data incl. zeros)
+# ================================================================== OVERVIEW ============================================================================================
 with tab_overview:
     daily = S["daily"]; total_h = (S["run_min"] + S["idle_min"]) / 60
     k = st.columns(5)
@@ -356,7 +356,7 @@ with tab_overview:
                              hovertemplate="%{x|%d %b}<br><b>%{y:.1f} h running</b><br>%{customdata[0]:,.0f} kWh · avg %{customdata[1]:.0f} kW<extra></extra>"))
         f.update_layout(hovermode="closest", yaxis_title="hours"); show(style(f, 300, False, top=20))
 
-# ================================================================== LOAD PREDICTION (Untitled20 notebook)
+# ================================================================== LOAD PREDICTION ==============================================================================================
 with tab_pred:
     data_mode = dataset_button("Dataset to forecast on", "ds_pred")
     with st.expander("ARIMA settings", expanded=False):
@@ -445,7 +445,7 @@ with tab_pred:
             f.add_hline(y=0, line_dash="dash", line_color=GREY); f.update_layout(title=f"{name} residuals (actual − predicted)", yaxis_title="kW")
             with col, st.container(border=True, key=f"panel_res_{name}"): show(style(f, 340, False, top=60))
 
-# ================================================================== LOAD BALANCE (Untitled21 notebook)
+# ================================================================== LOAD BALANCE ========================================================================================================
 with tab_bal:
     top = st.columns([2.4, 1.1])
     with top[0]: bal_mode = dataset_button("Dataset to forecast on", "ds_bal")
