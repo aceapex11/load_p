@@ -173,7 +173,7 @@ SCHEMA_TEXT = """Return ONLY one JSON object with exactly these keys:
 SYSTEM = """You are the explanation layer of an energy-management system for a three-phase industrial machine.
 STRICT RULES
 1. Use ONLY the evidence rows given. Never invent readings, ratings, standards, costs, savings, maintenance history or root causes.
-2. NEVER write a measured or calculated number yourself. Refer to it with its placeholder, e.g. "Blue is {E012} above the average". Python fills in the value. Words like 'two' or 'half' for measurements are also not allowed.
+2. NEVER write a measured or calculated number yourself. Refer to it with its placeholder, e.g. "Blue is {E012} above the average". Python fills in the value. Do not write ANY digit in your text (not even next to a placeholder, never "28.62 A ({E015})": write just "{E015}"). Words like 'two' or 'half' for measurements are also not allowed.
 3. Every statement about the data must cite evidence ids. If the evidence cannot answer something, write exactly: "Insufficient evidence to determine this."
 4. Separate observations from hypotheses. A cause is 'confirmed' only if the evidence directly proves it; correlation is at most 'possible' or 'strongly_supported'.
 5. Do not give switching commands, do not say anything is 'safe', and do not claim any equipment is within its rating unless a rating row exists. Recommend inspection and qualified-engineer review for any electrical intervention.
@@ -376,6 +376,13 @@ def advise(facts, reliability, api_key, model=DEFAULT_MODEL, caller=groq_chat, t
         msgs = msgs + [{"role": "assistant", "content": text or ""}, {"role": "user", "content": f"That was rejected: {perr}. Return ONLY the JSON object."}]
     if obj is None: out["error"] = perr; return out
     clean, st, rej = validate(obj, ev, ceiling, reliability, facts)
+    if st.get("numbers") == FAILED:                            # one repair round: show the model exactly what it typed wrong
+        bad = "; ".join(r["text"][:110] for r in rej if "typed numbers" in r["why"])
+        text2, err2 = call(msgs + [{"role": "assistant", "content": text or ""}, {"role": "user", "content": f"Rejected: you typed numbers yourself in: {bad}. Return the whole JSON again with no digits in any text; every figure only as its placeholder like {{E012}}."}])
+        obj2, _ = parse_json(text2) if not err2 else (None, None)
+        if obj2 is not None:
+            c2, s2, r2 = validate(obj2, ev, ceiling, reliability, facts)
+            if c2 is not None and len(r2) < len(rej): clean, st, rej = c2, s2, r2
     out.update(validation=st, rejected=rej)
     if clean is None: out["error"] = "the answer did not match the required structure: " + rej[0]["why"]; return out
     out.update(source="llm", answer=fill(clean, ev)); return out
