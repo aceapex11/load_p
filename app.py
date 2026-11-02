@@ -1,7 +1,7 @@
 """GridSense - machine load intelligence (light mode). Rule-based advice, no AI service, no API key.
 Data            : device_16_prediction_dataset.csv - one row per minute with V1-V3, I1-I3, PF, RKW, YKW, BKW
                   (an optional Timestamps / Timestamp / Timestamp_Index column is used when present; you can also upload the file in the app)
-Overview        : load timeline (kW, phases, current, voltage, imbalance), stops and gaps, uptime
+Overview        : load timeline (kW, phases, current, voltage, imbalance) and where the time went (uptime)
 Load forecast   : hourly total kW, Exponential Smoothing or Auto ETS (exponential_smoothing_load_forecasting notebook), tested on the last 168 hours, power advice
 Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast (three_phase_imbalance_detection_forecasting notebook), imbalance alarms,
                   and a rule-based action plan: what is out of phase, why, what to do now, when to do what, what can happen, how to bring it in phase, future balance
@@ -26,13 +26,19 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 HERE = Path(__file__).resolve().parent
-DATA_NAME = "device_16_full_data.csv"       # put this file next to app.py (or upload it in "Data & limits")
+DATA_NAME = "device_16_full_data.csv"       # put this file next to app.py
 PHASES = ["RKW", "YKW", "BKW"]
 PNAME = {"RKW": "Red", "YKW": "Yellow", "BKW": "Blue"}
 NAMES = [PNAME[p] for p in PHASES]
 
-# limits - the real values come from the "Data & limits" panel further down; these are only the defaults
-ALARM_PCT, SEVERE_PCT, MIN_KW, SMOOTH, DEMAND, RATING = 3.0, 10.0, 5.0, 30, 0.0, 0.0
+# LIMITS - edit here.  (The old "Data & limits" panel is gone.)
+ALARM_PCT = 3.0      # imbalance % above this = ALARM
+SEVERE_PCT = 10.0    # imbalance % above this = SEVERE
+MIN_KW = 5.0         # average kW per phase below this = machine off
+SMOOTH = 30          # minutes of rolling mean (past minutes only)
+DEMAND = 0.0         # sanctioned demand in kW, 0 = unknown
+RATING = 0.0         # phase breaker / cable in A, 0 = unknown
+MINR = 45            # an hour with fewer one-minute readings than this counts as missing (as in the notebooks)
 
 # COLOUR THEME  (one palette everywhere)
 #   neutrals : slate  (INK text / actual values, MUTED secondary, GRID lines)
@@ -363,7 +369,7 @@ def power_advice(kind, first, last, peak, long_horizon, ctx=None):
         use, room = peak / demand * 100, demand - peak
         acts.append(f"<b>Sanctioned demand {demand:,.0f} kW:</b> the expected peak uses <b>{use:.0f} %</b> of it (headroom {room:+,.0f} kW). "
                     + ("It is OVER the demand - shed or defer load before that time to avoid a penalty." if use > 100 else "Very little headroom - stagger motor starts and defer batch loads." if use > 90 else "Comfortable headroom."))
-    elif kind == "up": acts.append(f"Compare the expected peak (<b>{peak:,.1f} kW</b>) with your sanctioned demand - enter it in 'Data & limits' for an automatic check.")
+    elif kind == "up": acts.append(f"Compare the expected peak (<b>{peak:,.1f} kW</b>) with your sanctioned demand - set DEMAND at the top of app.py for an automatic check.")
     if pf and np.isfinite(pf) and pf > 0.3 and peak >= 1: acts.append(f"At power factor {pf:.2f} the peak of {peak:,.1f} kW is about <b>{peak / pf:,.0f} kVA</b> - compare it with the transformer / generator rating.")
     pa = pf_action(avg, pf)
     if pa: acts.append(pa)
@@ -423,33 +429,16 @@ def run_phases(window, steps, model, season):
 # ------------------------------------------------------------------ page
 bar = st.empty()                                                  # the app bar is filled in once the data is known
 src = find_data()
-settings = st.expander("Data & limits", expanded=False)
 if src is not None: raw, data_name = read_raw_path(str(src), src.stat().st_mtime), src.name
 else:
     st.info(f"Put **{DATA_NAME}** in the same folder as app.py.")
     st.stop()
 
 devices = raw_devices(raw)
-device = st.session_state.get("device_sel")
-device = device if device in devices else (16 if 16 in devices else (devices[0] if devices else None))
-start_iso = f"{st.session_state.get('start_date', dt.date(2024, 1, 1))} {st.session_state.get('start_time', dt.time(0, 0))}"
+device = 16 if 16 in devices else (devices[0] if devices else None)
+start_iso = "2024-01-01 00:00:00"                                 # only used when a file has no timestamp column
 try: tl, info = clean_data(raw, device, start_iso)
 except ValueError as err: st.error(str(err)); st.stop()
-
-with settings:
-    if devices: st.selectbox("Device in this file", devices, index=devices.index(device), key="device_sel")
-    if info["clock"] == "assumed":
-        c = st.columns([1, 1, 3])
-        c[0].date_input("Date of the first reading", value=dt.date(2024, 1, 1), key="start_date"); c[1].time_input("Time of the first reading", value=dt.time(0, 0), step=300, key="start_time")
-        c[2].caption("This file has no real timestamps, so every row is taken as one minute after the previous one, starting here. Times on the charts follow from it.")
-    c = st.columns(6)
-    ALARM_PCT = float(c[0].number_input("Alarm above (%)", 0.5, 50.0, 3.0, 0.5, key="lim_alarm", help="Phase imbalance % above this = ALARM."))
-    SEVERE_PCT = float(c[1].number_input("Severe above (%)", 1.0, 100.0, 10.0, 0.5, key="lim_sev"))
-    MIN_KW = float(c[2].number_input("Ignore below (kW per phase)", 0.0, 100.0, 5.0, 1.0, key="lim_min", help="Minutes with an average phase load below this count as 'machine off'."))
-    SMOOTH = int(c[3].number_input("Smoothing (min)", 1, 120, 30, key="lim_smooth", help="Rolling mean of the PAST minutes only (1 = no smoothing)."))
-    DEMAND = float(c[4].number_input("Sanctioned demand (kW, 0 = unknown)", 0.0, 100000.0, 0.0, 10.0, key="lim_demand"))
-    RATING = float(c[5].number_input("Phase breaker / cable (A, 0 = unknown)", 0.0, 10000.0, 0.0, 10.0, key="lim_rating"))
-    MINR = int(st.columns(6)[0].number_input("Min readings per hour", 1, 60, 45, 5, key="lim_minr", help="Hourly forecasts: an hour with fewer one-minute readings than this counts as missing (the notebooks use 45)."))
 
 RUN_KW = 3 * MIN_KW                                               # three-phase load above this = machine running
 D_raw, D = make_grid(tl, SMOOTH)
@@ -480,25 +469,8 @@ if H_OK:
     t_fut_all = pd.date_range(t_last + pd.Timedelta(hours=1), periods=MAX_STEPS, freq="h")
 
 def need_more_data():
-    note("<b>Not enough hourly data.</b> The forecasts need at least 3 days of hours that each have enough readings (see 'Min readings per hour' in Data & limits). "
+    note("<b>Not enough hourly data.</b> The forecasts need at least 3 days of hours that each have enough readings. "
          "For the weekly cycle and the backtest, about 5 weeks are better.", "amber")
-
-def idle_and_gap_periods(tl_, run_kw, min_min):
-    """Every stretch where the machine was not running (three-phase load <= run_kw) and every stretch with no readings, longer than min_min minutes."""
-    d = tl_[["Timestamps", "KW"]].dropna().sort_values("Timestamps").reset_index(drop=True)
-    step = d.Timestamps.diff().median()
-    if pd.isna(step) or step <= pd.Timedelta(0): step = pd.Timedelta(minutes=1)
-    dt = d.Timestamps.diff(); gap_before = dt > step * 2; rows = []
-    for i in np.flatnonzero(gap_before.to_numpy()):
-        rows.append(("No data", d.Timestamps[i - 1] + step, d.Timestamps[i]))
-    run = (d.KW > run_kw); seg = ((run != run.shift()) | gap_before).cumsum()
-    g = d.assign(run=run, seg=seg).groupby("seg").agg(frm=("Timestamps", "first"), last=("Timestamps", "last"), run=("run", "first"))
-    for _, r in g[~g.run].iterrows(): rows.append(("Machine not running", r.frm, r["last"] + step))
-    out = pd.DataFrame(rows, columns=["What", "From", "To"])
-    if out.empty: return out
-    out["Hours"] = (out.To - out.From).dt.total_seconds() / 3600
-    return out[out.Hours * 60 >= min_min].sort_values("From").reset_index(drop=True)
-
 
 # ================================================================== OVERVIEW
 with tab_overview:
@@ -512,7 +484,8 @@ with tab_overview:
     with k[4]: kpi("Phase imbalance now", "idle" if not a_now.Loaded.iloc[0] else f"{a_now.Imbalance_pct.iloc[0]:.1f} %", "machine idle" if not a_now.Loaded.iloc[0] else f"{a_now.Worst_phase.iloc[0]} {a_now.Direction.iloc[0]} · limit {ALARM_PCT:g} %",
                    "good" if _st == "OK" else "bad" if _st == "SEVERE" else "warn" if _st == "ALARM" else "info", "⚖️")
     st.write("")
-    with panel("Load timeline", "10-minute averages · gaps are missing data", key="timeline"):
+    a, b = st.columns([2.1, 1])
+    with a, panel("Load timeline", "10-minute averages · gaps are missing data", key="timeline"):
         signal = st.selectbox("Signal", ["Total load (kW)", "Phase load R / Y / B (kW)", "Phase imbalance (%)", "Phase current (A)", "Voltage (V)"], label_visibility="collapsed")
         cols = {"Total load (kW)": ["KW"], "Phase load R / Y / B (kW)": PHASES, "Phase imbalance (%)": PHASES, "Phase current (A)": CURR, "Voltage (V)": VOLT}[signal]
         ten = tl.set_index("Timestamps")[cols].resample("10min").mean(); f = go.Figure()
@@ -528,29 +501,11 @@ with tab_overview:
                 f.add_scatter(x=ten.index, y=ten[col_name], name="No data (gap)", mode="lines", line=dict(color=NODATA, width=1.6, dash="dot"), connectgaps=True, legendgroup="nodata", showlegend=i_ == 0, hoverinfo="skip")
                 f.add_scatter(x=ten.index, y=ten[col_name], name=col_name, line=dict(color=color, width=1.4), fill="tozeroy" if len(cols) == 1 else None, fillcolor=tint(ACCENT, .14), connectgaps=False)
         f.update_xaxes(rangeslider_visible=True, rangeslider_thickness=.07); show(style(f, 400, legend=True, top=40))
-    a, b = st.columns([2.1, 1])
-    with a, panel("When the machine was not running and when data is missing", "exact date and time of every stop and every gap in the readings", key="stops"):
-        q1, q2 = st.columns([1, 1.4])
-        min_m = q1.number_input("Ignore stretches shorter than (minutes)", 1, 1440, 10, 5, key="stop_min")
-        what = q2.radio("Show", ["Both", "Machine not running", "No data"], horizontal=True, key="stop_what")
-        per_all = idle_and_gap_periods(tl, RUN_KW, min_m); per = per_all if what == "Both" else per_all[per_all.What == what]
-        n_idle, n_gap = int((per_all.What == "Machine not running").sum()), int((per_all.What == "No data").sum())
-        h_idle = float(per_all.Hours[per_all.What == "Machine not running"].sum()); h_gap = float(per_all.Hours[per_all.What == "No data"].sum())
-        st.markdown(f"**{n_idle}** stretches with the machine not running (**{h_idle:,.1f} h** in total) · **{n_gap}** stretches with no data (**{h_gap:,.1f} h** in total) · only stretches of {min_m} min or longer are listed.")
-        if not real_clock: st.caption("The file has no real clock, so these dates and times are assumed from the row order.")
-        if per.empty: st.caption("Nothing to list with these settings.")
-        else:
-            f = go.Figure()
-            for w_, col_ in (("Machine not running", IDLE), ("No data", NODATA)):
-                x_ = per[per.What == w_]
-                if len(x_): f.add_bar(base=x_.From, x=(x_.To - x_.From).dt.total_seconds() * 1000, y=[w_] * len(x_), orientation="h", name=w_, marker_color=col_, width=.6,
-                                     customdata=np.c_[x_.From.dt.strftime("%d %b %H:%M"), x_.To.dt.strftime("%d %b %H:%M"), x_.Hours.round(2)], hovertemplate="%{customdata[0]} → %{customdata[1]}<br><b>%{customdata[2]} h</b><extra></extra>")
-            f.update_xaxes(type="date"); f.update_layout(hovermode="closest", barmode="overlay", showlegend=False); show(style(f, 190, False, top=10))
     with b, panel("Where the time went", "share of all minutes", key="donut"):
         f = go.Figure(go.Pie(labels=["Running", "Idle", "No data"], values=[S["run_min"], S["idle_min"], S["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD, IDLE, NODATA], line=dict(color="#fff", width=2)),
                              textinfo="percent", hovertemplate="%{label}<br>%{value:,} min<extra></extra>"))
         f.update_layout(hovermode="closest", annotations=[dict(text=f"<b>{S['util']:.1f}%</b><br><span style='font-size:11px;color:{MUTED}'>uptime</span>", showarrow=False, font=dict(size=22))])
-        show(style(f, 300, True, top=20).update_layout(legend=dict(orientation="h", y=-0.05, x=0)))
+        show(style(f, 400, True, top=40).update_layout(legend=dict(orientation="h", y=-0.08, x=0.1), margin=dict(l=10, r=10, t=40, b=60)))
 
 
 # ================================================================== LOAD FORECAST (hourly total kW - Exponential Smoothing / Auto ETS)
@@ -710,7 +665,7 @@ with tab_phase:
             u_ = dg["per"]["Peak A"] / RATING * 100; risk_.append(f"{u_.idxmax()} peaks at {u_.max():.0f} % of the {RATING:,.0f} A rating")
         rv.append(("If nothing is done", "; ".join(risk_) + (". The effect is permanent, so cables age and trips build up silently." if dg["pct_above"] > 50 else ".")))
     else:
-        rv.append(("What is wrong", "Not enough loaded minutes to measure the cause. Lower 'Ignore below' in Data & limits."))
+        rv.append(("What is wrong", "Not enough loaded minutes to measure the cause."))
     if n_al:
         cul_ = rep.Worst_phase[rep.Alarm].value_counts(); cn_ = cul_.idxmax(); cd_ = rep.Direction[rep.Alarm & (rep.Worst_phase == cn_)].mode().iloc[0]
         fc_ = f"<b>{n_al}</b> of {len(Pf)} hours in alarm" + (f" ({n_sev} severe)" if n_sev else "") + f", first at <b>{first_alarm:%a %d %b %H:%M}</b>, mostly on <b>{cn_}</b> ({'too high' if cd_ == 'HIGH' else 'too low'})"
@@ -738,7 +693,7 @@ with tab_phase:
             else: st.caption("Needs a real clock in the file.")
         with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
             st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
-    else: note("Not enough loaded minutes (above the 'ignore below' limit) to measure the cause. Lower the limit in Data & limits.", "amber")
+    else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
 
     with st.expander("Check your own readings"):
         c = st.columns(4)
