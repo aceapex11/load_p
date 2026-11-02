@@ -712,8 +712,9 @@ with tab_phase:
     else:
         rv.append(("What is wrong", "Not enough loaded minutes to measure the cause. Lower 'Ignore below' in Data & limits."))
     if n_al:
-        cul_ = rep.Worst_phase[rep.Alarm].value_counts(); fc_ = f"<b>{n_al}</b> of {len(Pf)} hours in alarm" + (f" ({n_sev} severe)" if n_sev else "") + f", first at <b>{first_alarm:%a %d %b %H:%M}</b>, mostly on <b>{cul_.idxmax()}</b>"
-        if dg and cul_.idxmax() != dg["main_name"]: fc_ += f" (not {dg['main_name']} as in the past - the pattern is shifting)"
+        cul_ = rep.Worst_phase[rep.Alarm].value_counts(); cn_ = cul_.idxmax(); cd_ = rep.Direction[rep.Alarm & (rep.Worst_phase == cn_)].mode().iloc[0]
+        fc_ = f"<b>{n_al}</b> of {len(Pf)} hours in alarm" + (f" ({n_sev} severe)" if n_sev else "") + f", first at <b>{first_alarm:%a %d %b %H:%M}</b>, mostly on <b>{cn_}</b> ({'too high' if cd_ == 'HIGH' else 'too low'})"
+        if dg and cn_ != dg["main_name"]: fc_ += f" - different from the whole-file picture ({dg['main_name']}), because the forecast follows the most recent week"
         win_ = gr.best_windows(Pf.sum(axis=1).to_numpy(), Pf.index)
         if win_: fc_ += f". Best time to rewire: {win_['quiet'][0]:%a %d %b %H:%M} → {win_['quiet'][1]:%H:%M} (lowest load)"
         rv.append(("Forecast", fc_ + "."))
