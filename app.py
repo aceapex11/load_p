@@ -758,7 +758,7 @@ with tab_phase:
 
     # ---- how far to trust the forecast (backtest of the three-phase notebook)
     with panel("Can the forecast be trusted?", "backtest: the model learns from the weeks before each past week, forecasts it, and is scored against what really happened", key="ph_bt"):
-       
+        if not ran: st.caption("Not run yet for these settings - press 'Run backtest' above (takes a few seconds).")
         elif bt is None: st.caption("Not enough history: the test needs the learning window plus one full week.")
         else:
             im = bt["imbalance"]
