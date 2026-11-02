@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore")
 st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 HERE = Path(__file__).resolve().parent
-DATA_NAME = "device_16_prediction_dataset.csv"       # put this file next to app.py (or upload it in "Data & limits")
+DATA_NAME = "device_16_full_data.csv"       # put this file next to app.py (or upload it in "Data & limits")
 PHASES = ["RKW", "YKW", "BKW"]
 PNAME = {"RKW": "Red", "YKW": "Yellow", "BKW": "Blue"}
 NAMES = [PNAME[p] for p in PHASES]
