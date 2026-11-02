@@ -4,11 +4,9 @@ Data            : device_16_prediction_dataset.csv - one row per minute with V1-
 Overview        : load timeline (kW, phases, current, voltage, imbalance), activity calendar, uptime
 Load prediction : ARIMA(2,0,2) on the 30-min rolling total kW, future forecast + advice (power, kVA, power factor, sanctioned demand)
 Phase imbalance : measured imbalance % (max deviation from the 3-phase average), WHY it happens, WHAT to do (which phase to move how many amps)
-Phase forecast  : SARIMAX per phase on the last 24 hours (5-min steps), forecast imbalance + alarms, backtest against two baselines + reliability label
-AI advisor      : Groq LLM explains the measured evidence (what / why / what to do); every answer is re-checked in Python (gridsense_advisor.py)
+Phase forecast  : SARIMAX per phase on the last 24 hours (5-min steps), forecast imbalance + alarms, backtest against "same as now"
 """
 import datetime as dt
-import html
 import io
 import os
 import warnings
@@ -23,9 +21,12 @@ from plotly.subplots import make_subplots
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+import html as _html
+import gridsense_advisor as ga
 
-import gridsense_advisor as adv
-from gridsense_advisor import forecast_reliability, smape
+# Paste your Groq key between the quotes ONCE and nobody ever has to type it in the app.
+# (If this project goes to GitHub, put the key in .streamlit/secrets.toml as GROQ_API_KEY = "..." instead and leave this empty.)
+GROQ_API_KEY_EMBEDDED = "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"
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
@@ -451,38 +452,36 @@ def newest_window(arr):
 
 def sx_backtest(D_raw, D, train_on, cfg_name, n_origins, horizons, progress=None):
     """At n_origins moments in the last 20 % of the file: SARIMAX learns from the previous 24 h only, forecasts 15 / 30 / 60 min, and is scored against
-    what really happened - next to two baselines ('same as now' and 'same time yesterday'). Returns a table (or None when there were too few usable moments)."""
+    what really happened and against 'same as now'. Returns a table (or None when there were too few usable moments)."""
     SRC = (D_raw if train_on == "Real values" else D)[KWCOLS].to_numpy(float)
     K = max(horizons) // SX_STEP; first = int(len(SRC) * 0.8); last = len(SRC) - 1 - K * SX_STEP
     if last <= first: return None
-    F, T, Z, Wn = [], [], [], []
+    F, T, Z = [], [], []
     for n_i, p in enumerate(np.unique(np.linspace(first, last, n_origins).astype(int)), 1):
         ih, ifu = p - SX_STEP * np.arange(SX_WSTEPS - 1, -1, -1), p + SX_STEP * np.arange(1, K + 1)
         if ih[0] >= 0:
             w, fut = SRC[ih], SRC[ifu]
             if not (np.isnan(w).any() or np.isnan(fut).any()):
-                F.append(_fit_window(w, K, SX_CONFIGS[cfg_name])["mean"]); T.append(fut); Z.append(np.repeat(w[-1:], K, axis=0)); Wn.append(w)
+                F.append(_fit_window(w, K, SX_CONFIGS[cfg_name])["mean"]); T.append(fut); Z.append(np.repeat(w[-1:], K, axis=0))
         if progress: progress(min(n_i / n_origins, 1.0))
     if len(F) < 3: return None
-    F, T, Z, Wn = np.array(F), np.array(T), np.array(Z), np.array(Wn); rows = []
-    scale = np.array([np.abs(np.diff(w.sum(axis=1))).mean() for w in Wn])             # naive 5-minute change of the total kW inside each 24 h window (for MASE)
+    F, T, Z = np.array(F), np.array(T), np.array(Z); rows = []
     for h in horizons:
         k = h // SX_STEP - 1; truth = T[:, k, :]; ib = analyse(truth).Imbalance_pct.to_numpy()
-        for name, X in (("SARIMAX", F[:, k, :]), ("Same as now", Z[:, k, :]), ("Seasonal naive (24 h)", Wn[:, k, :])):          # window step k = the same time one day earlier
-            et = np.abs(X.sum(axis=1) - truth.sum(axis=1))
-            rows.append({"Minutes ahead": h, "Method": name, "Phase kW error": float(np.abs(X - truth).mean()), "Total kW error": float(et.mean()), "sMAPE total %": smape(truth.sum(axis=1), X.sum(axis=1)),
-                         "MASE total": float(np.mean(et[scale > 0] / scale[scale > 0])) if (scale > 0).any() else float("nan"),
+        for name, X in (("SARIMAX", F[:, k, :]), ("Same as now", Z[:, k, :])):
+            rows.append({"Minutes ahead": h, "Method": name, "Phase kW error": float(np.abs(X - truth).mean()), "Total kW error": float(np.abs(X.sum(axis=1) - truth.sum(axis=1)).mean()),
                          "Imbalance error (pts)": float(np.nanmean(np.abs(analyse(X).Imbalance_pct.to_numpy() - ib))), "Moments": len(F)})
     return pd.DataFrame(rows)
 
 
-REL_TONE = {"RELIABLE": "good", "DEGRADED": "amber", "UNRELIABLE": "bad", "INSUFFICIENT DATA": "amber"}
-
-
 def bt_verdict(res):
-    """Forecast reliability from the backtest (SARIMAX against the best of the baselines). Returns (note tone, text, status)."""
-    status, why = forecast_reliability(res)
-    return REL_TONE[status], f"Forecast reliability: <b>{status}</b> - {why}. SARIMAX is compared with 'same as now' and 'same time yesterday' on the same moments.", status
+    """Compare SARIMAX with 'same as now' over all horizons. Returns (tone, text)."""
+    s, z = res[res.Method == "SARIMAX"].reset_index(drop=True), res[res.Method == "Same as now"].reset_index(drop=True)
+    gain = lambda col: float((1 - s[col].mean() / max(z[col].mean(), 1e-9)) * 100) if np.isfinite(s[col].mean()) and np.isfinite(z[col].mean()) else 0.0
+    g_tot, g_imb = gain("Total kW error"), gain("Imbalance error (pts)")
+    if g_tot > 3 and g_imb > 3: return "good", f"SARIMAX adds value on your data: total kW error {g_tot:+.0f} % and imbalance error {g_imb:+.0f} % against 'same as now' (positive = better)."
+    if g_tot < -3 or g_imb < -3: return "bad", f"SARIMAX is WORSE than simply repeating the last value (total kW {g_tot:+.0f} %, imbalance {g_imb:+.0f} %). Use the forecast only as a trend hint."
+    return "amber", f"SARIMAX is about as good as 'same as now' (total kW {g_tot:+.0f} %, imbalance {g_imb:+.0f} %): the phases change too slowly for a model to add much - treat the forecast as 'the imbalance will stay about where it is now'."
 
 
 def forecast_advice(P, rep, t_fut, chronic, verdict, long_horizon):
@@ -693,7 +692,7 @@ clock_chip = '<span class="chip">clock assumed</span>' if not real_clock else ""
 bar.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase imbalance</div></div><div class="sp"></div>
 {status}<span class="chip">{data_name}</span><span class="chip">{tl.Timestamps.min():%d %b} → {tl.Timestamps.max():%d %b %Y}</span><span class="chip">{len(tl):,} readings</span>{clock_chip}</div>""", unsafe_allow_html=True)
 
-tab_overview, tab_pred, tab_imb, tab_fc, tab_ai = st.tabs(["Overview", "Load prediction", "Phase imbalance", "Phase forecast", "AI advisor"])
+tab_overview, tab_pred, tab_imb, tab_fc = st.tabs(["Overview", "Load prediction", "Phase imbalance", "Phase forecast"])
 
 # ================================================================== OVERVIEW
 with tab_overview:
@@ -835,6 +834,13 @@ with tab_pred:
         with st.expander(f"Average power table · every {avg_choice}"):
             table(pd.DataFrame({"Period": labels, "Avg kW": blk["Avg kW"], "Change kW": blk["Change kW"], "Change %": blk["Change %"]}), 2)
 
+    with panel("What to do about the load forecast", "AI advisor (Groq) re-reads the forecast every time the order, split, length or limits change · every number is filled in by Python and checked", key="pw_ai"):
+        mae_pct = float(mt["MAE"] / R["test"].Actual.mean() * 100) if R["test"].Actual.mean() >= 1 else None
+        rel, rel_why = ga.load_reliability(mae_pct, R["idle_share"] * 100, R["test_constant"])
+        ld = dict(window=f"next {span_text(horizon)}", avg_kw=avg_f, peak_kw=peak_f, first_kw=float(fv[0]), last_kw=float(fv[-1]), trend_kw_h=None if np.isnan(slope) else slope, energy_kwh=energy_f,
+                  energy_prev_kwh=energy_before if energy_before >= 1 else None, pf_avg=PF_AVG, test_mae_pct=mae_pct, idle_pct=float(R["idle_share"] * 100))
+        ai_panel(dict(load=ld, demand=DEMAND, rating=RATING, real_clock=real_clock, window="all loaded minutes"), rel, rel_why, "total load forecast", advice_html(head_a, acts_a), tone_a, "pw_ai_retry")
+
     if R["idle_share"] > .5:
         note(f"<b>Why the forecast is near zero:</b> as in your notebook, the model is trained on the full timeline, which is <b>{R['idle_share'] * 100:.0f} % idle (0 kW)</b>. The data ends in an idle period "
              f"({last_time:%d %b}), so the forecast starts near 0 kW and only drifts towards the long-run average of about {R['level']:.0f} kW.", "amber")
@@ -935,8 +941,63 @@ with tab_imb:
             if not res.Loaded: kpi("Result", "No load", f"average below {MIN_KW:g} kW per phase", "", "ℹ️")
             else: kpi("Imbalance", f"{res.Imbalance_pct:.2f} %", f"{res.Worst_phase} is {abs(res.Worst_dev):.1f} % {'above' if res.Worst_dev > 0 else 'below'} the average · {res.Status}", "good" if res.Status == "OK" else "bad" if res.Status == "SEVERE" else "warn", "🧮")
 
+# ------------------------------------------------------------------ AI advisor inside the Phase forecast tab (runs by itself when the forecast changes)
+def groq_key():
+    try: secret = st.secrets.get("GROQ_API_KEY")
+    except Exception: secret = None
+    return ga.load_key(secret=secret or GROQ_API_KEY_EMBEDDED or None, env_file=Path(__file__).with_name(".env"))
+
+
+def ai_facts(DGm, fc):
+    """The numbers the AI may talk about (Python measured all of them)."""
+    per = DGm["per"]
+    return dict(mean_imb=DGm["mean_imb"], p95_imb=DGm["p95_imb"], pct_above=DGm["pct_above"], mean_I=DGm["mean_I"], mean_V=DGm["mean_V"],
+                per={n: dict(avg_A=float(per.loc[n, "Avg current A"]), peak_A=float(per.loc[n, "Peak A"]), avg_kW=float(per.loc[n, "Avg kW"])) for n in NAMES},
+                main_name=DGm["main_name"], extra_A=DGm["extra_A"], neutral_mean=DGm["neutral_mean"], loss=DGm["loss"], pf_meter=DGm["pf_meter"],
+                plan=[{"From": r["From"], "To": r["To"], "Move A": float(r["Move A"])} for _, r in DGm["plan"].iterrows()],
+                thr=ALARM_PCT, sev=SEVERE_PCT, min_kw=MIN_KW, rating=RATING, demand=DEMAND, real_clock=real_clock,
+                peak_A_max=float(per["Peak A"].max()), window="all loaded minutes", forecast=fc)
+
+
+def ai_cached(facts, reliability, key, topic="phase imbalance"):
+    """One Groq call per distinct situation: any change of model / length / limits / backtest makes a new situation, a plain re-run of the page reuses the answer."""
+    cache = st.session_state.setdefault("ai_cache", {}); h = ga.evidence_hash([facts, topic], reliability)
+    if h not in cache:
+        with st.spinner("AI advisor is reading the new forecast…"):
+            cache[h] = ga.advise(facts, reliability, key, model=os.environ.get("GROQ_MODEL", ga.DEFAULT_MODEL), topic=topic)
+        while len(cache) > 20: cache.pop(next(iter(cache)))
+    return h, cache[h]
+
+
+def ai_html(r):
+    a, e = r["answer"], _html.escape
+    ul = lambda items: "<ul>" + "".join(f"<li>{e(x)}</li>" for x in items) + "</ul>" if items else ""
+    out = [f"<b>What is happening</b><br>{e(a['what_is_happening']['summary'])}", "<br><b>Why (hypotheses, not proven)</b><ul>"
+           + "".join(f"<li>{e(c['cause'])} <i>({e(c['classification'].replace('_', ' '))}, {e(c['confidence'])} confidence)</i>"
+                     + (f"<br><span style='color:#64748B'>Missing: {e('; '.join(c['missing_information']))}</span>" if c.get("missing_information") else "") + "</li>" for c in a["why"]) + "</ul>"]
+    out.append("<b>What to do</b><ul>" + "".join(f"<li><b>[{e(x['priority'].upper())}]</b> {e(x['action'])}<br>Why: {e(x['reason'])}<br>Benefit: {e(x['benefit'])}"
+                                              + (f"<br>Drawbacks: {e('; '.join(x['drawbacks']))}" if x.get("drawbacks") else "") + f"<br>Check it worked: {e(x['verification'])}</li>" for x in a["actions"]) + "</ul>")
+    if a["if_no_action"]["consequences"]: out.append(f"<b>If nothing is done</b> ({e(a['if_no_action'].get('horizon', ''))}){ul(a['if_no_action']['consequences'])}")
+    if a["uncertainties"]: out.append(f"<b>What is still uncertain</b>{ul(a['uncertainties'])}")
+    return "".join(out)
+
+
+def ai_panel(facts, rel, rel_why, topic, rule_html, rule_tone, key):
+    """Shows the AI advice (or the rule-based advice when the AI is unavailable) and returns nothing."""
+    h_ai, ai = ai_cached(facts, rel, groq_key(), topic)
+    if ai["source"] == "llm":
+        note(ai_html(ai), {"low": "good", "medium": "amber"}.get(ai["ceiling"], "bad"))
+        st.caption(f"Forecast reliability: **{rel}** ({rel_why}) · highest priority allowed by the rules: **{ai['ceiling']}** · checks: " + " · ".join(f"{k} {x.replace('_', ' ').lower()}" for k, x in ai["validation"].items())
+                   + " · every action needs review by a qualified engineer before anything is changed.")
+        if ai["rejected"]:
+            with st.expander(f"{len(ai['rejected'])} statement(s) changed or removed by the checker"): table(pd.DataFrame(ai["rejected"]), 2)
+        with st.expander("Rule-based advice (same numbers, no AI)"): note(rule_html, rule_tone)
+    else:
+        note(rule_html, rule_tone); st.caption(f"AI advisor not used: {ai['error']}. The rule-based advice is shown instead.")
+        if st.button("Try the AI advisor again", key=key): st.session_state["ai_cache"].pop(h_ai, None); st.rerun()
+
+
 # ================================================================== PHASE FORECAST (SARIMAX per phase on the last 24 hours)
-rel_status, fc_facts = "INSUFFICIENT DATA", None                  # filled in below; the AI advisor tab reads them
 with tab_fc:
     mean_label = f"{SMOOTH}-min mean"
     FC_LENGTHS = {"15 minutes": 15, "30 minutes": 30, "1 hour": 60, "2 hours": 120, "3 hours": 180, "6 hours": 360}
@@ -961,12 +1022,10 @@ with tab_fc:
             out_bt = sx_backtest(D_raw, D, "Real values" if train_on == "Real values" else "mean", cfg_name, n_or, (15, 30, 60), progress=lambda x: pbar.progress(float(x), text="Testing SARIMAX at past moments…"))
             pbar.empty(); st.session_state["bt"] = dict(key=bt_key, res=out_bt)
         cur = st.session_state.get("bt"); res_bt = cur["res"] if cur and cur["key"] == bt_key else None
-        tone_v, verdict, rel_status = bt_verdict(res_bt) if res_bt is not None else ("", None, "INSUFFICIENT DATA")
+        tone_v, verdict = bt_verdict(res_bt) if res_bt is not None else ("", None)
         if not all(F["ok"]): note(f"A SARIMAX fit failed for {', '.join(n for n, ok in zip(NAMES, F['ok']) if not ok)} - that phase falls back to 'same as now'. Try another setting.", "amber")
         if filled: note(f"{filled} gap point(s) in the last 24 hours were filled with straight lines.", "amber")
         imb = rep.Imbalance_pct.to_numpy(); n_al, n_sev = int(rep.Alarm.sum()), int((rep.Status == "SEVERE").sum()); tot = P.sum(axis=1)
-        fc_facts = dict(end_imb=None if np.isnan(imb[-1]) else float(imb[-1]), max_imb=float(np.nanmax(imb)) if rep.Loaded.any() else None, n_alarm=n_al, n_points=K, end_total_kw=float(tot[-1]),
-                        window=f"next {horizon} min after {t0:%d %b %H:%M}")
         k = st.columns(4)
         with k[0]: kpi(f"Imbalance at {t_fut[-1]:%H:%M}", "–" if np.isnan(imb[-1]) else f"{imb[-1]:.1f} %", f"limit {ALARM_PCT:g} % · {rep.Status.iloc[-1].lower()}", "good" if rep.Status.iloc[-1] == "OK" else "bad" if rep.Status.iloc[-1] == "SEVERE" else "warn" if rep.Status.iloc[-1] == "ALARM" else "", "⚖️", trend=np.nan_to_num(imb), trend_color=ACCENT)
         with k[1]: kpi("Alarm points", f"{n_al}", f"of {K} forecast points · {n_sev} severe", "good" if n_al == 0 else "bad", "🚨")
@@ -998,91 +1057,18 @@ with tab_fc:
                 table(pd.DataFrame({"Time": [t.strftime("%d %b %H:%M") for t in t_fut], "Red kW": P[:, 0], "Yellow kW": P[:, 1], "Blue kW": P[:, 2], "Total kW": tot, "Imbalance %": imb, "Worst": rep.Worst_phase.to_numpy(), "Direction": rep.Direction.to_numpy(), "Status": rep.Status.to_numpy()}).head(300), 2)
             exp = pd.DataFrame({"Timestamp": t_fut, "Red_kW": P[:, 0], "Yellow_kW": P[:, 1], "Blue_kW": P[:, 2], "Total_kW": tot, "Imbalance_pct": imb, "Worst_phase": rep.Worst_phase.to_numpy(), "Direction": rep.Direction.to_numpy(), "Status": rep.Status.to_numpy()})
             d1, _ = st.columns([1, 3]); d1.download_button("⬇ Forecast + alarms (CSV)", exp.to_csv(index=False).encode(), "GridSense_phase_forecast.csv", "text/csv", on_click="ignore", width="stretch")
-        with panel("What to do about the forecast", "written from the forecast numbers", key="fc_act"):
+        with panel("What to do about the forecast", "AI advisor (Groq) re-reads the forecast every time the model, length, limits or backtest change · every number is filled in by Python and checked", key="fc_act"):
             tone_f, head_f, acts_f = forecast_advice(P, rep, t_fut, chronic, verdict, horizon > 60)
-            note(advice_html(head_f, acts_f), tone_f)
+            if DGm["empty"]: note(advice_html(head_f, acts_f), tone_f); st.caption("AI advisor skipped: too few loaded minutes in the measured data.")
+            else:
+                fin = np.isfinite(imb)
+                fc_facts = dict(window=f"next {len_name}", end_imb=float(imb[-1]) if fin[-1] else None, max_imb=float(np.nanmax(imb)) if fin.any() else None, n_alarm=n_al, n_points=K, end_total_kw=float(tot[-1]))
+                rel, rel_why = ga.forecast_reliability(res_bt)
+                ai_panel(ai_facts(DGm, fc_facts), rel, rel_why, "phase imbalance forecast", advice_html(head_f, acts_f), tone_f, "fc_ai_retry")
         with panel("Is the forecast better than 'same as now'?", "backtest: SARIMAX learns from the 24 h before each past moment, forecasts 15 / 30 / 60 min, and is scored against what really happened", key="fc_bt"):
             if res_bt is None: st.caption("Not run yet for these settings - press 'Run backtest' above. It tests the last 20 % of the file.")
             else:
-                note(verdict, tone_v)
-                table(res_bt.drop(columns="Moments"), 2); st.caption(f"{int(res_bt['Moments'].iloc[0])} past moments tested · errors in kW (phase, total) and percentage points (imbalance) · sMAPE in % (can mislead when the load is small) · MASE below 1 = better than the naive 5-minute change · smaller is better")
+                note(verdict, {"good": "good", "bad": "bad", "amber": "amber"}[tone_v])
+                table(res_bt.drop(columns="Moments"), 2); st.caption(f"{int(res_bt['Moments'].iloc[0])} past moments tested · errors in kW (phase, total) and percentage points (imbalance) · smaller is better")
         note(f"<b>Alarm rule:</b> imbalance % = largest deviation of a phase from the average of the three ÷ the average × 100 (170 / 169 / 160 kW → 3.81 %). Alarm above {ALARM_PCT:g} %, severe above {SEVERE_PCT:g} %. "
              "The 95 % range is the model's own interval; the backtest above is the fairer test of how far to trust it.")
-
-# ================================================================== AI ADVISOR (Groq explains the evidence; Python checks every answer)
-PILL = {"PASSED": "run", "INSUFFICIENT_EVIDENCE": "warn", "HUMAN_REVIEW_REQUIRED": "warn", "FAILED": "bad"}
-PRIO = {"low": "idle", "medium": "warn", "high": "bad", "critical": "bad"}
-esc = lambda x: html.escape(str(x))
-
-
-def pill(text, kind): return f'<span class="pill {kind}"><span class="dot"></span>{esc(text)}</span>'
-
-
-def ids_chips(ids): return " ".join(f'<span class="chip">{esc(i)}</span>' for i in ids) if ids else '<span class="chip">no evidence cited</span>'
-
-
-with tab_ai:
-    mean_label = f"{SMOOTH}-min mean"
-    note("The AI advisor <b>explains</b> numbers that Python measured. It never types a reading itself: it refers to evidence rows ({E003}-style) and Python fills in the value. "
-         "Every answer is then re-checked (structure, evidence ids, stray numbers, priority ceiling, safety wording, missing ratings, forecast reliability). "
-         "Nothing here is a verified electrical instruction - a qualified engineer must approve any action.")
-    c = st.columns([1.3, 1.6, 1.2, 1])
-    ai_model = c[0].text_input("Groq model", value=os.environ.get("GROQ_MODEL", adv.DEFAULT_MODEL), key="ai_model", help="Change this if Groq renames or retires the model.")
-    typed_key = c[1].text_input("API key (optional - this session only)", type="password", key="ai_key", help="Better: put GROQ_API_KEY in a .env file next to app.py. A typed key is never saved.")
-    try: secret_key = st.secrets.get("GROQ_API_KEY")
-    except Exception: secret_key = None
-    api_key = adv.load_key(typed=typed_key, env_file=HERE / ".env", secret=secret_key)
-    c[2].markdown("<div style='height:1.7rem'></div>" + (pill("API key found", "run") if api_key else pill("no API key - rule-based advice only", "warn")), unsafe_allow_html=True)
-    c[3].markdown("<div style='height:1.65rem'></div>", unsafe_allow_html=True); ask = c[3].button("Ask the AI advisor", type="primary", key="ai_ask")
-
-    DGa = diagnose(Dv[NEEDED], ALARM_PCT, MIN_KW, SEVERE_PCT)
-    if DGa["empty"]: note("There are not enough loaded minutes to build the evidence. Lower the 'ignore below' limit in 'Data & limits'.", "amber")
-    else:
-        pa = DGa["per"]
-        facts = dict(window=f"loaded minutes, {mean_label}, {Dv.index.min():%d %b} to {Dv.index.max():%d %b %Y}", mean_imb=DGa["mean_imb"], p95_imb=DGa["p95_imb"], pct_above=DGa["pct_above"], mean_I=DGa["mean_I"], mean_V=DGa["mean_V"],
-                     per={n: dict(avg_A=float(pa.loc[n, "Avg current A"]), peak_A=float(pa.loc[n, "Peak A"]), avg_kW=float(pa.loc[n, "Avg kW"])) for n in NAMES}, main_name=DGa["main_name"], extra_A=DGa["extra_A"],
-                     neutral_mean=DGa["neutral_mean"], loss=DGa["loss"], pf_meter=DGa["pf_meter"], plan=[dict(From=r["From"], To=r["To"], **{"Move A": float(r["Move A"])}) for _, r in DGa["plan"].iterrows()],
-                     thr=ALARM_PCT, sev=SEVERE_PCT, min_kw=MIN_KW, rating=RATING, demand=DEMAND, real_clock=real_clock, peak_A_max=float(pa["Peak A"].max()), forecast=fc_facts)
-        fh = adv.evidence_hash(facts, rel_status)
-        if ask:
-            with st.spinner("Asking Groq and checking the answer…"): st.session_state["ai"] = dict(hash=fh, res=adv.advise(facts, rel_status, api_key, ai_model))
-        cur = st.session_state.get("ai"); res = cur["res"] if cur and cur["hash"] == fh else None
-        st.markdown(f'<div class="ph"><b>Forecast reliability</b><span>from the backtest in the Phase forecast tab</span></div>' + pill(rel_status, {"RELIABLE": "run", "DEGRADED": "warn", "UNRELIABLE": "bad"}.get(rel_status, "idle")), unsafe_allow_html=True)
-        if rel_status != "RELIABLE": st.caption("The forecast is not (yet) shown to be reliable, so forecast-based advice is capped at 'medium' priority and treated as uncertain. Run the backtest in the Phase forecast tab.")
-
-        if res is None or res["source"] == "fallback":
-            if res is None: note("Press <b>Ask the AI advisor</b>. Until then this is the rule-based advice that Python calculates from the same numbers.", "")
-            else: note(f"<b>AI advisor unavailable:</b> {esc(res['error'])}. Showing the rule-based advice instead (no AI involved).", "amber")
-            tone_r, head_r, acts_r = imbalance_actions(DGa, ALARM_PCT, SEVERE_PCT, real_clock, RATING)
-            with panel("Rule-based advice", "calculated by Python only", key="ai_rule"): note(advice_html(head_r, acts_r), tone_r)
-        else:
-            ans, vd = res["answer"], res["validation"]
-            if vd["publication"] == "FAILED": note("<b>Preliminary - NOT verified.</b> The validator rejected part of the AI answer (see 'Validation and audit' below). Rejected parts were removed; do not rely on the rest without review.", "bad")
-            else: note(f"<b>{esc(vd['publication'].replace('_', ' ').title())}.</b> The answer passed the automatic checks, but electrical actions always need a qualified engineer's approval. Python priority ceiling: <b>{esc(res['ceiling'])}</b>.", "amber")
-            with panel("1 · What is happening?", "", key="ai_q1"):
-                st.markdown(f"<div>{esc(ans['what_is_happening']['summary'])}</div><div style='margin-top:.5rem'>{ids_chips(ans['what_is_happening']['evidence_ids'])}</div>", unsafe_allow_html=True)
-            with panel("2 · Why is it happening?", "observations vs hypotheses - meter data alone cannot confirm a root cause", key="ai_q2"):
-                if not ans["why"]: st.caption("Insufficient evidence to determine this.")
-                for cz in ans["why"]:
-                    miss = "".join(f"<li>{esc(m)}</li>" for m in cz.get("missing_information", []))
-                    st.markdown(f"<div style='margin:.4rem 0 .8rem'>{pill(cz['classification'].replace('_', ' '), 'idle')} {pill('confidence: ' + cz['confidence'], 'idle')}<div style='margin:.3rem 0'>{esc(cz['cause'])}</div>"
-                                f"<div>supports: {ids_chips(cz['supporting_evidence_ids'])}</div>" + (f"<div style='font-size:.82rem;color:{MUTED}'>still needed to confirm:<ul style='margin:.2rem 0 0 1.1rem'>{miss}</ul></div>" if miss else "") + "</div>", unsafe_allow_html=True)
-            with panel("3 · What should we do?", "every action needs qualified human approval", key="ai_q3"):
-                if not ans["actions"]: st.caption("No action passed the validator. Insufficient evidence to recommend one.")
-                for a in ans["actions"]:
-                    dr = "".join(f"<li>{esc(d)}</li>" for d in a.get("drawbacks", []))
-                    st.markdown(f"<div style='margin:.4rem 0 1rem'>{pill(a['priority'].upper(), PRIO[a['priority']])} {pill('human approval required', 'warn')}<div style='margin:.35rem 0;font-weight:600'>{esc(a['action'])}</div>"
-                                f"<div><b>Why:</b> {esc(a['reason'])}</div><div><b>Benefit:</b> {esc(a['benefit'])}</div>" + (f"<div><b>Drawbacks:</b><ul style='margin:.2rem 0 0 1.1rem'>{dr}</ul></div>" if dr else "") +
-                                f"<div><b>How to verify:</b> {esc(a['verification'])}</div><div style='margin-top:.25rem'>evidence: {ids_chips(a['evidence_ids'])}</div></div>", unsafe_allow_html=True)
-            with panel("If nothing is done", "current faults and forecast risks are different things", key="ai_q4"):
-                cons = ans["if_no_action"]["consequences"]
-                st.markdown(("<ul style='margin:.2rem 0 .4rem 1.1rem'>" + "".join(f"<li>{esc(x)}</li>" for x in cons) + "</ul>" if cons else "Insufficient evidence to determine this.") + (f"<div style='color:{MUTED}'>time horizon: {esc(ans['if_no_action']['horizon'])}</div>" if ans["if_no_action"]["horizon"] else ""), unsafe_allow_html=True)
-                if ans["uncertainties"]: st.markdown("<b>Uncertainties</b><ul style='margin:.2rem 0 0 1.1rem'>" + "".join(f"<li>{esc(x)}</li>" for x in ans["uncertainties"]) + "</ul>", unsafe_allow_html=True)
-            with panel("Validation and audit", "produced by Python, never by the AI", key="ai_val"):
-                names = {"schema": "Structure", "grounding": "Evidence ids", "numbers": "Numbers", "priority": "Priority rules", "safety": "Safety wording", "forecast": "Forecast reliability", "engineering": "Ratings / engineering", "publication": "Publication"}
-                st.markdown(" ".join(f"<span class='chip'>{names[k]}</span> {pill(vd[k].replace('_', ' '), PILL[vd[k]])}" for k in names if k in vd), unsafe_allow_html=True)
-                if res["rejected"]: st.markdown("<div class='ph' style='margin-top:.8rem'><b>Rejected or changed by the validator</b></div>", unsafe_allow_html=True); table(pd.DataFrame(res["rejected"]).reindex(columns=["where", "why", "text"]), 2)
-                else: st.caption("Nothing was rejected or changed.")
-        with st.expander(f"Evidence the advisor sees · {len(adv.build_evidence(facts))} rows"):
-            table(pd.DataFrame(adv.build_evidence(facts))[["id", "parameter", "value", "unit", "window", "source", "kind"]], 2)
-            st.caption("Missing information the advisor was told about: " + "; ".join(adv.missing_information(facts)) + ".")
