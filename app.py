@@ -943,6 +943,29 @@ with tab_imb:
             if not res.Loaded: kpi("Result", "No load", f"average below {MIN_KW:g} kW per phase", "", "ℹ️")
             else: kpi("Imbalance", f"{res.Imbalance_pct:.2f} %", f"{res.Worst_phase} is {abs(res.Worst_dev):.1f} % {'above' if res.Worst_dev > 0 else 'below'} the average · {res.Status}", "good" if res.Status == "OK" else "bad" if res.Status == "SEVERE" else "warn", "🧮")
 
+        st.markdown("**Don't know the kW? Work it out from voltage, current and power factor**")
+        try: dv, di, dpf = [float(x) for x in (tl[VOLT].median().median(), tl[CURR].median().median(), tl["PF"].median())]
+        except Exception: dv, di, dpf = 230.0, 100.0, 0.9
+        dpf = min(max(dpf, 0.05), 1.0) if np.isfinite(dpf) else 0.9
+        mode = st.radio("How was the voltage measured?", ["Per phase (phase-to-neutral volts, one current per phase)", "Whole three-phase load (line-to-line volts, one average current)"], key="calc_mode", horizontal=True)
+        q = st.columns(4)
+        pf_in = q[3].number_input("Power factor", 0.05, 1.0, round(dpf, 2), 0.01, key="calc_pf", help="Start value is the median power factor of your file.")
+        if mode.startswith("Per phase"):
+            vv = [q[i].number_input(f"{n} voltage (V)", 0.0, 1000.0, round(dv, 1), 1.0, key=f"calc_v{i}") for i, n in enumerate(NAMES)]
+            q2 = st.columns(4); ii = [q2[i].number_input(f"{n} current (A)", 0.0, 10000.0, round(di, 1), 1.0, key=f"calc_i{i}") for i, n in enumerate(NAMES)]
+            kw_calc = [v * a * pf_in / 1000 for v, a in zip(vv, ii)]; tot_calc = sum(kw_calc)
+        else:
+            vl = q[0].number_input("Line-to-line voltage (V)", 0.0, 2000.0, round(dv * 3 ** .5, 1), 1.0, key="calc_vl"); il = q[1].number_input("Current (A)", 0.0, 10000.0, round(di, 1), 1.0, key="calc_il")
+            tot_calc = 3 ** .5 * vl * il * pf_in / 1000; kw_calc = [tot_calc / 3] * 3
+        o = st.columns(4)
+        for i, n in enumerate(NAMES): o[i].metric(f"{n} kW", f"{kw_calc[i]:,.2f}")
+        o[3].metric("Total kW", f"{tot_calc:,.2f}")
+        st.caption("kW = voltage × current × power factor ÷ 1000 per phase (three-phase total: √3 × line voltage × current × power factor ÷ 1000). With one average current the three phases come out equal, so the imbalance is 0 %.")
+        if mode.startswith("Per phase"):
+            rc = analyse([kw_calc]).iloc[0]
+            if rc.Loaded: st.caption(f"Imbalance from these three results: **{rc.Imbalance_pct:.2f} %** · {rc.Worst_phase} is {abs(rc.Worst_dev):.1f} % {'above' if rc.Worst_dev > 0 else 'below'} the average · {rc.Status}")
+
+
 # ------------------------------------------------------------------ AI advisor inside the Phase forecast tab (runs by itself when the forecast changes)
 def groq_key():
     try: secret = st.secrets.get("GROQ_API_KEY")
@@ -1035,18 +1058,19 @@ with tab_fc:
         with k[3]: kpi("Worst colour at the end", "–" if not rep.Loaded.iloc[-1] else rep.Worst_phase.iloc[-1], "" if not rep.Loaded.iloc[-1] else f"{rep.Direction.iloc[-1]} · {abs(rep.Worst_dev.iloc[-1]):.1f} % from the average", "info", "🎨")
         st.write("")
         with panel("Phase forecast & imbalance alarms", f"SARIMAX learns from the last 24 h ({SX_WSTEPS} points, one every {SX_STEP} min) · {cfg_name} · learned from {mean_label if train_on != "Real values" else "real values"} · forecast starts after {t0:%d %b %Y %H:%M}", key="fc_main"):
+            show_real = st.checkbox("Also show the real minute-by-minute values (noisy)", False, key="fc_show_real")
             hmin = {"3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}[hist_name]; w0 = t0 - pd.Timedelta(minutes=hmin)
             hm, hr = D.loc[w0:t0, KWCOLS], D_raw.loc[w0:t0, KWCOLS]
             f = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n} phase (kW)" for n in NAMES] + ["Phase imbalance %"])
             xt = [t0] + list(t_fut)
             for j, ph in enumerate(PHASES, 1):
-                f.add_scatter(x=hr.index, y=hr[ph], name="Real values", legendgroup="r", showlegend=j == 1, line=dict(color=IDLE, width=1), row=j, col=1)
+                if show_real: f.add_scatter(x=hr.index, y=hr[ph], name="Real values", legendgroup="r", showlegend=j == 1, line=dict(color=IDLE, width=1), row=j, col=1)
                 f.add_scatter(x=hm.index, y=hm[ph], name=mean_label, legendgroup="m", showlegend=j == 1, line=dict(color=INK, width=2), row=j, col=1)
                 a0 = float(window[-1, j - 1]); lo_, hi_ = F["lo"][:, j - 1], F["hi"][:, j - 1]
                 if np.isfinite(lo_).all(): f.add_scatter(x=xt + xt[::-1], y=[a0] + list(hi_) + ([a0] + list(lo_))[::-1], fill="toself", fillcolor=tint(PHASE_COL[ph], .16), mode="lines", line=dict(width=0), name="95 % range", legendgroup="b", showlegend=j == 1, hoverinfo="skip", row=j, col=1)
                 f.add_scatter(x=xt, y=[a0] + list(P[:, j - 1]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines+markers", line=dict(color=PHASE_COL[ph], width=2.6, dash="dash"), marker=dict(size=5), row=j, col=1)
             ih_m = analyse(hm[KWCOLS].to_numpy()).Imbalance_pct.to_numpy(); ih_r = analyse(hr[KWCOLS].to_numpy()).Imbalance_pct.to_numpy()
-            f.add_scatter(x=hr.index, y=ih_r, name="Real values", legendgroup="r", showlegend=False, line=dict(color=IDLE, width=1), row=4, col=1)
+            if show_real: f.add_scatter(x=hr.index, y=ih_r, name="Real values", legendgroup="r", showlegend=False, line=dict(color=IDLE, width=1), row=4, col=1)
             f.add_scatter(x=hm.index, y=ih_m, name=mean_label, legendgroup="m", showlegend=False, line=dict(color=INK, width=2), row=4, col=1)
             f.add_scatter(x=t_fut, y=imb, name="Forecast", legendgroup="f", showlegend=False, mode="lines+markers", line=dict(color=ACCENT, width=2.6, dash="dash"), marker=dict(size=5), row=4, col=1)
             for sev_, col_ in (("ALARM", WARN), ("SEVERE", BAD)):
