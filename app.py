@@ -108,9 +108,6 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 .note { border-left:3px solid #6366F1; background:#F4F5FF; padding:.7rem 1rem; border-radius:0 12px 12px 0; color:#475569 !important; font-size:.88rem; margin:.5rem 0 .9rem; } .note b, .note i { color:#1E293B !important; }
 .note.amber { border-left-color:#F59E0B; background:#FFF8EB; }
 .note.good { border-left-color:#10B981; background:#E8FAF3; } .note.bad { border-left-color:#F43F5E; background:#FFF1F3; } .note ul { margin:.4rem 0 0 1.1rem; padding:0; } .note li { margin:.15rem 0; }
-.tblwrap { overflow-x:auto; border:1px solid #E6EAF2; border-radius:14px; background:#FFFFFF; margin:.4rem 0 1rem; }
-table.tbl { border-collapse:collapse; width:100%; font-size:.84rem; } table.tbl th { text-align:right; background:#F7F9FC; color:#64748B !important; font-weight:600; padding:.55rem .8rem; border-bottom:1px solid #E6EAF2; white-space:nowrap; }
-table.tbl td { text-align:right; padding:.5rem .8rem; border-bottom:1px solid #F0F3F8; color:#0F172A !important; font-family:'JetBrains Mono',monospace; font-size:.8rem; } table.tbl th:first-child, table.tbl td:first-child { text-align:left; }
 
 /* inputs (forced light) */
 [data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="base-input"], input, [data-testid="stNumberInputContainer"] { background:#FFFFFF !important; color:#0F172A !important; border-color:#DDE2EE !important; border-radius:10px !important; }
@@ -139,11 +136,6 @@ def kpi(label, value, sub="", tone="", icon="", trend=None, trend_color=FORECAST
 
 def note(text, tone=""):
     st.markdown(f'<div class="note {tone}">{text}</div>', unsafe_allow_html=True)
-
-
-def table(df, nd=3):
-    html = df.round(nd).to_html(index=False, classes="tbl", border=0, na_rep="–")
-    st.markdown('<div class="tblwrap">' + "".join(x.strip() for x in html.splitlines()) + "</div>", unsafe_allow_html=True)
 
 
 @contextmanager
@@ -214,13 +206,16 @@ def _parse(buffer, name):
     if name.endswith((".xlsx", ".xls")): return pd.read_excel(buffer)
     return pd.read_csv(buffer, encoding="utf-8-sig", low_memory=False)
 
+
 def parse_clock(col):
-    """ISO dates (2024-09-02 00:00:00) are read as year-month-day. Other layouts fall back to day-first."""
+    """ISO dates (2024-09-02 00:00:00) are read as year-month-day. Other layouts fall back to day-first (02/09/2024)."""
     s = col.astype(str).str.strip()
     t = pd.to_datetime(s, format="ISO8601", errors="coerce")
     if t.notna().mean() < 0.9:
         t = pd.to_datetime(s, dayfirst=True, errors="coerce")
     return t
+
+
 @st.cache_data(show_spinner="Reading the file…")
 def read_raw_path(path, mtime):
     return _parse(path, path)
@@ -410,18 +405,6 @@ def block_label(row):
     return f"{row.Start:%d %b %H:%M} → {row.End:%H:%M}"
 
 
-def table_txt(df, nd=1):
-    """Table for sentences: left-aligned, wrapping text, bold / line breaks allowed."""
-    html = df.round(nd).to_html(index=False, classes="tbl txt", border=0, na_rep="–", escape=False)
-    st.markdown('<div class="tblwrap">' + "".join(x.strip() for x in html.splitlines()) + "</div>", unsafe_allow_html=True)
-
-
-st.markdown("""<style>
-table.tbl.txt th, table.tbl.txt td { text-align:left; white-space:normal; font-family:'Inter',sans-serif; font-size:.82rem; vertical-align:top; }
-table.tbl.txt td:first-child { white-space:nowrap; font-weight:600; }
-</style>""", unsafe_allow_html=True)
-
-
 @st.cache_data(show_spinner="Building the hourly series…")
 def hourly_cached(tl_, min_readings):
     return gf.hourly_frame(tl_, ["KW"] + KWCOLS, min_readings)
@@ -574,9 +557,6 @@ with tab_overview:
                 if len(x_): f.add_bar(base=x_.From, x=(x_.To - x_.From).dt.total_seconds() * 1000, y=[w_] * len(x_), orientation="h", name=w_, marker_color=col_, width=.6,
                                      customdata=np.c_[x_.From.dt.strftime("%d %b %H:%M"), x_.To.dt.strftime("%d %b %H:%M"), x_.Hours.round(2)], hovertemplate="%{customdata[0]} → %{customdata[1]}<br><b>%{customdata[2]} h</b><extra></extra>")
             f.update_xaxes(type="date"); f.update_layout(hovermode="closest", barmode="overlay", showlegend=False); show(style(f, 190, False, top=10))
-            tb = pd.DataFrame({"What": per.What, "From": per.From.dt.strftime("%a %d %b %Y  %H:%M"), "To": per.To.dt.strftime("%a %d %b %Y  %H:%M"), "How long": [f"{int(h * 60) // 60} h {int(round(h * 60)) % 60:02d} min" for h in per.Hours]})
-            with st.expander(f"List of all {len(per)} stretches", expanded=len(per) <= 12): table(tb.head(500), 1)
-            st.download_button("⬇ Stops and gaps (CSV)", per.to_csv(index=False).encode(), "GridSense_stops_and_gaps.csv", "text/csv", key="stops_dl")
     with b, panel("Where the time went", "share of all minutes", key="donut"):
         f = go.Figure(go.Pie(labels=["Running", "Idle", "No data"], values=[S["run_min"], S["idle_min"], S["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD, IDLE, NODATA], line=dict(color="#fff", width=2)),
                              textinfo="percent", hovertemplate="%{label}<br>%{value:,} min<extra></extra>"))
@@ -591,8 +571,8 @@ with tab_load:
     c = st.columns([1.25, 1, 1, 1.3, 1])
     L_model = c[0].selectbox("Model", gf.MODELS, key="ld_model", help="Exponential Smoothing = damped-trend Holt-Winters (load notebook). Auto ETS = tries every ETS model and keeps the lowest AICc (slower).")
     L_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ld_len")
-    L_days = c[2].selectbox("Learn from last", [14, 28, 56, 90], index=1, key="ld_days", format_func=lambda x: f"{x} days")
-    L_season = SEASONS[c[3].selectbox("Seasonal cycle", list(SEASONS), index=0, key="ld_season", help="Hourly data: 24 = daily pattern, 168 = weekly pattern. The load notebook has 144 with a comment saying 24.")] if L_model == "Exponential Smoothing" else gf.ETS_SEASON
+    L_days = c[2].selectbox("Learn from", [0, 14, 28, 56, 90], index=0, key="ld_days", format_func=lambda x: "All history (as notebook)" if x == 0 else f"last {x} days", help="The notebook learns from ALL hours before the test week. A short window (14-28 days) throws away most of the history and gives a larger error.")
+    L_season = SEASONS[c[3].selectbox("Seasonal cycle", list(SEASONS), index=2, key="ld_season", help="Hourly data: 24 = daily pattern, 168 = weekly pattern. The load notebook has 144 with a comment saying 24.")] if L_model == "Exponential Smoothing" else gf.ETS_SEASON
     if L_model == "Auto ETS": c[3].caption("Auto ETS uses the daily cycle (24 h).")
     L_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ld_hist")
     fixed = None
@@ -603,7 +583,8 @@ with tab_load:
             al = q[0].slider("Level α", 0.0, 1.0, 0.7, 0.05, key="ld_a"); be = q[1].slider("Trend β", 0.0, 1.0, 0.05, 0.05, key="ld_b")
             ga_ = q[2].slider("Season γ", 0.0, 1.0, 0.1, 0.05, key="ld_g"); ph_ = q[3].slider("Damping φ", 0.8, 1.0, 0.95, 0.01, key="ld_p")
             if use_fixed: fixed = dict(smoothing_level=al, smoothing_trend=be, smoothing_seasonal=ga_, damping_trend=ph_)
-    fit_steps = int(L_days) * 24
+    fit_steps = len(y_mod) if int(L_days) == 0 else int(L_days) * 24
+    L_days_txt = "all available history" if int(L_days) == 0 else f"the last {L_days} days"
     fc_tot, lbl_tot, ok_tot = run_total(y_mod.iloc[-fit_steps:], MAX_STEPS, L_model, L_season, fixed)
     if not ok_tot: note(f"The model could not be fitted ({lbl_tot}); the forecast is a flat line. Try the other model or a different cycle.", "amber")
     if HF["n_gap"]: st.caption(f"{HF['n_gap']} hour(s) had too few readings: gaps up to 6 h are filled by a straight line for training" + (f"; {HF['n_left']} longer-gap hour(s) repeat the nearest hour." if HF["n_left"] else "."))
@@ -611,25 +592,6 @@ with tab_load:
     last_actual = float(y_mod.iloc[-1]); end_value = float(fv[-1])
     change = f"{abs(end_value - last_actual) / last_actual * 100:.1f} %" if last_actual >= 1 else f"{abs(end_value - last_actual):.1f} kW"
     up_down = "▲" if end_value >= last_actual else "▼"
-    with panel("Forecast ahead", f"{L_model} · {lbl_tot} · learns from the last {L_days} days · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
-        left, right = st.columns([1, 2.4])
-        with left:
-            st.markdown(f"""<div class="hero-f"><div class="l">Expected load · {t_f[-1]:%d %b %H:%M}</div><div class="big">{end_value:,.1f}<small> kW</small></div>
-<div class="r">average over the period <b>{fv.mean():,.1f} kW</b></div><span class="badge flat">{up_down} {change} vs last hour</span>
-<div class="mini"><div><b>{fv.max():,.1f}</b><span>peak kW</span></div><div><b>{horizon}</b><span>hourly points</span></div><div><b>{span_text(horizon)}</b><span>ahead</span></div></div></div>""", unsafe_allow_html=True)
-        with right:
-            hist = y_real.iloc[-HIST_H[L_hist]:]; f = go.Figure()
-            f.add_shape(type="rect", xref="x", yref="paper", x0=t_last, x1=t_f[-1], y0=0, y1=1, fillcolor=tint(ACCENT, .06), line_width=0)
-            f.add_scatter(x=hist.index, y=hist.values, name="Actual hourly kW", mode="lines", line=dict(color=INK, width=2.2), connectgaps=False)
-            f.add_scatter(x=[t_last] + list(t_f), y=[last_actual] + list(fv), name=f"Forecast ({L_model})", mode="lines", line=dict(color=FORECAST, width=3))
-            f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
-            f.add_annotation(x=t_last, yref="paper", y=1.0, text="last data point", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED))
-            f.update_yaxes(title="kW"); show(style(f, 340, True, top=70))
-        with st.expander(f"Forecast table · {horizon} points"):
-            ftab = pd.DataFrame({"Time": t_f, "Forecast kW": fv}); table(ftab.assign(Time=ftab.Time.dt.strftime("%d %b %H:%M")).head(300), 2)
-        st.download_button("⬇ Load forecast (CSV)", ftab.rename(columns={"Time": "Timestamp"}).to_csv(index=False).encode(), "GridSense_load_forecast.csv", "text/csv", key="ld_dl")
-        st.caption("Exponential Smoothing gives one line, no confidence band. How far to trust it is shown in 'Model check' below.")
-
     energy_f, avg_f, peak_f = float(fv.sum()), float(fv.mean()), float(fv.max()); energy_before = float(y_mod.iloc[-horizon:].sum())
     with panel("Power needed in the selected period", f"{t_f[0]:%d %b %H:%M} → {(t_f[-1] + pd.Timedelta(hours=1)):%d %b %H:%M} · {span_text(horizon)} · energy = sum of hourly kW", key="ld_pw"):
         pk = st.columns(5)
@@ -658,8 +620,22 @@ with tab_load:
         with cr:
             tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 72, dict(avg=avg_f, slope=slope, pf=PF_AVG, demand=DEMAND, peak_at=t_f[int(np.argmax(fv))]))
             note(advice_html(head_a, acts_a), tone_a)
-        with st.expander(f"Average power table · every {avg_choice}"):
-            table(pd.DataFrame({"Period": labels, "Avg kW": blk["Avg kW"], "Change kW": blk["Change kW"], "Change %": blk["Change %"]}), 2)
+
+    with panel("Forecast ahead", f"{L_model} · {lbl_tot} · learns from {L_days_txt} · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
+        left, right = st.columns([1, 2.4])
+        with left:
+            st.markdown(f"""<div class="hero-f"><div class="l">Expected load · {t_f[-1]:%d %b %H:%M}</div><div class="big">{end_value:,.1f}<small> kW</small></div>
+<div class="r">average over the period <b>{fv.mean():,.1f} kW</b></div><span class="badge flat">{up_down} {change} vs last hour</span>
+<div class="mini"><div><b>{fv.max():,.1f}</b><span>peak kW</span></div><div><b>{horizon}</b><span>hourly points</span></div><div><b>{span_text(horizon)}</b><span>ahead</span></div></div></div>""", unsafe_allow_html=True)
+        with right:
+            hist = y_real.iloc[-HIST_H[L_hist]:]; f = go.Figure()
+            f.add_shape(type="rect", xref="x", yref="paper", x0=t_last, x1=t_f[-1], y0=0, y1=1, fillcolor=tint(ACCENT, .06), line_width=0)
+            f.add_scatter(x=hist.index, y=hist.values, name="Actual hourly kW", mode="lines", line=dict(color=INK, width=2.2), connectgaps=False)
+            f.add_scatter(x=[t_last] + list(t_f), y=[last_actual] + list(fv), name=f"Forecast ({L_model})", mode="lines", line=dict(color=FORECAST, width=3))
+            f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
+            f.add_annotation(x=t_last, yref="paper", y=1.0, text="last data point", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED))
+            f.update_yaxes(title="kW"); show(style(f, 340, True, top=70))
+        st.caption("Exponential Smoothing gives one line, no confidence band. How far to trust it is shown in 'Model check' below.")
 
     # ---- model check on the last 168 hours (the load notebook's test)
     st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b><span>the last 168 hours are hidden, forecast from the hours before, then compared with what really happened</span></div>', unsafe_allow_html=True)
@@ -740,10 +716,6 @@ with tab_phase:
         f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, row=4, col=1); f.add_hline(y=SEVERE_PCT, line_dash="dot", line_color=BAD, row=4, col=1)
         f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
         style(f, 820, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f)
-        exp = pd.DataFrame({"Timestamp": Pf.index, "Red_kW": Pf.R.to_numpy(), "Yellow_kW": Pf.Y.to_numpy(), "Blue_kW": Pf.B.to_numpy(), "Total_kW": Pf.sum(axis=1).to_numpy(), "Imbalance_pct": imb,
-                            "Worst_phase": rep.Worst_phase.to_numpy(), "Direction": rep.Direction.to_numpy(), "Status": rep.Status.to_numpy()})
-        with st.expander(f"Forecast table · {horizon} hours"): table(exp.assign(Timestamp=exp.Timestamp.dt.strftime("%d %b %H:%M")).head(300), 2)
-        st.download_button("⬇ Phase forecast + alarms (CSV)", exp.to_csv(index=False).encode(), "GridSense_phase_forecast.csv", "text/csv", key="ph_dl")
 
     # ---- the action plan (rule-based)
     SEC = {key_: (title_, tone_, lines_) for key_, title_, tone_, lines_ in pb["sections"]}
@@ -761,16 +733,9 @@ with tab_phase:
         with a_: sec("do")
         with b_:
             sec("inphase")
-            if len(pb["target"]): table_txt(pb["target"], 1)
-            if len(pb["target_fc"]):
-                st.markdown('<div class="ph"><b>Forecast window</b><span>move this much kW between the colours to level the forecast</span></div>', unsafe_allow_html=True); table_txt(pb["target_fc"], 1)
-        st.markdown('<div class="ph" style="margin-top:.4rem"><b>When to do what</b><span>from the forecast: quietest and busiest hours, first alarm</span></div>', unsafe_allow_html=True)
-        table_txt(pb["when"], 1)
         a_, b_ = st.columns(2)
         with a_: sec("risk")
         with b_: sec("future")
-        if len(pb["daily"]):
-            st.markdown('<div class="ph"><b>Daily outlook</b><span>what the forecast expects each day and what to do about it</span></div>', unsafe_allow_html=True); table_txt(pb["daily"], 1)
         st.caption("Every action needs review by a qualified engineer before anything is changed. The rules are fixed thresholds from your limits (Data & limits), not a guarantee.")
 
     # ---- the evidence behind the advice
@@ -787,7 +752,6 @@ with tab_phase:
             else: st.caption("Needs a real clock in the file.")
         with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
             st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
-            table(dg["per"][["Avg current A", "95 % of minutes below A", "Avg voltage V", "PF (kW / V·I)"]].rename_axis("Phase").reset_index(), 2)
         if KW_OVER_VI > 0.98 and dg["pf_meter"] < 0.97:
             note(f"<b>Data check:</b> the phase 'kW' columns equal V × I (kW / V·I = {KW_OVER_VI:.2f}) while the meter power factor is {dg['pf_meter']:.2f}, so they behave like <b>kVA</b>. "
                  f"Imbalance % is not affected, but energy and kW limits are over-stated by about {(1 / dg['pf_meter'] - 1) * 100:.0f} %.", "amber")
@@ -800,7 +764,6 @@ with tab_phase:
         else:
             im = bt["imbalance"]
             note(f"<b>{rel[0].title()}:</b> {rel[1]}.", {"RELIABLE": "good", "DEGRADED": "amber", "UNRELIABLE": "bad"}.get(rel[0], ""))
-            table(bt["per_phase"].drop(columns="n"), 2)
             k2 = st.columns(4)
             with k2[0]: kpi("Imbalance error", f"{im['imb_mae']:.1f} pts", "average |forecast − actual| imbalance", "info", "⚖️")
             with k2[1]: kpi("Alarm call right", f"{im['status_ok']:.0f} %", f"alarm / no alarm, {im['hours']} test hours", "good" if im["status_ok"] >= 85 else "warn" if im["status_ok"] >= 65 else "bad", "✅")
