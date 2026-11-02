@@ -78,6 +78,14 @@ def forecast_reliability(res, margin=REL_MARGIN, min_moments=6):
     return "DEGRADED", f"no clear gain over the best baseline (wins {wins}, worse {worse} of {len(hs)} horizons)"
 
 
+def load_reliability(test_mae_pct, idle_pct, constant_test):
+    """RELIABLE / DEGRADED / UNRELIABLE / INSUFFICIENT DATA for the ARIMA load forecast, from its error on data it had not seen (project rule, not a universal one)."""
+    if constant_test or test_mae_pct is None or not np.isfinite(test_mae_pct): return "INSUFFICIENT DATA", "the test period is flat or empty, so the error cannot be judged"
+    if test_mae_pct > 25: return "UNRELIABLE", f"test error is {test_mae_pct:.0f} % of the mean load (above 25 %)"
+    if test_mae_pct > 10 or (idle_pct or 0) > 50: return "DEGRADED", f"test error is {test_mae_pct:.0f} % of the mean load" + (f" and {idle_pct:.0f} % of the training data is idle" if (idle_pct or 0) > 50 else "")
+    return "RELIABLE", f"test error is only {test_mae_pct:.0f} % of the mean load"
+
+
 # ------------------------------------------------------------------ evidence
 def build_evidence(f):
     """Turn the numbers the app measured/calculated (dict `f`) into evidence rows: id, parameter, value, unit, window, source column, method, kind."""
@@ -107,6 +115,19 @@ def build_evidence(f):
     add("minimum load per phase for 'machine on'", f.get("min_kw"), "kW", "configuration", "settings", "set in Data & limits", "config")
     if f.get("rating"): add("phase breaker / cable rating (user supplied)", f["rating"], "A", "configuration", "user input", "typed by the user, not verified", "config")
     if f.get("demand"): add("sanctioned demand (user supplied)", f["demand"], "kW", "configuration", "user input", "typed by the user, not verified", "config")
+    ld = f.get("load")
+    if ld:
+        w = ld.get("window", "forecast window")
+        add("forecast average load", ld.get("avg_kw"), "kW", w, "ARIMA forecast", "mean of the forecast minutes", "forecast")
+        add("forecast peak load", ld.get("peak_kw"), "kW", w, "ARIMA forecast", "maximum of the forecast minutes", "forecast")
+        add("forecast load at the first point", ld.get("first_kw"), "kW", w, "ARIMA forecast", "first forecast minute", "forecast")
+        add("forecast load at the last point", ld.get("last_kw"), "kW", w, "ARIMA forecast", "last forecast minute", "forecast")
+        add("forecast trend", ld.get("trend_kw_h"), "kW per hour", w, "ARIMA forecast", "straight-line slope of the block averages", "forecast")
+        add("forecast energy needed", ld.get("energy_kwh"), "kWh", w, "ARIMA forecast", "average kW x hours", "forecast")
+        add("energy used in the previous period of the same length", ld.get("energy_prev_kwh"), "kWh", "previous period", "KW", "sum of kW / 60", "measured")
+        add("average power factor", ld.get("pf_avg"), "", win, "PF", "mean of loaded minutes", "measured")
+        add("model test error (MAE) as share of the mean test load", ld.get("test_mae_pct"), "%", "test period", "ARIMA test", "MAE / mean actual load x 100", "calculated")
+        add("share of the training timeline that is idle", ld.get("idle_pct"), "%", "training period", "KW", "idle minutes / all minutes", "calculated")
     fc = f.get("forecast")
     if fc:
         w = fc.get("window", "forecast window")
@@ -129,6 +150,10 @@ def missing_information(f):
 
 def python_priority(f):
     """The highest priority the LLM is allowed to give - decided by configured rules, not by the LLM."""
+    ld = f.get("load")
+    if ld and f.get("mean_imb") is None:
+        dem, pk = f.get("demand") or 0, ld.get("peak_kw") or 0
+        return "high" if dem and pk > dem else "medium" if dem and pk > 0.85 * dem else "low"
     mi, thr, sev, rating, peak = f.get("mean_imb", 0), f.get("thr", 3), f.get("sev", 10), f.get("rating") or 0, f.get("peak_A_max") or 0
     if rating and peak > rating: return "critical"
     if mi > sev or (rating and peak > 0.85 * rating): return "high"
@@ -323,13 +348,13 @@ def fill(o, ev):
     return walk(o)
 
 
-def advise(facts, reliability, api_key, model=DEFAULT_MODEL, caller=groq_chat):
+def advise(facts, reliability, api_key, model=DEFAULT_MODEL, caller=groq_chat, topic="phase imbalance"):
     """Full pipeline. Returns dict(source='llm'|'fallback', error, answer, validation, rejected, evidence, ceiling).
     source='fallback' means the app should show the rule-based advice instead (no key, API failure, invalid JSON or schema failure)."""
     ev = build_evidence(facts); ceiling = python_priority(facts)
-    ctx = dict(forecast_reliability=reliability, priority_ceiling=ceiling, missing_information=missing_information(facts), data_clock="real" if facts.get("real_clock") else "assumed (no timestamps in the file)")
+    ctx = dict(topic=topic, forecast_reliability=reliability, priority_ceiling=ceiling, missing_information=missing_information(facts), data_clock="real" if facts.get("real_clock") else "assumed (no timestamps in the file)")
     out = dict(source="fallback", error=None, answer=None, validation=None, rejected=[], evidence=ev, ceiling=ceiling, ctx=ctx)
-    if not api_key: out["error"] = "no Groq API key found (set GROQ_API_KEY in a .env file)"; return out
+    if not api_key: out["error"] = "no Groq API key found (paste it into GROQ_API_KEY_EMBEDDED at the top of app.py)"; return out
     msgs = build_messages(ev, ctx); obj = None
     for attempt in range(2):                                   # one repair attempt when the JSON is invalid
         text, err = caller(msgs, api_key, model)
