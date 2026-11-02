@@ -835,11 +835,13 @@ with tab_pred:
             table(pd.DataFrame({"Period": labels, "Avg kW": blk["Avg kW"], "Change kW": blk["Change kW"], "Change %": blk["Change %"]}), 2)
 
     with panel("What to do about the load forecast", "AI advisor (Groq) re-reads the forecast every time the order, split, length or limits change · every number is filled in by Python and checked", key="pw_ai"):
-        mae_pct = float(mt["MAE"] / R["test"].Actual.mean() * 100) if R["test"].Actual.mean() >= 1 else None
-        rel, rel_why = ga.load_reliability(mae_pct, R["idle_share"] * 100, R["test_constant"])
-        ld = dict(window=f"next {span_text(horizon)}", avg_kw=avg_f, peak_kw=peak_f, first_kw=float(fv[0]), last_kw=float(fv[-1]), trend_kw_h=None if np.isnan(slope) else slope, energy_kwh=energy_f,
-                  energy_prev_kwh=energy_before if energy_before >= 1 else None, pf_avg=PF_AVG, test_mae_pct=mae_pct, idle_pct=float(R["idle_share"] * 100))
-        ai_panel(dict(load=ld, demand=DEMAND, rating=RATING, real_clock=real_clock, window="all loaded minutes"), rel, rel_why, "total load forecast", advice_html(head_a, acts_a), tone_a, "pw_ai_retry")
+        try:
+            mae_pct = float(mt["MAE"] / R["test"].Actual.mean() * 100) if R["test"].Actual.mean() >= 1 else None
+            rel, rel_why = ga.load_reliability(mae_pct, R["idle_share"] * 100, R["test_constant"])
+            ld = dict(window=f"next {span_text(horizon)}", avg_kw=avg_f, peak_kw=peak_f, first_kw=float(fv[0]), last_kw=float(fv[-1]), trend_kw_h=None if np.isnan(slope) else slope, energy_kwh=energy_f,
+                      energy_prev_kwh=energy_before if energy_before >= 1 else None, pf_avg=PF_AVG, test_mae_pct=mae_pct, idle_pct=float(R["idle_share"] * 100))
+            ai_panel(dict(load=ld, demand=DEMAND, rating=RATING, real_clock=real_clock, window="all loaded minutes"), rel, rel_why, "total load forecast", advice_html(head_a, acts_a), tone_a, "pw_ai_retry")
+        except Exception as exc: note(advice_html(head_a, acts_a), tone_a); st.caption(f"AI advisor unavailable ({type(exc).__name__}: {exc}). Make sure the newest gridsense_advisor.py is next to app.py.")
 
     if R["idle_share"] > .5:
         note(f"<b>Why the forecast is near zero:</b> as in your notebook, the model is trained on the full timeline, which is <b>{R['idle_share'] * 100:.0f} % idle (0 kW)</b>. The data ends in an idle period "
@@ -1059,12 +1061,14 @@ with tab_fc:
             d1, _ = st.columns([1, 3]); d1.download_button("⬇ Forecast + alarms (CSV)", exp.to_csv(index=False).encode(), "GridSense_phase_forecast.csv", "text/csv", on_click="ignore", width="stretch")
         with panel("What to do about the forecast", "AI advisor (Groq) re-reads the forecast every time the model, length, limits or backtest change · every number is filled in by Python and checked", key="fc_act"):
             tone_f, head_f, acts_f = forecast_advice(P, rep, t_fut, chronic, verdict, horizon > 60)
-            if DGm["empty"]: note(advice_html(head_f, acts_f), tone_f); st.caption("AI advisor skipped: too few loaded minutes in the measured data.")
-            else:
-                fin = np.isfinite(imb)
-                fc_facts = dict(window=f"next {len_name}", end_imb=float(imb[-1]) if fin[-1] else None, max_imb=float(np.nanmax(imb)) if fin.any() else None, n_alarm=n_al, n_points=K, end_total_kw=float(tot[-1]))
-                rel, rel_why = ga.forecast_reliability(res_bt)
-                ai_panel(ai_facts(DGm, fc_facts), rel, rel_why, "phase imbalance forecast", advice_html(head_f, acts_f), tone_f, "fc_ai_retry")
+            try:
+                if DGm["empty"]: note(advice_html(head_f, acts_f), tone_f); st.caption("AI advisor skipped: too few loaded minutes in the measured data.")
+                else:
+                    fin = np.isfinite(imb)
+                    fc_facts = dict(window=f"next {len_name}", end_imb=float(imb[-1]) if fin[-1] else None, max_imb=float(np.nanmax(imb)) if fin.any() else None, n_alarm=n_al, n_points=K, end_total_kw=float(tot[-1]))
+                    rel, rel_why = ga.forecast_reliability(res_bt)
+                    ai_panel(ai_facts(DGm, fc_facts), rel, rel_why, "phase imbalance forecast", advice_html(head_f, acts_f), tone_f, "fc_ai_retry")
+            except Exception as exc: note(advice_html(head_f, acts_f), tone_f); st.caption(f"AI advisor unavailable ({type(exc).__name__}: {exc}). Make sure the newest gridsense_advisor.py is next to app.py.")
         with panel("Is the forecast better than 'same as now'?", "backtest: SARIMAX learns from the 24 h before each past moment, forecasts 15 / 30 / 60 min, and is scored against what really happened", key="fc_bt"):
             if res_bt is None: st.caption("Not run yet for these settings - press 'Run backtest' above. It tests the last 20 % of the file.")
             else:
