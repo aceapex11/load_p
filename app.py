@@ -660,7 +660,7 @@ with tab_phase:
   if not H_OK: need_more_data()
   else:
     c = st.columns([1.3, 1, 1, 1.3, 1, .8, .9])
-    P_model = c[0].selectbox("Model", gf.MODELS, key="ph_model", help="Exponential Smoothing = damped-trend Holt-Winters. Auto ETS = best ETS model by AICc per phase (slower, can take a minute or two).")
+    P_model = c[0].selectbox("Model", ["Exponential Smoothing"], key="ph_model_es", help="Exponential Smoothing = damped-trend Holt-Winters.")
     P_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
     P_days = c[2].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
     P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[3].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")] if P_model == "Exponential Smoothing" else gf.ETS_SEASON
@@ -671,8 +671,7 @@ with tab_phase:
     fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season)
     Pf = pd.DataFrame(fc_arr[:horizon], index=t_fut_all[:horizon], columns=PH3); rep = analyse(Pf.to_numpy())
     if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
-    if P_model == "Auto ETS": st.caption("Auto ETS chose: " + " · ".join(f"{NAMES[i]} {lbls[p]}" for i, p in enumerate(PH3)))
-
+    
     bt_key = (P_model, P_season, int(P_days), bt_weeks, ALARM_PCT, SEVERE_PCT, MIN_KW, MINR, str(t_last))
     if run_bt:
         pbar = st.progress(0.0, text="Testing the model on past weeks…")
@@ -759,7 +758,7 @@ with tab_phase:
 
     # ---- how far to trust the forecast (backtest of the three-phase notebook)
     with panel("Can the forecast be trusted?", "backtest: the model learns from the weeks before each past week, forecasts it, and is scored against what really happened", key="ph_bt"):
-        if not ran: st.caption("Not run yet for these settings - press 'Run backtest' above (Exponential Smoothing: seconds; Auto ETS: a few minutes).")
+       
         elif bt is None: st.caption("Not enough history: the test needs the learning window plus one full week.")
         else:
             im = bt["imbalance"]
