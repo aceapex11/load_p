@@ -694,6 +694,23 @@ bar.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class=
 
 tab_overview, tab_pred, tab_imb, tab_fc = st.tabs(["Overview", "Load prediction", "Phase imbalance", "Phase forecast"])
 
+def idle_and_gap_periods(tl_, run_kw, min_min):
+    """Every stretch where the machine was not running (three-phase load <= run_kw) and every stretch with no readings, longer than min_min minutes."""
+    d = tl_[["Timestamps", "KW"]].dropna().sort_values("Timestamps").reset_index(drop=True)
+    step = d.Timestamps.diff().median()
+    if pd.isna(step) or step <= pd.Timedelta(0): step = pd.Timedelta(minutes=1)
+    dt = d.Timestamps.diff(); gap_before = dt > step * 2; rows = []
+    for i in np.flatnonzero(gap_before.to_numpy()):
+        rows.append(("No data", d.Timestamps[i - 1] + step, d.Timestamps[i]))
+    run = (d.KW > run_kw); seg = ((run != run.shift()) | gap_before).cumsum()
+    g = d.assign(run=run, seg=seg).groupby("seg").agg(frm=("Timestamps", "first"), last=("Timestamps", "last"), run=("run", "first"))
+    for _, r in g[~g.run].iterrows(): rows.append(("Machine not running", r.frm, r["last"] + step))
+    out = pd.DataFrame(rows, columns=["What", "From", "To"])
+    if out.empty: return out
+    out["Hours"] = (out.To - out.From).dt.total_seconds() / 3600
+    return out[out.Hours * 60 >= min_min].sort_values("From").reset_index(drop=True)
+
+
 # ================================================================== OVERVIEW
 with tab_overview:
     daily = S["daily"]; total_h = (S["run_min"] + S["idle_min"]) / 60
@@ -724,25 +741,89 @@ with tab_overview:
                 f.add_scatter(x=ten.index, y=ten[col_name], name=col_name, line=dict(color=color, width=1.4), fill="tozeroy" if len(cols) == 1 else None, fillcolor=tint(ACCENT, .14), connectgaps=False)
         f.update_xaxes(rangeslider_visible=True, rangeslider_thickness=.07); show(style(f, 400, legend=True, top=40))
     a, b = st.columns([2.1, 1])
-    with a, panel("Activity calendar", "average kW per hour of day · grey = idle, red = no data", key="heat"):
-        heat = S["heat"]; xs, ys = [f"{h:02d}:00" for h in heat.columns], [f"{d:%d %b}" for d in heat.index]
-        f = go.Figure(go.Heatmap(z=np.where(np.isnan(heat.values), 1.0, np.nan), x=xs, y=ys, xgap=2, ygap=2, showscale=False, hoverinfo="skip", colorscale=[[0, tint(NODATA, .45)], [1, tint(NODATA, .45)]], zmin=0, zmax=1))
-        f.add_trace(go.Heatmap(z=heat.values, x=xs, y=ys, zmin=0, zmax=HEAT_MAX, xgap=2, ygap=2,
-                                                   colorscale=[[0, GRID], [.02, tint(ACCENT, .2)], [.5, ACCENT], [1, ACCENT_DARK]], colorbar=dict(title="kW", thickness=10, len=.6),
-                                                   hoverongaps=False, hovertemplate="%{y} · %{x}<br><b>%{z:.0f} kW</b><extra></extra>"))
-        f.update_yaxes(autorange="reversed", dtick=3); f.update_layout(hovermode="closest"); show(style(f, 520, False, top=20))
+    with a, panel("When the machine was not running and when data is missing", "exact date and time of every stop and every gap in the readings", key="stops"):
+        q1, q2 = st.columns([1, 1.4])
+        min_m = q1.number_input("Ignore stretches shorter than (minutes)", 1, 1440, 10, 5, key="stop_min")
+        what = q2.radio("Show", ["Both", "Machine not running", "No data"], horizontal=True, key="stop_what")
+        per_all = idle_and_gap_periods(tl, RUN_KW, min_m); per = per_all if what == "Both" else per_all[per_all.What == what]
+        n_idle, n_gap = int((per_all.What == "Machine not running").sum()), int((per_all.What == "No data").sum())
+        h_idle = float(per_all.Hours[per_all.What == "Machine not running"].sum()); h_gap = float(per_all.Hours[per_all.What == "No data"].sum())
+        st.markdown(f"**{n_idle}** stretches with the machine not running (**{h_idle:,.1f} h** in total) · **{n_gap}** stretches with no data (**{h_gap:,.1f} h** in total) · only stretches of {min_m} min or longer are listed.")
+        if not real_clock: st.caption("The file has no real clock, so these dates and times are assumed from the row order.")
+        if per.empty: st.caption("Nothing to list with these settings.")
+        else:
+            f = go.Figure()
+            for w_, col_ in (("Machine not running", IDLE), ("No data", NODATA)):
+                x_ = per[per.What == w_]
+                if len(x_): f.add_bar(base=x_.From, x=(x_.To - x_.From).dt.total_seconds() * 1000, y=[w_] * len(x_), orientation="h", name=w_, marker_color=col_, width=.6,
+                                     customdata=np.c_[x_.From.dt.strftime("%d %b %H:%M"), x_.To.dt.strftime("%d %b %H:%M"), x_.Hours.round(2)], hovertemplate="%{customdata[0]} → %{customdata[1]}<br><b>%{customdata[2]} h</b><extra></extra>")
+            f.update_xaxes(type="date"); f.update_layout(hovermode="closest", barmode="overlay", showlegend=False); show(style(f, 190, False, top=10))
+            tb = pd.DataFrame({"What": per.What, "From": per.From.dt.strftime("%a %d %b %Y  %H:%M"), "To": per.To.dt.strftime("%a %d %b %Y  %H:%M"), "How long": [f"{int(h * 60) // 60} h {int(round(h * 60)) % 60:02d} min" for h in per.Hours]})
+            with st.expander(f"List of all {len(per)} stretches", expanded=len(per) <= 12): table(tb.head(500), 1)
+            st.download_button("⬇ Stops and gaps (CSV)", per.to_csv(index=False).encode(), "GridSense_stops_and_gaps.csv", "text/csv", key="stops_dl")
     with b, panel("Where the time went", "share of all minutes", key="donut"):
         f = go.Figure(go.Pie(labels=["Running", "Idle", "No data"], values=[S["run_min"], S["idle_min"], S["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD, IDLE, NODATA], line=dict(color="#fff", width=2)),
                              textinfo="percent", hovertemplate="%{label}<br>%{value:,} min<extra></extra>"))
         f.update_layout(hovermode="closest", annotations=[dict(text=f"<b>{S['util']:.1f}%</b><br><span style='font-size:11px;color:{MUTED}'>uptime</span>", showarrow=False, font=dict(size=22))])
         show(style(f, 300, True, top=20).update_layout(legend=dict(orientation="h", y=-0.05, x=0)))
         st.markdown(f'<div class="note amber" style="margin-top:.2rem">"Idle" = the three-phase load is below {3 * MIN_KW:g} kW. Prediction and balance use every recorded minute.</div>', unsafe_allow_html=True)
-    with panel("Running hours per day", "hover for energy and average load", key="daily"):
-        f = go.Figure(go.Bar(x=daily.index, y=daily.run_h, marker_color=[LOAD if v > 0 else AXIS for v in daily.run_h], customdata=np.c_[daily.kwh, daily.avg_run],
-                             hovertemplate="%{x|%d %b}<br><b>%{y:.1f} h running</b><br>%{customdata[0]:,.0f} kWh · avg %{customdata[1]:.0f} kW<extra></extra>"))
-        missing = pd.date_range(daily.index.min(), daily.index.max()).difference(pd.DatetimeIndex(daily.index))
-        if len(missing): f.add_bar(x=missing, y=[max(float(daily.run_h.max()), 1.0)] * len(missing), marker_color=NODATA, name="No data", hovertemplate="%{x|%d %b}<br><b>no data this day</b><extra></extra>")
-        f.update_layout(hovermode="closest", yaxis_title="hours", showlegend=False); show(style(f, 300, False, top=20))
+# ------------------------------------------------------------------ AI advisor inside the Phase forecast tab (runs by itself when the forecast changes)
+def groq_key():
+    try: secret = st.secrets.get("GROQ_API_KEY")
+    except Exception: secret = None
+    return ga.load_key(secret=secret or GROQ_API_KEY_EMBEDDED or None, env_file=Path(__file__).with_name(".env"))
+
+
+def ai_facts(DGm, fc):
+    """The numbers the AI may talk about (Python measured all of them)."""
+    per = DGm["per"]
+    return dict(mean_imb=DGm["mean_imb"], p95_imb=DGm["p95_imb"], pct_above=DGm["pct_above"], mean_I=DGm["mean_I"], mean_V=DGm["mean_V"],
+                per={n: dict(avg_A=float(per.loc[n, "Avg current A"]), peak_A=float(per.loc[n, "Peak A"]), avg_kW=float(per.loc[n, "Avg kW"])) for n in NAMES},
+                main_name=DGm["main_name"], extra_A=DGm["extra_A"], neutral_mean=DGm["neutral_mean"], loss=DGm["loss"], pf_meter=DGm["pf_meter"],
+                plan=[{"From": r["From"], "To": r["To"], "Move A": float(r["Move A"])} for _, r in DGm["plan"].iterrows()],
+                thr=ALARM_PCT, sev=SEVERE_PCT, min_kw=MIN_KW, rating=RATING, demand=DEMAND, real_clock=real_clock,
+                peak_A_max=float(per["Peak A"].max()), window="all loaded minutes", forecast=fc)
+
+
+def ai_cached(facts, reliability, key, topic="phase imbalance"):
+    """One Groq call per distinct situation: any change of model / length / limits / backtest makes a new situation, a plain re-run of the page reuses the answer."""
+    cache = st.session_state.setdefault("ai_cache", {}); h = ga.evidence_hash([facts, topic], reliability)
+    if h not in cache:
+        with st.spinner("AI advisor is reading the new forecast…"):
+            cache[h] = ga.advise(facts, reliability, key, model=os.environ.get("GROQ_MODEL", ga.DEFAULT_MODEL), topic=topic)
+        while len(cache) > 20: cache.pop(next(iter(cache)))
+    return h, cache[h]
+
+
+def ai_html(r):
+    a, e = r["answer"], _html.escape
+    ul = lambda items: "<ul>" + "".join(f"<li>{e(x)}</li>" for x in items) + "</ul>" if items else ""
+    out = [f"<b>What is happening</b><br>{e(a['what_is_happening']['summary'])}", "<br><b>Why (hypotheses, not proven)</b><ul>"
+           + "".join(f"<li>{e(c['cause'])} <i>({e(c['classification'].replace('_', ' '))}, {e(c['confidence'])} confidence)</i>"
+                     + (f"<br><span style='color:#64748B'>Missing: {e('; '.join(c['missing_information']))}</span>" if c.get("missing_information") else "") + "</li>" for c in a["why"]) + "</ul>"]
+    out.append("<b>What to do</b><ul>" + "".join(f"<li><b>[{e(x['priority'].upper())}]</b> {e(x['action'])}<br>Why: {e(x['reason'])}<br>Benefit: {e(x['benefit'])}"
+                                              + (f"<br>Drawbacks: {e('; '.join(x['drawbacks']))}" if x.get("drawbacks") else "") + f"<br>Check it worked: {e(x['verification'])}</li>" for x in a["actions"]) + "</ul>")
+    if a["if_no_action"]["consequences"]: out.append(f"<b>If nothing is done</b> ({e(a['if_no_action'].get('horizon', ''))}){ul(a['if_no_action']['consequences'])}")
+    if a["uncertainties"]: out.append(f"<b>What is still uncertain</b>{ul(a['uncertainties'])}")
+    return "".join(out)
+
+
+def ai_panel(facts, rel, rel_why, topic, rule_html, rule_tone, key, show_rule=True):
+    """Shows the AI advice (or the rule-based advice when the AI is unavailable) and returns nothing."""
+    h_ai, ai = ai_cached(facts, rel, groq_key(), topic)
+    if ai["source"] == "llm":
+        note(ai_html(ai), {"low": "good", "medium": "amber"}.get(ai["ceiling"], "bad"))
+        st.caption(f"Forecast reliability: **{rel}** ({rel_why}) · highest priority allowed by the rules: **{ai['ceiling']}** · checks: " + " · ".join(f"{k} {x.replace('_', ' ').lower()}" for k, x in ai["validation"].items())
+                   + " · every action needs review by a qualified engineer before anything is changed.")
+        if ai["rejected"]:
+            with st.expander(f"{len(ai['rejected'])} statement(s) changed or removed by the checker"): table(pd.DataFrame(ai["rejected"]), 2)
+        if show_rule:
+            with st.expander("Rule-based advice (same numbers, no AI)"): note(rule_html, rule_tone)
+    else:
+        if show_rule: note(rule_html, rule_tone)
+        st.caption(f"AI advisor not used: {ai['error']}." + (" The rule-based advice is shown instead." if show_rule else " The rule-based advice next to the chart still applies."))
+        if st.button("Try the AI advisor again", key=key): st.session_state["ai_cache"].pop(h_ai, None); st.rerun()
+
 
 # ================================================================== LOAD PREDICTION (ARIMA on the rolling total kW)
 with tab_pred:
@@ -840,8 +921,8 @@ with tab_pred:
             rel, rel_why = ga.load_reliability(mae_pct, R["idle_share"] * 100, R["test_constant"])
             ld = dict(window=f"next {span_text(horizon)}", avg_kw=avg_f, peak_kw=peak_f, first_kw=float(fv[0]), last_kw=float(fv[-1]), trend_kw_h=None if np.isnan(slope) else slope, energy_kwh=energy_f,
                       energy_prev_kwh=energy_before if energy_before >= 1 else None, pf_avg=PF_AVG, test_mae_pct=mae_pct, idle_pct=float(R["idle_share"] * 100))
-            ai_panel(dict(load=ld, demand=DEMAND, rating=RATING, real_clock=real_clock, window="all loaded minutes"), rel, rel_why, "total load forecast", advice_html(head_a, acts_a), tone_a, "pw_ai_retry")
-        except Exception as exc: note(advice_html(head_a, acts_a), tone_a); st.caption(f"AI advisor unavailable ({type(exc).__name__}: {exc}). Make sure the newest gridsense_advisor.py is next to app.py.")
+            ai_panel(dict(load=ld, demand=DEMAND, rating=RATING, real_clock=real_clock, window="all loaded minutes"), rel, rel_why, "total load forecast", advice_html(head_a, acts_a), tone_a, "pw_ai_retry", show_rule=False)
+        except Exception as exc: st.caption(f"AI advisor unavailable ({type(exc).__name__}: {exc}). Make sure the newest gridsense_advisor.py is next to app.py.")
 
     if R["idle_share"] > .5:
         note(f"<b>Why the forecast is near zero:</b> as in your notebook, the model is trained on the full timeline, which is <b>{R['idle_share'] * 100:.0f} % idle (0 kW)</b>. The data ends in an idle period "
@@ -964,62 +1045,6 @@ with tab_imb:
         if mode.startswith("Per phase"):
             rc = analyse([kw_calc]).iloc[0]
             if rc.Loaded: st.caption(f"Imbalance from these three results: **{rc.Imbalance_pct:.2f} %** · {rc.Worst_phase} is {abs(rc.Worst_dev):.1f} % {'above' if rc.Worst_dev > 0 else 'below'} the average · {rc.Status}")
-
-
-# ------------------------------------------------------------------ AI advisor inside the Phase forecast tab (runs by itself when the forecast changes)
-def groq_key():
-    try: secret = st.secrets.get("GROQ_API_KEY")
-    except Exception: secret = None
-    return ga.load_key(secret=secret or GROQ_API_KEY_EMBEDDED or None, env_file=Path(__file__).with_name(".env"))
-
-
-def ai_facts(DGm, fc):
-    """The numbers the AI may talk about (Python measured all of them)."""
-    per = DGm["per"]
-    return dict(mean_imb=DGm["mean_imb"], p95_imb=DGm["p95_imb"], pct_above=DGm["pct_above"], mean_I=DGm["mean_I"], mean_V=DGm["mean_V"],
-                per={n: dict(avg_A=float(per.loc[n, "Avg current A"]), peak_A=float(per.loc[n, "Peak A"]), avg_kW=float(per.loc[n, "Avg kW"])) for n in NAMES},
-                main_name=DGm["main_name"], extra_A=DGm["extra_A"], neutral_mean=DGm["neutral_mean"], loss=DGm["loss"], pf_meter=DGm["pf_meter"],
-                plan=[{"From": r["From"], "To": r["To"], "Move A": float(r["Move A"])} for _, r in DGm["plan"].iterrows()],
-                thr=ALARM_PCT, sev=SEVERE_PCT, min_kw=MIN_KW, rating=RATING, demand=DEMAND, real_clock=real_clock,
-                peak_A_max=float(per["Peak A"].max()), window="all loaded minutes", forecast=fc)
-
-
-def ai_cached(facts, reliability, key, topic="phase imbalance"):
-    """One Groq call per distinct situation: any change of model / length / limits / backtest makes a new situation, a plain re-run of the page reuses the answer."""
-    cache = st.session_state.setdefault("ai_cache", {}); h = ga.evidence_hash([facts, topic], reliability)
-    if h not in cache:
-        with st.spinner("AI advisor is reading the new forecast…"):
-            cache[h] = ga.advise(facts, reliability, key, model=os.environ.get("GROQ_MODEL", ga.DEFAULT_MODEL), topic=topic)
-        while len(cache) > 20: cache.pop(next(iter(cache)))
-    return h, cache[h]
-
-
-def ai_html(r):
-    a, e = r["answer"], _html.escape
-    ul = lambda items: "<ul>" + "".join(f"<li>{e(x)}</li>" for x in items) + "</ul>" if items else ""
-    out = [f"<b>What is happening</b><br>{e(a['what_is_happening']['summary'])}", "<br><b>Why (hypotheses, not proven)</b><ul>"
-           + "".join(f"<li>{e(c['cause'])} <i>({e(c['classification'].replace('_', ' '))}, {e(c['confidence'])} confidence)</i>"
-                     + (f"<br><span style='color:#64748B'>Missing: {e('; '.join(c['missing_information']))}</span>" if c.get("missing_information") else "") + "</li>" for c in a["why"]) + "</ul>"]
-    out.append("<b>What to do</b><ul>" + "".join(f"<li><b>[{e(x['priority'].upper())}]</b> {e(x['action'])}<br>Why: {e(x['reason'])}<br>Benefit: {e(x['benefit'])}"
-                                              + (f"<br>Drawbacks: {e('; '.join(x['drawbacks']))}" if x.get("drawbacks") else "") + f"<br>Check it worked: {e(x['verification'])}</li>" for x in a["actions"]) + "</ul>")
-    if a["if_no_action"]["consequences"]: out.append(f"<b>If nothing is done</b> ({e(a['if_no_action'].get('horizon', ''))}){ul(a['if_no_action']['consequences'])}")
-    if a["uncertainties"]: out.append(f"<b>What is still uncertain</b>{ul(a['uncertainties'])}")
-    return "".join(out)
-
-
-def ai_panel(facts, rel, rel_why, topic, rule_html, rule_tone, key):
-    """Shows the AI advice (or the rule-based advice when the AI is unavailable) and returns nothing."""
-    h_ai, ai = ai_cached(facts, rel, groq_key(), topic)
-    if ai["source"] == "llm":
-        note(ai_html(ai), {"low": "good", "medium": "amber"}.get(ai["ceiling"], "bad"))
-        st.caption(f"Forecast reliability: **{rel}** ({rel_why}) · highest priority allowed by the rules: **{ai['ceiling']}** · checks: " + " · ".join(f"{k} {x.replace('_', ' ').lower()}" for k, x in ai["validation"].items())
-                   + " · every action needs review by a qualified engineer before anything is changed.")
-        if ai["rejected"]:
-            with st.expander(f"{len(ai['rejected'])} statement(s) changed or removed by the checker"): table(pd.DataFrame(ai["rejected"]), 2)
-        with st.expander("Rule-based advice (same numbers, no AI)"): note(rule_html, rule_tone)
-    else:
-        note(rule_html, rule_tone); st.caption(f"AI advisor not used: {ai['error']}. The rule-based advice is shown instead.")
-        if st.button("Try the AI advisor again", key=key): st.session_state["ai_cache"].pop(h_ai, None); st.rerun()
 
 
 # ================================================================== PHASE FORECAST (SARIMAX per phase on the last 24 hours)
