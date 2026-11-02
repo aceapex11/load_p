@@ -1,14 +1,14 @@
-"""GridSense - machine load intelligence (light mode).
+"""GridSense - machine load intelligence (light mode). Rule-based advice, no AI service, no API key.
 Data            : device_16_prediction_dataset.csv - one row per minute with V1-V3, I1-I3, PF, RKW, YKW, BKW
                   (an optional Timestamps / Timestamp / Timestamp_Index column is used when present; you can also upload the file in the app)
-Overview        : load timeline (kW, phases, current, voltage, imbalance), activity calendar, uptime
-Load prediction : ARIMA(2,0,2) on the 30-min rolling total kW, future forecast + advice (power, kVA, power factor, sanctioned demand)
-Phase imbalance : measured imbalance % (max deviation from the 3-phase average), WHY it happens, WHAT to do (which phase to move how many amps)
-Phase forecast  : SARIMAX per phase on the last 24 hours (5-min steps), forecast imbalance + alarms, backtest against "same as now"
+Overview        : load timeline (kW, phases, current, voltage, imbalance), stops and gaps, uptime
+Load forecast   : hourly total kW, Exponential Smoothing or Auto ETS (exponential_smoothing_load_forecasting notebook), tested on the last 168 hours, power advice
+Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast (three_phase_imbalance_detection_forecasting notebook), imbalance alarms,
+                  and a rule-based action plan: what is out of phase, why, what to do now, when to do what, what can happen, how to bring it in phase, future balance
+Files next to app.py: gridsense_forecast.py (the notebooks' models) and gridsense_rules.py (the rule-based advisor)
 """
 import datetime as dt
 import io
-import os
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,15 +18,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-import html as _html
-import gridsense_advisor as ga
 
-# Paste your Groq key between the quotes ONCE and nobody ever has to type it in the app.
-# (If this project goes to GitHub, put the key in .streamlit/secrets.toml as GROQ_API_KEY = "..." instead and leave this empty.)
-GROQ_API_KEY_EMBEDDED = "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"
+import gridsense_forecast as gf
+import gridsense_rules as gr
 
 warnings.filterwarnings("ignore")
 st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
@@ -190,19 +184,23 @@ def phase_bars(values, scale):
     return out
 
 
+
+# ------------------------------------------------------------------ phase imbalance maths (lives in gridsense_rules.py; these wrappers use the limits set on the page)
+def analyse(P, thr=None, min_kw=None, sev=None):
+    """imbalance % = max(|R-avg|, |Y-avg|, |B-avg|) / avg x 100.  170 / 169 / 160 kW -> 3.81 %."""
+    return gr.analyse(P, ALARM_PCT if thr is None else thr, MIN_KW if min_kw is None else min_kw, SEVERE_PCT if sev is None else sev)
+
+
+def transfers(vals, names):
+    return gr.transfers(vals, names)
+
+
 # ------------------------------------------------------------------ data (device_16_prediction_dataset.csv)
 FEATS = ["V1", "V2", "V3", "I1", "I2", "I3", "PF"]
 KWCOLS = PHASES
 CURR, VOLT = ["I1", "I2", "I3"], ["V1", "V2", "V3"]
 NEEDED = FEATS + KWCOLS
 CLOCK_COLS = ("Timestamps", "Timestamp", "Timestamp_Index")
-SX_STEP, SX_WINDOW_H, SX_MAXITER = 5, 24, 50                 # SARIMAX: one point every 5 min, learns from the last 24 h (288 points)
-SX_WSTEPS = SX_WINDOW_H * 60 // SX_STEP
-SX_CONFIGS = {"SARIMA(1,1,1)x(1,0,0,12)": dict(order=(1, 1, 1), seasonal_order=(1, 0, 0, 12)),     # s = 12 x 5 min = a 1-hour cycle
-              "ARIMA(1,1,1)": dict(order=(1, 1, 1), seasonal_order=(0, 0, 0, 0)),
-              "ARIMA(2,1,2)": dict(order=(2, 1, 2), seasonal_order=(0, 0, 0, 0)),
-              "SARIMA(1,1,1)x(0,1,1,12)": dict(order=(1, 1, 1), seasonal_order=(0, 1, 1, 12))}
-
 
 def find_data():
     for folder in (HERE, Path.cwd(), HERE / "data"):
@@ -283,58 +281,6 @@ def timeline_summary(tl, run_kw):
                 now_running=bool(tl.KW[measured].iloc[-1] > run_kw))
 
 
-# ------------------------------------------------------------------ shared forecast-control options (Load prediction tab)
-CUSTOM = "Custom date & time"
-LENGTHS = {"30 minutes": 30, "1 hour": 60, "6 hours": 360, "12 hours": 720, "24 hours": 1440, "3 days": 4320, "7 days": 10080}
-STEPS = {"1 min": 1, "5 min": 5, "10 min": 10, "15 min": 15, "30 min": 30, "1 hour": 60, "3 hours": 180}
-HISTS = {"1 hour": 60, "3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}
-MAX_HORIZON = 10080                                   # 7 days of one-minute steps
-
-
-def thin_step(frame, max_points=4000):
-    """Every how-many-th row thin() keeps."""
-    return max(1, int(np.ceil(len(frame) / max_points)))
-
-
-def thin(frame, max_points=4000):
-    """Plot at most ~max_points rows (the full data is still used for every calculation)."""
-    k = int(np.ceil(len(frame) / max_points)); return frame.iloc[::k] if k > 1 else frame
-
-
-# ------------------------------------------------------------------ phase imbalance maths (the notebooks' formula)
-def analyse(P, thr=None, min_kw=None, sev=None):
-    """P = kW (or A, or V) of Red, Yellow, Blue in 3 columns.  imbalance % = max(|R-avg|, |Y-avg|, |B-avg|) / avg x 100,  avg = (R+Y+B) / 3.
-    170 / 169 / 160 kW -> 3.81 %.  A row is 'loaded' when the average phase value is above min_kw (otherwise the machine is off)."""
-    thr = ALARM_PCT if thr is None else thr
-    min_kw = MIN_KW if min_kw is None else min_kw
-    sev = SEVERE_PCT if sev is None else sev
-    P = np.asarray(P, float).reshape(-1, 3); n = len(P)
-    avg = P.mean(axis=1); loaded = avg > min_kw
-    with np.errstate(divide="ignore", invalid="ignore"):
-        d = (P - avg[:, None]) / avg[:, None] * 100
-    d[~loaded, :] = np.nan
-    worst = np.nan_to_num(np.abs(d), nan=-1).argmax(axis=1)
-    wdev = np.where(loaded, d[np.arange(n), worst], np.nan)
-    imb = np.abs(wdev); alarm = loaded & (imb > thr)
-    status = np.where(~loaded, "NO LOAD", np.where(~alarm, "OK", np.where(imb > sev, "SEVERE", "ALARM")))
-    return pd.DataFrame({"Imbalance_pct": imb, "R_dev": d[:, 0], "Y_dev": d[:, 1], "B_dev": d[:, 2], "Worst_phase": np.where(loaded, np.array(NAMES)[worst], "-"),
-                         "Worst_dev": wdev, "Direction": np.where(~loaded, "-", np.where(wdev > 0, "HIGH", "LOW")), "Alarm": alarm, "Status": status, "Loaded": loaded})
-
-
-def transfers(vals, names):
-    """Smallest set of moves that makes the three values equal: [(from, to, amount), ...] (largest surplus -> largest deficit first)."""
-    vals = np.asarray(vals, float); delta = vals - vals.mean()
-    sur = sorted([[d, n] for d, n in zip(delta, names) if d > 1e-9], reverse=True)
-    dfc = sorted([[-d, n] for d, n in zip(delta, names) if d < -1e-9], reverse=True)
-    out, i, j = [], 0, 0
-    while i < len(sur) and j < len(dfc):
-        m = min(sur[i][0], dfc[j][0]); out.append((sur[i][1], dfc[j][1], m))
-        sur[i][0] -= m; dfc[j][0] -= m
-        if sur[i][0] <= 1e-9: i += 1
-        if dfc[j][0] <= 1e-9: j += 1
-    return out
-
-
 @st.cache_data(show_spinner="Measuring the imbalance and looking for the cause…")
 def diagnose(frame, thr, min_kw, sev):
     """Everything the 'Phase imbalance' tab shows: size, which colour, WHY (current / voltage / power factor), load-level behaviour, a move plan."""
@@ -371,214 +317,6 @@ def diagnose(frame, thr, min_kw, sev):
                 per=per, main=main, main_name=NAMES[main], extra_A=float(extra_A.mean()), extra_kW=float(extra_kW.mean()), levels=levels, const=bool(const), lvA_const=float(lvA.iloc[1:].mean()),
                 ctot=cor(imb_kw, tot), plan=plan, Im=Im, Km=Km, neutral_mean=float(neutral.mean()), neutral_p95=float(np.percentile(neutral, 95)), loss=float(loss.mean()),
                 by_hour=by_hour, status=status, pf_phase=float(PFp.mean()), pf_meter=float(d["PF"].mean()), high_share=float(per.iloc[main, 1]))
-
-
-def imbalance_actions(dg, thr, sev, real_clock, rating):
-    """Turns the measured numbers into a short action list. Returns (tone, headline, [html lines])."""
-    mi, ab, nm, sh = dg["mean_imb"], dg["pct_above"], dg["main_name"], dg["share"]
-    if mi > sev: tone, head = "bad", f"Severe and constant: the average imbalance is {mi:.1f} % (alarm {thr:g} %, severe {sev:g} %)"
-    elif mi > thr: tone, head = "amber", f"Above the limit: the average imbalance is {mi:.1f} % (alarm {thr:g} %)"
-    else: tone, head = "good", f"Within the limit: the average imbalance is {mi:.1f} % (alarm {thr:g} %)"
-    acts = [f"<b>How often:</b> above the {thr:g} % limit in <b>{ab:.0f} %</b> of the loaded minutes, 95 % of minutes below {dg['p95_imb']:.1f} %. "
-            + ("This is permanent, not an event - fix it in how the loads are connected to the phases, not by operating the plant differently." if ab > 50
-               else "It comes and goes - look at when it happens (hour of day, which machine is on) before moving any wiring.")]
-    top = sh.idxmax()
-    if top == "Current":
-        acts.append(f"<b>Cause = load, not supply.</b> Current explains {sh['Current']:.0f} % of how far the worst phase is from the average (voltage {sh['Voltage']:.0f} %, power factor {sh['Power factor']:.0f} %). "
-                    f"The single-phase loads are not shared equally; <b>{nm}</b> is the worst phase in {dg['per'].iloc[dg['main'], 0]:.0f} % of minutes and is {'HIGH' if dg['high_share'] >= 50 else 'LOW'} in {max(dg['high_share'], 100 - dg['high_share']):.0f} % of them.")
-    elif top == "Voltage":
-        acts.append(f"<b>Cause = supply voltage.</b> Voltage explains {sh['Voltage']:.0f} % of the deviation (average voltage unbalance {dg['mean_V']:.1f} %). Check the incoming supply, the transformer tap and the upstream feeders, and raise it with the utility.")
-    else:
-        acts.append(f"<b>Cause = power factor.</b> The phases have different power factors ({sh['Power factor']:.0f} % of the deviation). Check capacitor banks and the single-phase loads (rectifiers, drives, lighting) on each phase.")
-    if top != "Voltage" and dg["mean_V"] > 1:
-        acts.append(f"<b>Supply is not perfect either:</b> voltage unbalance is {dg['mean_V']:.1f} % on average ({dg['p95_V']:.1f} % at the 95th percentile). Motors start losing capacity above about 1 % "
-                    f"(rule of thumb: winding temperature rises about 2 × (voltage unbalance %)² - roughly {2 * dg['mean_V'] ** 2:.0f} % here). Above 2 % ask the utility to correct it.")
-    elif top != "Voltage": acts.append(f"<b>Supply is fine:</b> voltage unbalance is only {dg['mean_V']:.1f} % on average, so the supply is not the reason.")
-    if len(dg["plan"]):
-        first = dg["plan"].iloc[0]
-        steps = " and ".join(f"<b>{r['To']}</b> (≈ {r['Move A']:.0f} A, ≈ {r['Move kW']:.0f} kW)" for _, r in dg["plan"].iterrows())
-        acts.append(f"<b>What to move:</b> take single-phase load off <b>{first['From']}</b> and give it to {steps}. "
-                    f"Whole machines cannot be split, so pick the loads that add up closest to these amps and re-check this page - the aim is to be inside {thr:g} %.")
-    if dg["const"]: acts.append(f"<b>Looks like a fixed load:</b> from the second load level upward {nm} carries about <b>{dg['lvA_const']:.0f} A</b> more than the other two phases, whatever the plant draws. "
-                                f"That points to one or a few single-phase loads (lighting, heaters, welders, control or auxiliary panels) wired to {nm} - find them first.")
-    if dg["ctot"] < -0.2: acts.append(f"<b>Worse at light load</b> (correlation {dg['ctot']:.2f} with total kW): {dg['levels']['imb'].iloc[0]:.1f} % at {dg['levels'].index[0]} against {dg['levels']['imb'].iloc[-1]:.1f} % at {dg['levels'].index[-1]}. "
-                                      "The extra single-phase load is the same, but it is a bigger share when the plant draws less - rebalance with the machine at light load in mind.")
-    elif dg["ctot"] > 0.2: acts.append(f"<b>Worse at heavy load</b> (correlation {dg['ctot']:.2f} with total kW): look for an overloaded phase at full production.")
-    if real_clock and len(dg["by_hour"]) >= 6 and dg["by_hour"].max() > 1.25 * dg["by_hour"].min():
-        hh, lh = int(dg["by_hour"].idxmax()), int(dg["by_hour"].idxmin())
-        acts.append(f"<b>When:</b> worst around {hh:02d}:00 ({dg['by_hour'].max():.1f} %), best around {lh:02d}:00 ({dg['by_hour'].min():.1f} %) - check which machines run at {hh:02d}:00.")
-    if dg["neutral_mean"] >= 1:
-        acts.append(f"<b>Neutral and heating:</b> in a 4-wire supply the imbalance returns through the neutral, about <b>{dg['neutral_mean']:.0f} A</b> on average ({dg['neutral_p95']:.0f} A at the 95th percentile) - check the neutral conductor and its protection. "
-                    f"Extra I²R heating against a balanced load is about {dg['loss']:.1f} % " + ("(small: the cost is low, the risk is the hot {0} phase).".format(nm) if dg["loss"] < 3 else "(significant: it also costs energy)."))
-    pk = dg["per"]["Peak A"]; p95 = dg["per"]["95 % of minutes below A"]
-    if rating > 0:
-        u = (pk / rating * 100); hot = u.idxmax()
-        acts.append(f"<b>Rating check ({rating:,.0f} A):</b> {hot} peaks at {pk[hot]:,.0f} A = <b>{u[hot]:.0f} %</b> of the rating (95 % of minutes below {p95[hot]:,.0f} A). "
-                    + ("It is over the rating - reduce its load now." if u[hot] > 100 else "Little headroom - move load away before adding any." if u[hot] > 85 else "There is headroom, but the loaded phase will reach the limit first."))
-    else: acts.append(f"<b>Rating check:</b> {pk.idxmax()} peaks at {pk.max():,.0f} A. Enter the breaker / cable rating in 'Data & limits' to see the headroom per phase.")
-    return tone, head, acts
-
-
-# ------------------------------------------------------------------ SARIMAX per phase (learns from the last 24 hours, 5-minute steps)
-def _fit_window(window, steps, cfg):
-    """One SARIMAX per phase on a (288, 3) window -> forecast, 95 % range and fitted values. A failed fit falls back to 'same as now'."""
-    mean, lo, hi = np.zeros((steps, 3)), np.zeros((steps, 3)), np.zeros((steps, 3)); fit = np.full((len(window), 3), np.nan); ok = []
-    for j in range(3):
-        y = window[:, j]
-        try:
-            res = SARIMAX(y, enforce_stationarity=False, enforce_invertibility=False, **cfg).fit(disp=False, maxiter=SX_MAXITER, cov_type="none")
-            fc = res.get_forecast(steps); ci = np.asarray(fc.conf_int(alpha=0.05), float)
-            mean[:, j], lo[:, j], hi[:, j], fit[:, j] = np.asarray(fc.predicted_mean, float), ci[:, 0], ci[:, 1], np.asarray(res.fittedvalues, float); ok.append(True)
-        except Exception:
-            mean[:, j], lo[:, j], hi[:, j] = y[-1], np.nan, np.nan; ok.append(False)
-    return dict(mean=np.clip(mean, 0, None), lo=np.clip(lo, 0, None), hi=hi, fit=fit, ok=ok)
-
-
-@st.cache_data(show_spinner="Fitting SARIMAX on the last 24 hours (Red, Yellow, Blue)…")
-def sx_forecast(window, steps, cfg_name):
-    return _fit_window(window, steps, SX_CONFIGS[cfg_name])
-
-
-def newest_window(arr):
-    """The newest 24 h of one series (every 5 min). Short gaps are filled by straight lines. Returns (window, index of its last row, number of filled points) or None."""
-    ok = ~np.isnan(arr).any(axis=1)
-    if not ok.any(): return None
-    pn = int(np.flatnonzero(ok)[-1]); ih = pn - SX_STEP * np.arange(SX_WSTEPS - 1, -1, -1)
-    if ih[0] < 0: return None
-    w = pd.DataFrame(arr[ih]); miss = int(w.isna().any(axis=1).sum())
-    if miss > 0.1 * len(w): return None
-    return w.interpolate(limit_direction="both").to_numpy(float), pn, miss
-
-
-def sx_backtest(D_raw, D, train_on, cfg_name, n_origins, horizons, progress=None):
-    """At n_origins moments in the last 20 % of the file: SARIMAX learns from the previous 24 h only, forecasts 15 / 30 / 60 min, and is scored against
-    what really happened and against 'same as now'. Returns a table (or None when there were too few usable moments)."""
-    SRC = (D_raw if train_on == "Real values" else D)[KWCOLS].to_numpy(float)
-    K = max(horizons) // SX_STEP; first = int(len(SRC) * 0.8); last = len(SRC) - 1 - K * SX_STEP
-    if last <= first: return None
-    F, T, Z = [], [], []
-    for n_i, p in enumerate(np.unique(np.linspace(first, last, n_origins).astype(int)), 1):
-        ih, ifu = p - SX_STEP * np.arange(SX_WSTEPS - 1, -1, -1), p + SX_STEP * np.arange(1, K + 1)
-        if ih[0] >= 0:
-            w, fut = SRC[ih], SRC[ifu]
-            if not (np.isnan(w).any() or np.isnan(fut).any()):
-                F.append(_fit_window(w, K, SX_CONFIGS[cfg_name])["mean"]); T.append(fut); Z.append(np.repeat(w[-1:], K, axis=0))
-        if progress: progress(min(n_i / n_origins, 1.0))
-    if len(F) < 3: return None
-    F, T, Z = np.array(F), np.array(T), np.array(Z); rows = []
-    for h in horizons:
-        k = h // SX_STEP - 1; truth = T[:, k, :]; ib = analyse(truth).Imbalance_pct.to_numpy()
-        for name, X in (("SARIMAX", F[:, k, :]), ("Same as now", Z[:, k, :])):
-            rows.append({"Minutes ahead": h, "Method": name, "Phase kW error": float(np.abs(X - truth).mean()), "Total kW error": float(np.abs(X.sum(axis=1) - truth.sum(axis=1)).mean()),
-                         "Imbalance error (pts)": float(np.nanmean(np.abs(analyse(X).Imbalance_pct.to_numpy() - ib))), "Moments": len(F)})
-    return pd.DataFrame(rows)
-
-
-def bt_verdict(res):
-    """Compare SARIMAX with 'same as now' over all horizons. Returns (tone, text)."""
-    s, z = res[res.Method == "SARIMAX"].reset_index(drop=True), res[res.Method == "Same as now"].reset_index(drop=True)
-    gain = lambda col: float((1 - s[col].mean() / max(z[col].mean(), 1e-9)) * 100) if np.isfinite(s[col].mean()) and np.isfinite(z[col].mean()) else 0.0
-    g_tot, g_imb = gain("Total kW error"), gain("Imbalance error (pts)")
-    if g_tot > 3 and g_imb > 3: return "good", f"SARIMAX adds value on your data: total kW error {g_tot:+.0f} % and imbalance error {g_imb:+.0f} % against 'same as now' (positive = better)."
-    if g_tot < -3 or g_imb < -3: return "bad", f"SARIMAX is WORSE than simply repeating the last value (total kW {g_tot:+.0f} %, imbalance {g_imb:+.0f} %). Use the forecast only as a trend hint."
-    return "amber", f"SARIMAX is about as good as 'same as now' (total kW {g_tot:+.0f} %, imbalance {g_imb:+.0f} %): the phases change too slowly for a model to add much - treat the forecast as 'the imbalance will stay about where it is now'."
-
-
-def forecast_advice(P, rep, t_fut, chronic, verdict, long_horizon):
-    """What to do about the forecast imbalance. P = forecast kW (steps x 3), rep = analyse(P). Returns (tone, headline, [html lines])."""
-    n = len(P); n_al, n_sev = int(rep.Alarm.sum()), int((rep.Status == "SEVERE").sum()); acts = []
-    word = {"up": "rising", "down": "falling", "flat": "steady", "idle": "idle"}
-    first, last = P[0], P[-1]
-    if not rep.Loaded.any(): return "", "The machine is expected to stay idle", ["No imbalance can build up while the load is below the minimum - nothing to do."]
-    for j, nm in enumerate(NAMES): acts.append(f"<b>{nm}</b> {word[trend_kind(first[j], last[j])]}: {first[j]:,.1f} → {last[j]:,.1f} kW{pct_text(pct_change(first[j], last[j]))}")
-    imb = rep.Imbalance_pct.to_numpy(); i_max = int(np.nanargmax(imb))
-    if n_sev: tone, head = "bad", f"SEVERE imbalance expected: {n_sev} of {n} forecast points above {SEVERE_PCT:g} % (highest {imb[i_max]:.1f} %)"
-    elif n_al:
-        idx = int(np.flatnonzero(rep.Alarm.to_numpy())[0]); mins = int((t_fut[idx] - (t_fut[0] - pd.Timedelta(minutes=SX_STEP))).total_seconds() // 60)
-        tone, head = ("bad" if n_al > n / 2 else "amber"), f"Alarm expected from {t_fut[idx]:%H:%M} (in {mins} min): {n_al} of {n} points above {ALARM_PCT:g} %, highest {imb[i_max]:.1f} %"
-    else: tone, head = "good", f"No alarm expected: the imbalance stays at {np.nanmin(imb):.1f}–{np.nanmax(imb):.1f} % (limit {ALARM_PCT:g} %)"
-    r = rep.iloc[i_max]
-    if np.isfinite(r.Worst_dev): acts.append(f"At the worst point ({t_fut[i_max]:%H:%M}) <b>{r.Worst_phase}</b> is <b>{abs(r.Worst_dev):.1f} % {'above' if r.Worst_dev > 0 else 'below'}</b> the average of the three phases.")
-    mv = transfers(P.mean(axis=0), NAMES)
-    if n_al or n_sev:
-        if mv: acts.append("<b>Act before it happens:</b> " + "; ".join(f"move about <b>{a:,.1f} kW</b> of single-phase load from <b>{f}</b> to <b>{t}</b>" for f, t, a in mv if a >= 0.5) + " (average of the forecast window).")
-        if n_sev: acts.append("SEVERE points: check for a loose or failed connection, a single-phase fault or a tripped single-phase protection if the load really is that uneven.")
-    if chronic is not None and (n_al or n_sev):
-        acts.append(f"This matches the measured pattern ({chronic:.0f} % of loaded minutes are above the limit): it is the usual imbalance, not a new fault." if chronic > 50
-                    else f"Only {chronic:.0f} % of the measured loaded minutes are above the limit, so an alarm here is unusual - check what changed on the plant.")
-    if verdict: acts.append(verdict)
-    else: acts.append("Reliability not tested yet: press <b>Run backtest</b> to see whether SARIMAX beats 'same as now' on your file (in your notebook the 15-minute model was only about equal to it).")
-    if long_horizon: acts.append("Beyond about 1 hour the 95 % range widens and the forecast drifts towards a flat line - use the far end as a guide only.")
-    return tone, head, acts
-
-
-# ------------------------------------------------------------------ Load prediction (ARIMA on the rolling total kW)
-@st.cache_data(show_spinner="Training ARIMA and forecasting…")
-def predict_kw(meter_df, arima_order, train_split_pct, backtest_block_min, rolling_window_min):
-    # 1) clean + rolling mean of KW (the series ARIMA models) - same steps as the notebook
-    raw = (meter_df[["Timestamps", "KW"]].dropna().sort_values("Timestamps").drop_duplicates("Timestamps").set_index("Timestamps"))
-    rolling_kw = raw["KW"].rolling(rolling_window_min, min_periods=rolling_window_min).mean().dropna().astype(float)
-
-    # 2) chronological train / test split
-    n_train = int(len(rolling_kw) * train_split_pct / 100)
-    train_series, test_series = rolling_kw.iloc[:n_train], rolling_kw.iloc[n_train:]
-    if len(train_series) < 50 or len(test_series) < 5: raise ValueError("Not enough data for this train/test split.")
-    train_values = pd.Series(train_series.to_numpy(), name="KW")        # plain 0..n index so the model can be extended later
-
-    # 3) train ARIMA on the training part only (or reuse the saved, identical parameters)
-    model = ARIMA(train_values, order=arima_order, enforce_stationarity=False, enforce_invertibility=False)
-    same_as_saved = False
-    arima_fit = model.fit()
-    train_fitted = np.asarray(arima_fit.predict(start=0, end=len(train_values) - 1, dynamic=False)).reshape(-1)
-    train_table = pd.DataFrame({"Timestamp": train_series.index, "Actual": train_series.to_numpy(), "Fitted": train_fitted})
-    train_table["Residual"] = train_table.Actual - train_table.Fitted
-
-    # 4) test: forecast one block BEFORE seeing it, then reveal its actual values (parameters are never re-fitted)
-    next_position, forecast_values, actual_values, block_timestamps = len(train_values), [], [], []
-    running_fit = arima_fit
-    for block_start in range(0, len(test_series), backtest_block_min):
-        actual_block = test_series.iloc[block_start:block_start + backtest_block_min]
-        forecast_values.extend(np.asarray(running_fit.forecast(steps=len(actual_block))).reshape(-1))
-        actual_values.extend(actual_block.to_numpy()); block_timestamps.extend(actual_block.index)
-        running_fit = running_fit.extend(pd.Series(actual_block.to_numpy(dtype=float), index=pd.RangeIndex(next_position, next_position + len(actual_block)), name="KW"))
-        next_position += len(actual_block)
-    test_table = pd.DataFrame({"Timestamp": block_timestamps, "Actual": actual_values, "Forecast": forecast_values}).sort_values("Timestamp").reset_index(drop=True)
-    test_table["Residual"] = test_table.Actual - test_table.Forecast
-
-    def score(actual, predicted):
-        return dict(RMSE=float(np.sqrt(mean_squared_error(actual, predicted))), MAE=float(mean_absolute_error(actual, predicted)), R2=float(r2_score(actual, predicted)))
-
-    # 5) future forecast: starts right after the last test timestamp, same parameters (up to 7 days; the page slices what you ask for)
-    future = running_fit.get_forecast(steps=MAX_HORIZON); band = np.asarray(future.conf_int(alpha=0.05)); last_time = test_series.index[-1]
-    return dict(train=train_table, test=test_table, m_train=score(train_table.Actual, train_table.Fitted), m_test=score(test_table.Actual, test_table.Forecast),
-                t2=test_series.index[0], t3=last_time, n_train=len(train_series), n_test=len(test_series), idle_share=float((raw["KW"] < 1).mean()),
-                test_constant=bool(test_series.nunique() == 1), level=float(rolling_kw.mean()), reused_saved_fit=same_as_saved,
-                future=dict(times=pd.date_range(last_time + pd.Timedelta(minutes=1), periods=MAX_HORIZON, freq="min"), mean=np.asarray(future.predicted_mean),
-                            lower=np.maximum(band[:, 0], 0), upper=band[:, 1], last_time=last_time, last_value=float(test_series.iloc[-1]), history=rolling_kw.tail(1440)))
-
-
-# ------------------------------------------------------------------ power summary helpers (energy, first / last point, averaged blocks, advice)
-AVG_BLOCKS = {"30 min": 30, "1 hour": 60, "2 hours": 120, "3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}
-
-
-def span_text(minutes):
-    minutes = int(minutes)
-    return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h" if minutes % 60 == 0 else f"{minutes / 60:.1f} h"
-
-
-def block_averages(values, last_time, minutes):
-    """Average of the 1-minute forecast over consecutive blocks of `minutes` (the last block may be shorter), with the change from block to block."""
-    v = pd.Series(np.asarray(values, float), index=pd.date_range(last_time + pd.Timedelta(minutes=1), periods=len(values), freq="min"))
-    rows = [(v.index[i], v.index[min(i + minutes, len(v)) - 1], float(v.iloc[i:i + minutes].mean()), len(v.iloc[i:i + minutes])) for i in range(0, len(v), minutes)]
-    out = pd.DataFrame(rows, columns=["Start", "End", "Avg kW", "Minutes"])
-    out["Change kW"] = out["Avg kW"].diff()
-    prev = out["Avg kW"].shift(1)
-    out["Change %"] = np.where(prev >= 1, out["Change kW"] / prev * 100, np.nan)
-    return out
-
-
-def block_label(row):
-    return f"{row.Start:%d %b %H:%M} → {row.End:%H:%M}"
 
 
 def trend_kind(first, last):
@@ -636,8 +374,66 @@ def power_advice(kind, first, last, peak, long_horizon, ctx=None):
     if kind == "up": acts += ["Stagger the start-up of large motors and move deferrable loads (batch jobs, pumps, charging) to off-peak hours.", "If the rise continues in the next forecast, plan extra capacity or a load-shedding sequence for non-critical equipment."]
     elif kind == "down": acts += ["Switch off or park idle auxiliaries and standby equipment; use the low-load window for maintenance.", "If the machine should be producing, check for a stoppage or a process problem."]
     else: acts.append("Keep monitoring; the forecast updates as new readings arrive.")
-    if long_horizon: acts.append("ARIMA is a short-term model: beyond 1-2 hours the forecast flattens towards the long-run average, so treat the far end as a guide.")
+    if long_horizon: acts.append("Exponential Smoothing repeats the daily / weekly pattern it has learned: the far end of the forecast is a typical day, not a prediction of one specific event - use it as a guide.")
     return tone, head, acts
+
+
+
+# ------------------------------------------------------------------ hourly helpers for the two forecast tabs
+AVG_BLOCKS_H = {"1 hour": 1, "3 hours": 3, "6 hours": 6, "12 hours": 12, "24 hours": 24}
+LD_LENGTHS = {"24 hours": 24, "3 days": 72, "7 days": 168}
+HIST_H = {"24 hours": 24, "3 days": 72, "7 days": 168, "14 days": 336}
+SEASONS = {"Daily cycle (24 h)": 24, "Weekly cycle (168 h)": 168, "Load notebook value (144 h)": 144}
+MAX_STEPS = 168                                                   # every forecast is made 7 days ahead once; the page slices what you ask for
+
+
+def span_text(hours):
+    hours = int(hours); return f"{hours} h" if hours < 48 else f"{hours / 24:.0f} days"
+
+
+def block_averages(values, first_time, hours):
+    """Average of the hourly forecast over consecutive blocks of `hours` (the last block may be shorter), with the change from block to block."""
+    v = pd.Series(np.asarray(values, float), index=pd.date_range(first_time, periods=len(values), freq="h"))
+    rows = [(v.index[i], v.index[min(i + hours, len(v)) - 1] + pd.Timedelta(hours=1), float(v.iloc[i:i + hours].mean()), len(v.iloc[i:i + hours])) for i in range(0, len(v), hours)]
+    out = pd.DataFrame(rows, columns=["Start", "End", "Avg kW", "Hours"]); out["Change kW"] = out["Avg kW"].diff(); prev = out["Avg kW"].shift(1)
+    out["Change %"] = np.where(prev >= 1, out["Change kW"] / prev * 100, np.nan)
+    return out
+
+
+def block_label(row):
+    return f"{row.Start:%d %b %H:%M} → {row.End:%H:%M}"
+
+
+def table_txt(df, nd=1):
+    """Table for sentences: left-aligned, wrapping text, bold / line breaks allowed."""
+    html = df.round(nd).to_html(index=False, classes="tbl txt", border=0, na_rep="–", escape=False)
+    st.markdown('<div class="tblwrap">' + "".join(x.strip() for x in html.splitlines()) + "</div>", unsafe_allow_html=True)
+
+
+st.markdown("""<style>
+table.tbl.txt th, table.tbl.txt td { text-align:left; white-space:normal; font-family:'Inter',sans-serif; font-size:.82rem; vertical-align:top; }
+table.tbl.txt td:first-child { white-space:nowrap; font-weight:600; }
+</style>""", unsafe_allow_html=True)
+
+
+@st.cache_data(show_spinner="Building the hourly series…")
+def hourly_cached(tl_, min_readings):
+    return gf.hourly_frame(tl_, ["KW"] + KWCOLS, min_readings)
+
+
+@st.cache_data(show_spinner="Training the model and forecasting the total load…")
+def run_total(y_tail, steps, model, season, fixed):
+    return gf.forecast_series(y_tail.to_numpy(), steps, model, season, fixed)
+
+
+@st.cache_data(show_spinner="Testing the model on the last 168 hours…")
+def run_holdout(y_real, y_model, model, season, fixed, fit_steps):
+    return gf.holdout_total(y_real, y_model, model, season, fixed, fit_steps)
+
+
+@st.cache_data(show_spinner="Training the model on Red, Yellow and Blue (Auto ETS can take a minute or two)…")
+def run_phases(window, steps, model, season):
+    return gf.forecast_phases(window, steps, model, season)
 
 
 # ------------------------------------------------------------------ page
@@ -672,6 +468,7 @@ with settings:
     SMOOTH = int(c[3].number_input("Smoothing (min)", 1, 120, 30, key="lim_smooth", help="Rolling mean of the PAST minutes only (1 = no smoothing)."))
     DEMAND = float(c[4].number_input("Sanctioned demand (kW, 0 = unknown)", 0.0, 100000.0, 0.0, 10.0, key="lim_demand"))
     RATING = float(c[5].number_input("Phase breaker / cable (A, 0 = unknown)", 0.0, 10000.0, 0.0, 10.0, key="lim_rating"))
+    MINR = int(st.columns(6)[0].number_input("Min readings per hour", 1, 60, 45, 5, key="lim_minr", help="Hourly forecasts: an hour with fewer one-minute readings than this counts as missing (the notebooks use 45)."))
 
 RUN_KW = 3 * MIN_KW                                               # three-phase load above this = machine running
 D_raw, D = make_grid(tl, SMOOTH)
@@ -692,7 +489,20 @@ clock_chip = '<span class="chip">clock assumed</span>' if not real_clock else ""
 bar.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase imbalance</div></div><div class="sp"></div>
 {status}<span class="chip">{data_name}</span><span class="chip">{tl.Timestamps.min():%d %b} → {tl.Timestamps.max():%d %b %Y}</span><span class="chip">{len(tl):,} readings</span>{clock_chip}</div>""", unsafe_allow_html=True)
 
-tab_overview, tab_pred, tab_imb, tab_fc = st.tabs(["Overview", "Load prediction", "Phase imbalance", "Phase forecast"])
+
+tab_overview, tab_load, tab_phase = st.tabs(["Overview", "Load forecast", "Phase balance"])
+HF = hourly_cached(tl, MINR)                                      # hourly series for both forecast tabs (notebook method)
+H_OK = HF is not None and len(HF["model"]) >= 72
+if H_OK:
+    H_real, H_mod = HF["real"], HF["model"]
+    PH3 = gf.PH
+    ph_real, ph_mod = H_real[KWCOLS].set_axis(PH3, axis=1), H_mod[KWCOLS].set_axis(PH3, axis=1)
+    y_real, y_mod, t_last = H_real["KW"], H_mod["KW"], H_mod.index[-1]
+    t_fut_all = pd.date_range(t_last + pd.Timedelta(hours=1), periods=MAX_STEPS, freq="h")
+
+def need_more_data():
+    note("<b>Not enough hourly data.</b> The forecasts need at least 3 days of hours that each have enough readings (see 'Min readings per hour' in Data & limits). "
+         "For the weekly cycle and the backtest, about 5 weeks are better.", "amber")
 
 def idle_and_gap_periods(tl_, run_kw, min_min):
     """Every stretch where the machine was not running (three-phase load <= run_kw) and every stretch with no readings, longer than min_min minutes."""
@@ -766,256 +576,231 @@ with tab_overview:
                              textinfo="percent", hovertemplate="%{label}<br>%{value:,} min<extra></extra>"))
         f.update_layout(hovermode="closest", annotations=[dict(text=f"<b>{S['util']:.1f}%</b><br><span style='font-size:11px;color:{MUTED}'>uptime</span>", showarrow=False, font=dict(size=22))])
         show(style(f, 300, True, top=20).update_layout(legend=dict(orientation="h", y=-0.05, x=0)))
-        st.markdown(f'<div class="note amber" style="margin-top:.2rem">"Idle" = the three-phase load is below {3 * MIN_KW:g} kW. Prediction and balance use every recorded minute.</div>', unsafe_allow_html=True)
-# ------------------------------------------------------------------ AI advisor inside the Phase forecast tab (runs by itself when the forecast changes)
-def groq_key():
-    try: secret = st.secrets.get("GROQ_API_KEY")
-    except Exception: secret = None
-    return ga.load_key(secret=secret or GROQ_API_KEY_EMBEDDED or None, env_file=Path(__file__).with_name(".env"))
 
 
-def ai_facts(DGm, fc):
-    """The numbers the AI may talk about (Python measured all of them)."""
-    per = DGm["per"]
-    return dict(mean_imb=DGm["mean_imb"], p95_imb=DGm["p95_imb"], pct_above=DGm["pct_above"], mean_I=DGm["mean_I"], mean_V=DGm["mean_V"],
-                per={n: dict(avg_A=float(per.loc[n, "Avg current A"]), peak_A=float(per.loc[n, "Peak A"]), avg_kW=float(per.loc[n, "Avg kW"])) for n in NAMES},
-                main_name=DGm["main_name"], extra_A=DGm["extra_A"], neutral_mean=DGm["neutral_mean"], loss=DGm["loss"], pf_meter=DGm["pf_meter"],
-                plan=[{"From": r["From"], "To": r["To"], "Move A": float(r["Move A"])} for _, r in DGm["plan"].iterrows()],
-                thr=ALARM_PCT, sev=SEVERE_PCT, min_kw=MIN_KW, rating=RATING, demand=DEMAND, real_clock=real_clock,
-                peak_A_max=float(per["Peak A"].max()), window="all loaded minutes", forecast=fc)
-
-
-def ai_cached(facts, reliability, key, topic="phase imbalance"):
-    """One Groq call per distinct situation: any change of model / length / limits / backtest makes a new situation, a plain re-run of the page reuses the answer."""
-    cache = st.session_state.setdefault("ai_cache", {}); h = ga.evidence_hash([facts, topic], reliability)
-    if h not in cache:
-        with st.spinner("AI advisor is reading the new forecast…"):
-            cache[h] = ga.advise(facts, reliability, key, model=os.environ.get("GROQ_MODEL", ga.DEFAULT_MODEL), topic=topic)
-        while len(cache) > 20: cache.pop(next(iter(cache)))
-    return h, cache[h]
-
-
-def ai_html(r):
-    a, e = r["answer"], _html.escape
-    ul = lambda items: "<ul>" + "".join(f"<li>{e(x)}</li>" for x in items) + "</ul>" if items else ""
-    out = [f"<b>What is happening</b><br>{e(a['what_is_happening']['summary'])}", "<br><b>Why (hypotheses, not proven)</b><ul>"
-           + "".join(f"<li>{e(c['cause'])} <i>({e(c['classification'].replace('_', ' '))}, {e(c['confidence'])} confidence)</i>"
-                     + (f"<br><span style='color:#64748B'>Missing: {e('; '.join(c['missing_information']))}</span>" if c.get("missing_information") else "") + "</li>" for c in a["why"]) + "</ul>"]
-    out.append("<b>What to do</b><ul>" + "".join(f"<li><b>[{e(x['priority'].upper())}]</b> {e(x['action'])}<br>Why: {e(x['reason'])}<br>Benefit: {e(x['benefit'])}"
-                                              + (f"<br>Drawbacks: {e('; '.join(x['drawbacks']))}" if x.get("drawbacks") else "") + f"<br>Check it worked: {e(x['verification'])}</li>" for x in a["actions"]) + "</ul>")
-    if a["if_no_action"]["consequences"]: out.append(f"<b>If nothing is done</b> ({e(a['if_no_action'].get('horizon', ''))}){ul(a['if_no_action']['consequences'])}")
-    if a["uncertainties"]: out.append(f"<b>What is still uncertain</b>{ul(a['uncertainties'])}")
-    return "".join(out)
-
-
-def ai_panel(facts, rel, rel_why, topic, rule_html, rule_tone, key, show_rule=True):
-    """Shows the AI advice (or the rule-based advice when the AI is unavailable) and returns nothing."""
-    h_ai, ai = ai_cached(facts, rel, groq_key(), topic)
-    if ai["source"] == "llm":
-        note(ai_html(ai), {"low": "good", "medium": "amber"}.get(ai["ceiling"], "bad"))
-        st.caption(f"Forecast reliability: **{rel}** ({rel_why}) · highest priority allowed by the rules: **{ai['ceiling']}** · checks: " + " · ".join(f"{k} {x.replace('_', ' ').lower()}" for k, x in ai["validation"].items())
-                   + " · every action needs review by a qualified engineer before anything is changed.")
-        if ai["rejected"]:
-            with st.expander(f"{len(ai['rejected'])} statement(s) changed or removed by the checker"): table(pd.DataFrame(ai["rejected"]), 2)
-        if show_rule:
-            with st.expander("Rule-based advice (same numbers, no AI)"): note(rule_html, rule_tone)
-    else:
-        if show_rule: note(rule_html, rule_tone)
-        st.caption(f"AI advisor not used: {ai['error']}." + (" The rule-based advice is shown instead." if show_rule else " The rule-based advice next to the chart still applies."))
-        if st.button("Try the AI advisor again", key=key): st.session_state["ai_cache"].pop(h_ai, None); st.rerun()
-
-
-# ================================================================== LOAD PREDICTION (ARIMA on the rolling total kW)
-with tab_pred:
-    with st.expander("ARIMA settings", expanded=False):
-        c = st.columns(6)
-        p, d_, q = c[0].number_input("p (AR)", 0, 6, 2), c[1].number_input("d (diff)", 0, 2, 0), c[2].number_input("q (MA)", 0, 6, 2)
-        win = c[3].number_input("Rolling window (min)", 1, 120, 30); split_pct = c[4].slider("Train split %", 50, 99, 95); block = c[5].number_input("Backtest block (min)", 5, 240, 60, 5)
-    R = predict_kw(tl[["Timestamps", "KW"]], (p, d_, q), split_pct, int(block), int(win)); mt, mr = R["m_test"], R["m_train"]
-    NX = R["future"]; last_time = NX["last_time"]; default_until = last_time + pd.Timedelta(minutes=30)
-    if st.session_state.get("anchor_pred") != last_time:      # data changed -> reset the end time
-        st.session_state.update(anchor_pred=last_time, until_date_pred=default_until.date(), until_time_pred=default_until.time(), len_pred="30 minutes")
-
-    def length_changed_pred():                      # picking a length fills in the end date + time
-        if st.session_state.len_pred != CUSTOM:
-            end = last_time + pd.Timedelta(minutes=LENGTHS[st.session_state.len_pred]); st.session_state.until_date_pred, st.session_state.until_time_pred = end.date(), end.time()
-
-    def until_changed_pred(): st.session_state.len_pred = CUSTOM   # editing the date/time switches the length to Custom
-
-    # ---- future forecast with user-chosen end time, number of points and history
-    with panel("Forecast ahead", f"ARIMA{(p, d_, q)} · parameters fixed after training · starts after the last data point · {last_time:%d %b %Y %H:%M}", key="next"):
-        c = st.columns(5)
-        c[0].selectbox("Forecast length", list(LENGTHS) + [CUSTOM], key="len_pred", on_change=length_changed_pred)
-        step_choice = c[1].selectbox("Show a point every", list(STEPS), index=1, key="step_pred")
-        hist_choice = c[2].selectbox("History shown", list(HISTS), index=1, key="hist_pred")
-        until_date = c[3].date_input("Forecast until · date", min_value=last_time.date(), max_value=(last_time + pd.Timedelta(days=7)).date(), key="until_date_pred", on_change=until_changed_pred)
-        until_time = c[4].time_input("Forecast until · time", step=300, key="until_time_pred", on_change=until_changed_pred)
-        horizon_raw = int((pd.Timestamp.combine(until_date, until_time) - last_time).total_seconds() // 60)
-        horizon = int(min(max(horizon_raw, 1), MAX_HORIZON)); step = min(STEPS[step_choice], horizon); step = max(step, int(np.ceil(horizon / 400)))   # at most ~400 points on screen
-        st.caption(f"Forecasting {horizon} min ahead, until {last_time + pd.Timedelta(minutes=horizon):%a %d %b %H:%M} · one point every {step} min" + (" (capped at 7 days)" if horizon_raw > MAX_HORIZON else " (end time was before the last data point, so showing 1 min)" if horizon_raw < 1 else ""))
-        idx = np.unique(np.r_[np.arange(step - 1, horizon, step), horizon - 1])           # which forecast minutes to display
-        t_f, m_f, lo_f, hi_f = NX["times"][idx], NX["mean"][idx], NX["lower"][idx], NX["upper"][idx]
-        end_value, lo, hi = NX["mean"][horizon - 1], NX["lower"][horizon - 1], NX["upper"][horizon - 1]
-        change = f"{(end_value - NX['last_value']) / NX['last_value'] * 100:.1f} %" if NX["last_value"] >= 1 else f"{abs(end_value - NX['last_value']):.1f} kW"
-        up_down = "▲" if end_value >= NX["last_value"] else "▼"
+# ================================================================== LOAD FORECAST (hourly total kW - Exponential Smoothing / Auto ETS)
+with tab_load:
+  if not H_OK: need_more_data()
+  else:
+    c = st.columns([1.25, 1, 1, 1.3, 1])
+    L_model = c[0].selectbox("Model", gf.MODELS, key="ld_model", help="Exponential Smoothing = damped-trend Holt-Winters (load notebook). Auto ETS = tries every ETS model and keeps the lowest AICc (slower).")
+    L_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ld_len")
+    L_days = c[2].selectbox("Learn from last", [14, 28, 56, 90], index=1, key="ld_days", format_func=lambda x: f"{x} days")
+    L_season = SEASONS[c[3].selectbox("Seasonal cycle", list(SEASONS), index=0, key="ld_season", help="Hourly data: 24 = daily pattern, 168 = weekly pattern. The load notebook has 144 with a comment saying 24.")] if L_model == "Exponential Smoothing" else gf.ETS_SEASON
+    if L_model == "Auto ETS": c[3].caption("Auto ETS uses the daily cycle (24 h).")
+    L_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ld_hist")
+    fixed = None
+    if L_model == "Exponential Smoothing":
+        with st.expander("Exponential Smoothing parameters (from the load notebook)"):
+            use_fixed = st.checkbox("Use the notebook's fixed parameters (untick = let the model estimate them)", True, key="ld_fixed")
+            q = st.columns(4)
+            al = q[0].slider("Level α", 0.0, 1.0, 0.7, 0.05, key="ld_a"); be = q[1].slider("Trend β", 0.0, 1.0, 0.05, 0.05, key="ld_b")
+            ga_ = q[2].slider("Season γ", 0.0, 1.0, 0.1, 0.05, key="ld_g"); ph_ = q[3].slider("Damping φ", 0.8, 1.0, 0.95, 0.01, key="ld_p")
+            if use_fixed: fixed = dict(smoothing_level=al, smoothing_trend=be, smoothing_seasonal=ga_, damping_trend=ph_)
+    fit_steps = int(L_days) * 24
+    fc_tot, lbl_tot, ok_tot = run_total(y_mod.iloc[-fit_steps:], MAX_STEPS, L_model, L_season, fixed)
+    if not ok_tot: note(f"The model could not be fitted ({lbl_tot}); the forecast is a flat line. Try the other model or a different cycle.", "amber")
+    if HF["n_gap"]: st.caption(f"{HF['n_gap']} hour(s) had too few readings: gaps up to 6 h are filled by a straight line for training" + (f"; {HF['n_left']} longer-gap hour(s) repeat the nearest hour." if HF["n_left"] else "."))
+    horizon = LD_LENGTHS[L_len]; fv = fc_tot[:horizon]; t_f = t_fut_all[:horizon]
+    last_actual = float(y_mod.iloc[-1]); end_value = float(fv[-1])
+    change = f"{abs(end_value - last_actual) / last_actual * 100:.1f} %" if last_actual >= 1 else f"{abs(end_value - last_actual):.1f} kW"
+    up_down = "▲" if end_value >= last_actual else "▼"
+    with panel("Forecast ahead", f"{L_model} · {lbl_tot} · learns from the last {L_days} days · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
         left, right = st.columns([1, 2.4])
         with left:
-            st.markdown(f"""<div class="hero-f"><div class="l">Expected load · {NX['times'][horizon - 1]:%d %b %H:%M}</div><div class="big">{end_value:,.1f}<small> kW</small></div>
-<div class="r">95 % range <b>{lo:,.1f} – {hi:,.1f} kW</b></div><span class="badge flat">{up_down} {change.lstrip('-')} vs last {int(win)}-min average</span>
-<div class="mini"><div><b>{NX['mean'][:horizon].mean():,.1f}</b><span>average over period kW</span></div><div><b>{len(idx)}</b><span>points shown</span></div><div><b>{horizon / 60:.1f} h</b><span>ahead</span></div></div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="hero-f"><div class="l">Expected load · {t_f[-1]:%d %b %H:%M}</div><div class="big">{end_value:,.1f}<small> kW</small></div>
+<div class="r">average over the period <b>{fv.mean():,.1f} kW</b></div><span class="badge flat">{up_down} {change} vs last hour</span>
+<div class="mini"><div><b>{fv.max():,.1f}</b><span>peak kW</span></div><div><b>{horizon}</b><span>hourly points</span></div><div><b>{span_text(horizon)}</b><span>ahead</span></div></div></div>""", unsafe_allow_html=True)
         with right:
-            window_start = last_time - pd.Timedelta(minutes=HISTS[hist_choice])
-            hist = NX["history"][NX["history"].index > window_start]
-            f = go.Figure()
-            f.add_shape(type="rect", xref="x", yref="paper", x0=last_time, x1=t_f[-1], y0=0, y1=1, fillcolor=tint(ACCENT, .06), line_width=0)
-            anchor_value, tt = NX["last_value"], [last_time] + list(t_f)          # start the forecast exactly at the last actual point (no gap)
-            f.add_scatter(x=hist.index, y=hist.values, name=f"Actual rolling mean ({int(win)} min)", mode="lines", line=dict(color=INK, width=2.2))
-            f.add_scatter(x=tt + tt[::-1], y=[anchor_value] + list(hi_f) + ([anchor_value] + list(lo_f))[::-1], fill="toself", fillcolor=tint(ACCENT, .16), mode="lines", line=dict(width=0), name="95 % range", hoverinfo="skip")
-            f.add_scatter(x=tt, y=[anchor_value] + list(m_f), name=f"Forecast ({len(idx)} points)", mode="lines", line=dict(color=FORECAST, width=3))
-            if len(idx) <= 120: f.add_scatter(x=t_f, y=m_f, mode="markers", marker=dict(size=6, color="#fff", line=dict(color=FORECAST, width=2)), showlegend=False, hoverinfo="skip")
-            f.add_shape(type="line", xref="x", yref="paper", x0=last_time, x1=last_time, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
-            f.add_annotation(x=last_time, yref="paper", y=1.0, text="last data point", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED))
+            hist = y_real.iloc[-HIST_H[L_hist]:]; f = go.Figure()
+            f.add_shape(type="rect", xref="x", yref="paper", x0=t_last, x1=t_f[-1], y0=0, y1=1, fillcolor=tint(ACCENT, .06), line_width=0)
+            f.add_scatter(x=hist.index, y=hist.values, name="Actual hourly kW", mode="lines", line=dict(color=INK, width=2.2), connectgaps=False)
+            f.add_scatter(x=[t_last] + list(t_f), y=[last_actual] + list(fv), name=f"Forecast ({L_model})", mode="lines", line=dict(color=FORECAST, width=3))
+            f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
+            f.add_annotation(x=t_last, yref="paper", y=1.0, text="last data point", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED))
             f.update_yaxes(title="kW"); show(style(f, 340, True, top=70))
-        with st.expander(f"Forecast table · {len(idx)} points"):
-            table(pd.DataFrame({"Time": [t.strftime("%d %b %H:%M") for t in t_f], "Forecast kW": m_f, "Lower 95 %": lo_f, "Upper 95 %": hi_f}).head(300), 2)
-        if horizon > 120: note("ARIMA is a short-term model: beyond roughly 1–2 hours the forecast flattens towards the long-run average and the range keeps widening, so treat far-ahead points as a guide, not a prediction.")
-    # ---- how much power is needed in the chosen forecast window (energy, first / last point, averaged blocks, advice)
-    fv = NX["mean"][:horizon]; t_first, t_last = NX["times"][0], NX["times"][horizon - 1]
-    energy_f, avg_f, peak_f = float(fv.sum() / 60), float(fv.mean()), float(fv.max())
-    before = tl[(tl.Timestamps > last_time - pd.Timedelta(minutes=horizon)) & (tl.Timestamps <= last_time)]
-    energy_before = float(before.KW.fillna(0).sum() / 60)
-    with panel("Power needed in the selected period", f"{t_first:%d %b %H:%M} → {t_last:%d %b %H:%M} · {span_text(horizon)} · energy = average kW × hours", key="pw_pred"):
+        with st.expander(f"Forecast table · {horizon} points"):
+            ftab = pd.DataFrame({"Time": t_f, "Forecast kW": fv}); table(ftab.assign(Time=ftab.Time.dt.strftime("%d %b %H:%M")).head(300), 2)
+        st.download_button("⬇ Load forecast (CSV)", ftab.rename(columns={"Time": "Timestamp"}).to_csv(index=False).encode(), "GridSense_load_forecast.csv", "text/csv", key="ld_dl")
+        st.caption("Exponential Smoothing gives one line, no confidence band. How far to trust it is shown in 'Model check' below.")
+
+    energy_f, avg_f, peak_f = float(fv.sum()), float(fv.mean()), float(fv.max()); energy_before = float(y_mod.iloc[-horizon:].sum())
+    with panel("Power needed in the selected period", f"{t_f[0]:%d %b %H:%M} → {(t_f[-1] + pd.Timedelta(hours=1)):%d %b %H:%M} · {span_text(horizon)} · energy = sum of hourly kW", key="ld_pw"):
         pk = st.columns(5)
-        with pk[0]: kpi("Energy needed · forecast", f"{energy_f:,.1f} kWh", f"average {avg_f:,.1f} kW over {span_text(horizon)}", "info", "🔌")
+        with pk[0]: kpi("Energy needed · forecast", f"{energy_f:,.0f} kWh", f"average {avg_f:,.1f} kW over {span_text(horizon)}", "info", "🔌")
         diff_e = energy_f - energy_before
-        with pk[1]: kpi("Energy used · previous period", f"{energy_before:,.1f} kWh", (f"forecast is {diff_e:+,.1f} kWh ({diff_e / energy_before * 100:+.0f} %) vs this" if energy_before >= 1 else "the machine was idle in that period") + f" · last {span_text(horizon)} of actual data", "", "📊")
-        with pk[2]: kpi("Power at first point", f"{fv[0]:,.1f} kW", f"{t_first:%d %b %H:%M}", "", "▶️")
-        with pk[3]: kpi("Power at last point", f"{fv[-1]:,.1f} kW", f"{t_last:%d %b %H:%M} · {fv[-1] - fv[0]:+,.1f} kW{pct_text(pct_change(fv[0], fv[-1]))} vs first", "info", "⏹️")
-        with pk[4]: kpi("Average · peak", f"{avg_f:,.1f} kW", f"peak {peak_f:,.1f} kW at {NX['times'][int(np.argmax(fv))]:%H:%M}", "", "📈")
+        with pk[1]: kpi("Energy used · previous period", f"{energy_before:,.0f} kWh", (f"forecast is {diff_e:+,.0f} kWh ({diff_e / energy_before * 100:+.0f} %) vs this" if energy_before >= 1 else "the machine was idle in that period") + f" · last {span_text(horizon)}", "", "📊")
+        with pk[2]: kpi("Power at first hour", f"{fv[0]:,.1f} kW", f"{t_f[0]:%d %b %H:%M}", "", "▶️")
+        with pk[3]: kpi("Power at last hour", f"{fv[-1]:,.1f} kW", f"{t_f[-1]:%d %b %H:%M} · {fv[-1] - fv[0]:+,.1f} kW{pct_text(pct_change(fv[0], fv[-1]))} vs first", "info", "⏹️")
+        with pk[4]: kpi("Average · peak", f"{avg_f:,.1f} kW", f"peak {peak_f:,.1f} kW at {t_f[int(np.argmax(fv))]:%a %H:%M}", "", "📈")
         st.write("")
-        valid_avg = [name for name, m_ in AVG_BLOCKS.items() if m_ <= horizon] or [list(AVG_BLOCKS)[0]]
+        valid_avg = [n for n, h in AVG_BLOCKS_H.items() if h <= horizon]
         sel_col, _ = st.columns([1.2, 3])
-        avg_choice = sel_col.selectbox("Show average power every", valid_avg, index=min(1, len(valid_avg) - 1), key="avg_pred", help="Splits the forecast window into blocks of this length and averages the power in each block.")
-        blk = block_averages(fv, last_time, min(AVG_BLOCKS[avg_choice], horizon)); labels = [block_label(r) for r in blk.itertuples()]
-        two = len(blk) >= 2
+        avg_choice = sel_col.selectbox("Show average power every", valid_avg, index=min(2, len(valid_avg) - 1), key="ld_avg", help="Splits the forecast into blocks of this length and averages the power in each block.")
+        blk = block_averages(fv, t_f[0], AVG_BLOCKS_H[avg_choice]); labels = [block_label(r) for r in blk.itertuples()]; two = len(blk) >= 2
         kind = trend_kind(float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else trend_kind(float(fv[0]), float(fv[-1]))
         first_v, last_v = (float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else (float(fv[0]), float(fv[-1]))
-        slope = float(np.polyfit(np.arange(len(blk)) * (AVG_BLOCKS[avg_choice] / 60), blk["Avg kW"], 1)[0]) if two else float("nan")
+        slope = float(np.polyfit(np.arange(len(blk)) * AVG_BLOCKS_H[avg_choice], blk["Avg kW"], 1)[0]) if two else float("nan")
         cl, cr = st.columns([2.2, 1.1])
         with cl:
             f = go.Figure(go.Bar(x=labels, y=blk["Avg kW"], marker_color=ACCENT, text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in blk["Change %"]], textposition="outside", cliponaxis=False,
-                                 customdata=np.c_[blk["Change kW"].fillna(0), blk["Minutes"]], hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} min<extra></extra>"))
+                                 customdata=np.c_[blk["Change kW"].fillna(0), blk["Hours"]], hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} h<extra></extra>"))
             f.update_layout(hovermode="closest", yaxis_title=f"average kW per {avg_choice}", title=f"Average power every {avg_choice}  ·  label = change vs previous block"); f.update_xaxes(type="category")
             show(style(f, 300, False, top=60))
             st.caption((f"Average growth: {blk['Change kW'].mean():+,.1f} kW per block · trend {slope:+,.1f} kW per hour" if two else "Only one block fits in this window - pick a shorter interval or a longer forecast.")
-                       + (f" · last block is partial ({int(blk['Minutes'].iloc[-1])} min)" if blk["Minutes"].iloc[-1] < blk["Minutes"].iloc[0] else ""))
+                       + (f" · last block is partial ({int(blk['Hours'].iloc[-1])} h)" if blk["Hours"].iloc[-1] < blk["Hours"].iloc[0] else ""))
         with cr:
-            tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 120, dict(avg=avg_f, slope=slope, pf=PF_AVG, demand=DEMAND, peak_at=NX["times"][int(np.argmax(fv))]))
+            tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 72, dict(avg=avg_f, slope=slope, pf=PF_AVG, demand=DEMAND, peak_at=t_f[int(np.argmax(fv))]))
             note(advice_html(head_a, acts_a), tone_a)
         with st.expander(f"Average power table · every {avg_choice}"):
             table(pd.DataFrame({"Period": labels, "Avg kW": blk["Avg kW"], "Change kW": blk["Change kW"], "Change %": blk["Change %"]}), 2)
 
-    with panel("What to do about the load forecast", "AI advisor (Groq) re-reads the forecast every time the order, split, length or limits change · every number is filled in by Python and checked", key="pw_ai"):
-        try:
-            mae_pct = float(mt["MAE"] / R["test"].Actual.mean() * 100) if R["test"].Actual.mean() >= 1 else None
-            rel, rel_why = ga.load_reliability(mae_pct, R["idle_share"] * 100, R["test_constant"])
-            ld = dict(window=f"next {span_text(horizon)}", avg_kw=avg_f, peak_kw=peak_f, first_kw=float(fv[0]), last_kw=float(fv[-1]), trend_kw_h=None if np.isnan(slope) else slope, energy_kwh=energy_f,
-                      energy_prev_kwh=energy_before if energy_before >= 1 else None, pf_avg=PF_AVG, test_mae_pct=mae_pct, idle_pct=float(R["idle_share"] * 100))
-            ai_panel(dict(load=ld, demand=DEMAND, rating=RATING, real_clock=real_clock, window="all loaded minutes"), rel, rel_why, "total load forecast", advice_html(head_a, acts_a), tone_a, "pw_ai_retry", show_rule=False)
-        except Exception as exc: st.caption(f"AI advisor unavailable ({type(exc).__name__}: {exc}). Make sure the newest gridsense_advisor.py is next to app.py.")
-
-    if R["idle_share"] > .5:
-        note(f"<b>Why the forecast is near zero:</b> as in your notebook, the model is trained on the full timeline, which is <b>{R['idle_share'] * 100:.0f} % idle (0 kW)</b>. The data ends in an idle period "
-             f"({last_time:%d %b}), so the forecast starts near 0 kW and only drifts towards the long-run average of about {R['level']:.0f} kW.", "amber")
-
-    st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b><span>how well the same ARIMA predicted data it had not seen</span></div>', unsafe_allow_html=True)
-    k = st.columns(4)
-    with k[0]: kpi("Test RMSE", f"{mt['RMSE']:.2f} kW", f"{len(R['test']):,} forecast points", "info", "🎯")
-    with k[1]: kpi("Test MAE", f"{mt['MAE']:.2f} kW", f"{mt['MAE'] / max(R['test'].Actual.mean(), 1e-9) * 100:.1f} % of mean test load" if R["test"].Actual.mean() >= 1 else "test period has ~0 kW load", "", "📏")
-    with k[2]: kpi("Test R²", f"{mt['R2']:.3f}", "test period is constant → R² not meaningful" if R["test_constant"] else "1 = perfect · 0 = no better than the average", "info" if R["test_constant"] else "good" if mt["R2"] > .5 else "warn", "✅")
-    with k[3]: kpi("Train fit R²", f"{mr['R2']:.3f}", f"RMSE {mr['RMSE']:.2f} kW · {len(R['train']):,} points", "", "🧪")
-    st.write("")
-    s1, s2, s3 = st.tabs(["Test forecast", "Training fit", "Residuals"])
-
-    def line_pair(frame, a, b, title, name_b):
-        shown = thin(frame); t, ya, yb = gaps(shown.Timestamp, shown[a], shown[b], step=thin_step(frame)); f = go.Figure()
-        f.add_scatter(x=t, y=ya, name=f"Actual rolling mean ({int(win)} min)", mode="lines", line=dict(color=INK, width=1.8), connectgaps=False)
-        f.add_scatter(x=t, y=yb, name=name_b, mode="lines", line=dict(color=FORECAST, width=2, dash="dash"), connectgaps=False)
-        f.update_layout(title=title, yaxis_title="Rolling KW"); f.update_xaxes(rangeslider_visible=True); return f
-
-    with s1:
-        with panel("Test: actual vs forecast", f"each {int(block)}-minute block forecast before its actuals are shown · {R['t2']:%d %b %H:%M} → {R['t3']:%d %b %H:%M}", key="test"):
-            show(style(line_pair(R["test"], "Actual", "Forecast", "", "ARIMA forecast"), 440, top=60))
-        table(R["test"].head(10).assign(Timestamp=lambda x: x.Timestamp.dt.strftime("%Y-%m-%d %H:%M"))[["Timestamp", "Actual", "Forecast", "Residual"]], 3)
-    with s2:
-        with panel("Training: actual vs fitted", "how closely ARIMA reproduces the data it was trained on" + (f" · showing every {int(np.ceil(len(R['train']) / 4000))}th point" if len(R["train"]) > 4000 else ""), key="train"):
-            show(style(line_pair(R["train"], "Actual", "Fitted", "", "ARIMA fitted"), 440, top=60))
-    with s3:
-        a, b = st.columns(2)
-        for col, frame, name, color in ((a, R["train"], "Training", CYAN), (b, R["test"], "Test", ACCENT_DARK)):
-            shown = thin(frame); t, r = gaps(shown.Timestamp, shown.Residual, step=thin_step(frame)); f = go.Figure(go.Scatter(x=t, y=r, mode="lines", line=dict(color=color, width=1.3), connectgaps=False))
-            f.add_hline(y=0, line_dash="dash", line_color=GREY); f.update_layout(title=f"{name} residuals (actual − predicted)", yaxis_title="kW")
-            with col, st.container(border=True, key=f"panel_res_{name}"): show(style(f, 340, False, top=60))
-
-# ================================================================== PHASE IMBALANCE (measured data: how big, why, what to do)
-with tab_imb:
-    top = st.columns([1.3, 3.4])
-    mean_label = f"{SMOOTH}-min mean"
-    basis = top[0].selectbox("Measure on", ["Smoothed (rolling mean)", "Real readings"], key="imb_basis", help=f"Smoothed = rolling mean of the past {SMOOTH} min (set in 'Data & limits').")
-    frame = (Dv if basis.startswith("Smoothed") else D_raw.dropna(subset=NEEDED))[NEEDED]
-    DG = diagnose(frame, ALARM_PCT, MIN_KW, SEVERE_PCT)
-    if DG["empty"]: note("There are not enough loaded minutes (above the 'ignore below' limit) to measure the imbalance. Lower the limit in 'Data & limits'.", "amber")
+    # ---- model check on the last 168 hours (the load notebook's test)
+    st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b><span>the last 168 hours are hidden, forecast from the hours before, then compared with what really happened</span></div>', unsafe_allow_html=True)
+    ho = run_holdout(y_real, y_mod, L_model, L_season, fixed, fit_steps)
+    if ho is None: st.caption("Not enough history for a 7-day test.")
     else:
-        mi, per = DG["mean_imb"], DG["per"]; tone_i = "good" if mi <= ALARM_PCT else "warn" if mi <= SEVERE_PCT else "bad"
-        k = st.columns(5)
-        with k[0]: kpi("Average imbalance", f"{mi:.1f} %", f"95 % of minutes below {DG['p95_imb']:.1f} % · limit {ALARM_PCT:g} %", tone_i, "⚖️")
-        with k[1]: kpi("Above the limit", f"{DG['pct_above']:.0f} %", f"of {DG['n_loaded']:,} loaded minutes", "good" if DG["pct_above"] < 5 else "bad" if DG["pct_above"] > 50 else "warn", "🚨")
-        with k[2]: kpi("Worst colour", DG["main_name"], f"worst in {per.iloc[DG['main'], 0]:.0f} % of minutes · {'HIGH' if DG['high_share'] >= 50 else 'LOW'} in {max(DG['high_share'], 100 - DG['high_share']):.0f} % of them", "info", "🎨")
-        with k[3]: kpi("Voltage imbalance", f"{DG['mean_V']:.1f} %", "supply is fine (usual limit about 2 %)" if DG["mean_V"] <= 2 else "supply voltage is unbalanced", "good" if DG["mean_V"] <= 1 else "warn" if DG["mean_V"] <= 2 else "bad", "🔌")
-        with k[4]: kpi(f"Extra current on {DG['main_name']}", f"{DG['extra_A']:+.0f} A", f"{DG['extra_kW']:+.1f} kW more than the other two phases", "", "➕")
-        st.write("")
-        a, b = st.columns([2.2, 1])
-        with a, panel("Imbalance over time", f"{mean_label if basis.startswith('Smoothed') else basis} · 30-minute averages · lines = alarm and severe limits", key="imb_time"):
-            A = DG["A"]; ser = A.Imbalance_pct.where(A.Loaded).resample("30min").mean()
-            f = go.Figure(); f.add_scatter(x=ser.index, y=ser.values, name="Imbalance %", line=dict(color=ACCENT, width=1.6), fill="tozeroy", fillcolor=tint(ACCENT, .12), connectgaps=False)
-            f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, annotation_text=f"alarm {ALARM_PCT:g} %", annotation_position="top left")
-            f.add_hline(y=SEVERE_PCT, line_dash="dot", line_color=BAD, annotation_text=f"severe {SEVERE_PCT:g} %", annotation_position="top left")
-            f.update_yaxes(title="imbalance %"); f.update_xaxes(rangeslider_visible=True, rangeslider_thickness=.07); show(style(f, 380, False, top=30))
-        with b, panel("Who carries the load", "average over the loaded minutes", key="imb_phase"):
-            st.markdown(phase_bars(list(DG["Km"]), float(DG["Km"].max()) * 1.15), unsafe_allow_html=True)
-            table(per[["Avg current A", "95 % of minutes below A", "Avg voltage V", "PF (kW / V·I)"]].rename_axis("Phase").reset_index(), 2)
+        sc = ho["scores"]; mean_a = float(np.nanmean(ho["actual"].to_numpy()))
+        k = st.columns(4)
+        with k[0]: kpi("MAE", f"{sc['MAE']:.2f} kW", f"{sc['MAE'] / max(mean_a, 1e-9) * 100:.1f} % of the mean test load" if mean_a >= 1 else "test period has ~0 kW load", "info", "📏")
+        with k[1]: kpi("RMSE", f"{sc['RMSE']:.2f} kW", f"{sc['n']} hours compared", "", "🎯")
+        with k[2]: kpi("WAPE", f"{sc['WAPE']:.1f} %", "total error ÷ total load · smaller is better", "good" if sc["WAPE"] < 10 else "warn" if sc["WAPE"] < 25 else "bad", "✅")
+        with k[3]: kpi("SMAPE", f"{sc['SMAPE']:.1f} %", "average % error · smaller is better", "", "🧪")
+        verdict = ("reliable for planning" if sc["WAPE"] < 10 else "usable as a guide, expect visible misses" if sc["WAPE"] < 25 else "weak - use it as a trend hint only")
+        note(f"<b>Rule-based verdict:</b> total error is {sc['WAPE']:.0f} % of the load in the test week - {verdict}. " + ("The test week has little load, so percentages are unstable." if mean_a < 1 else ""), "good" if sc["WAPE"] < 10 else "amber" if sc["WAPE"] < 25 else "bad")
+        f = go.Figure(); f.add_scatter(x=ho["actual"].index, y=ho["actual"].values, name="Actual hourly kW", line=dict(color=INK, width=2), connectgaps=False)
+        f.add_scatter(x=ho["pred"].index, y=ho["pred"].values, name=f"Predicted ({L_model})", line=dict(color=FORECAST, width=2, dash="dash")); f.update_yaxes(title="kW")
+        with st.container(border=True, key="panel_ld_test"): show(style(f, 340, True, top=60))
+
+
+# ================================================================== PHASE BALANCE (measured + forecast + action plan, all on one page)
+with tab_phase:
+  if not H_OK: need_more_data()
+  else:
+    c = st.columns([1.3, 1, 1, 1.3, 1, .8, .9])
+    P_model = c[0].selectbox("Model", gf.MODELS, key="ph_model", help="Exponential Smoothing = damped-trend Holt-Winters. Auto ETS = best ETS model by AICc per phase (slower, can take a minute or two).")
+    P_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
+    P_days = c[2].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
+    P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[3].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")] if P_model == "Exponential Smoothing" else gf.ETS_SEASON
+    P_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
+    bt_weeks = int(c[5].number_input("Test weeks", 1, 4, 2, 1, key="ph_btw", help="Past weeks used to test the model. More = firmer answer but slower."))
+    c[6].markdown("<div style='height:1.65rem'></div>", unsafe_allow_html=True); run_bt = c[6].button("Run backtest", type="primary", key="ph_run")
+    fit_steps = int(P_days) * 24; horizon = LD_LENGTHS[P_len]
+    fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season)
+    Pf = pd.DataFrame(fc_arr[:horizon], index=t_fut_all[:horizon], columns=PH3); rep = analyse(Pf.to_numpy())
+    if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
+    if P_model == "Auto ETS": st.caption("Auto ETS chose: " + " · ".join(f"{NAMES[i]} {lbls[p]}" for i, p in enumerate(PH3)))
+
+    bt_key = (P_model, P_season, int(P_days), bt_weeks, ALARM_PCT, SEVERE_PCT, MIN_KW, MINR, str(t_last))
+    if run_bt:
+        pbar = st.progress(0.0, text="Testing the model on past weeks…")
+        res_run = gf.backtest_phases(ph_real, ph_mod, P_model, P_season, fit_steps, MAX_STEPS, bt_weeks, analyse, progress=lambda x: pbar.progress(float(x), text="Testing the model on past weeks…"))
+        pbar.empty(); st.session_state["bt_ph"] = dict(key=bt_key, res=res_run, ran=True)
+    cur = st.session_state.get("bt_ph"); ran = bool(cur and cur["key"] == bt_key); bt = cur["res"] if ran else None
+    rel = gf.reliability(bt, ALARM_PCT)
+
+    DG = diagnose(Dv[NEEDED], ALARM_PCT, MIN_KW, SEVERE_PCT); dg = None if DG["empty"] else DG
+    r0 = a_now.iloc[0]
+    now = dict(loaded=bool(r0.Loaded), imb=float(r0.Imbalance_pct) if r0.Loaded else 0.0, worst=r0.Worst_phase, dev=float(r0.Worst_dev) if r0.Loaded else 0.0, direction=r0.Direction, status=r0.Status)
+    pb = gr.playbook(dg, now, dict(P=Pf, rep=rep), ALARM_PCT, SEVERE_PCT, MIN_KW, RATING, DEMAND, rel, real_clock)
+
+    imb = rep.Imbalance_pct.to_numpy(); n_al, n_sev = int(rep.Alarm.sum()), int((rep.Status == "SEVERE").sum())
+    first_alarm = Pf.index[int(np.flatnonzero(rep.Alarm.to_numpy())[0])] if n_al else None
+    worst_k = int(np.nanargmax(imb)) if np.isfinite(imb).any() else 0
+    k = st.columns(5)
+    with k[0]: kpi("Imbalance now", "idle" if not now["loaded"] else f"{now['imb']:.1f} %", "machine idle" if not now["loaded"] else f"{now['worst']} {now['direction']} · limit {ALARM_PCT:g} %", "good" if now["status"] == "OK" else "bad" if now["status"] == "SEVERE" else "warn" if now["status"] == "ALARM" else "info", "⚖️")
+    with k[1]:
+        if dg: kpi("Average imbalance · measured", f"{dg['mean_imb']:.1f} %", f"above the limit in {dg['pct_above']:.0f} % of loaded minutes", "good" if dg["mean_imb"] <= ALARM_PCT else "warn" if dg["mean_imb"] <= SEVERE_PCT else "bad", "📏")
+        else: kpi("Average imbalance · measured", "–", "too few loaded minutes", "", "📏")
+    with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe", "good" if n_al == 0 else "bad", "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
+    with k[3]: kpi("First forecast alarm", "none" if first_alarm is None else f"{first_alarm:%a %H:%M}", "no alarm expected" if first_alarm is None else f"{first_alarm:%d %b} · in {(first_alarm - t_last).total_seconds() / 3600:.0f} h", "good" if first_alarm is None else "warn", "⏰")
+    with k[4]: kpi("Worst colour · forecast", "–" if not np.isfinite(imb).any() else rep.Worst_phase.iloc[worst_k], "" if not np.isfinite(imb).any() else f"{rep.Direction.iloc[worst_k]} · peak {imb[worst_k]:.1f} % at {Pf.index[worst_k]:%a %H:%M}", "info", "🎨")
+    st.write("")
+
+    # ---- one chart: measured hours + forecast, per phase, with the imbalance and its limits
+    with panel("Phase load and imbalance · measured and forecast", f"hourly means · {P_model} · learns from the last {P_days} days · forecast starts after {t_last:%d %b %Y %H:%M}", key="ph_main"):
+        hh = ph_real.iloc[-HIST_H[P_hist]:]; xt = [t_last] + list(Pf.index)
+        f = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n} phase (kW)" for n in NAMES] + ["Phase imbalance %"])
+        for j, p in enumerate(PH3, 1):
+            col = PHASE_COL[KWCOLS[j - 1]]
+            f.add_scatter(x=hh.index, y=hh[p], name="Measured (hourly)", legendgroup="m", showlegend=j == 1, line=dict(color=INK, width=2), connectgaps=False, row=j, col=1)
+            f.add_scatter(x=xt, y=[float(ph_mod[p].iloc[-1])] + list(Pf[p]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines+markers" if horizon <= 72 else "lines", line=dict(color=col, width=2.6, dash="dash"), marker=dict(size=5), row=j, col=1)
+        ih = analyse(hh.to_numpy()).Imbalance_pct.to_numpy()
+        f.add_scatter(x=hh.index, y=ih, name="Measured (hourly)", legendgroup="m", showlegend=False, line=dict(color=INK, width=2), connectgaps=False, row=4, col=1)
+        f.add_scatter(x=Pf.index, y=imb, name="Forecast", legendgroup="f", showlegend=False, mode="lines+markers" if horizon <= 72 else "lines", line=dict(color=ACCENT, width=2.6, dash="dash"), marker=dict(size=5), row=4, col=1)
+        for sev_, col_ in (("ALARM", WARN), ("SEVERE", BAD)):
+            m_ = (rep.Status == sev_).to_numpy()
+            if m_.any(): f.add_scatter(x=Pf.index[m_], y=imb[m_], mode="markers", name=f"{sev_.title()} (forecast)", marker=dict(symbol="x", size=10, color=col_), row=4, col=1)
+        f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, row=4, col=1); f.add_hline(y=SEVERE_PCT, line_dash="dot", line_color=BAD, row=4, col=1)
+        f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
+        style(f, 820, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f)
+        exp = pd.DataFrame({"Timestamp": Pf.index, "Red_kW": Pf.R.to_numpy(), "Yellow_kW": Pf.Y.to_numpy(), "Blue_kW": Pf.B.to_numpy(), "Total_kW": Pf.sum(axis=1).to_numpy(), "Imbalance_pct": imb,
+                            "Worst_phase": rep.Worst_phase.to_numpy(), "Direction": rep.Direction.to_numpy(), "Status": rep.Status.to_numpy()})
+        with st.expander(f"Forecast table · {horizon} hours"): table(exp.assign(Timestamp=exp.Timestamp.dt.strftime("%d %b %H:%M")).head(300), 2)
+        st.download_button("⬇ Phase forecast + alarms (CSV)", exp.to_csv(index=False).encode(), "GridSense_phase_forecast.csv", "text/csv", key="ph_dl")
+
+    # ---- the action plan (rule-based)
+    SEC = {key_: (title_, tone_, lines_) for key_, title_, tone_, lines_ in pb["sections"]}
+
+    def sec(key_):
+        if key_ not in SEC: return
+        title_, tone_, lines_ = SEC[key_]; note(f"<b>{title_}</b><ul>" + "".join(f"<li>{x}</li>" for x in lines_) + "</ul>", tone_)
+
+    with panel("What to do", "rule-based advice written from the measured numbers and the forecast above · no AI is used", key="ph_plan"):
+        note(f"<b>{pb['head']}</b>", pb["level"])
+        a_, b_ = st.columns(2)
+        with a_: sec("what")
+        with b_: sec("why")
+        a_, b_ = st.columns(2)
+        with a_: sec("do")
+        with b_:
+            sec("inphase")
+            if len(pb["target"]): table_txt(pb["target"], 1)
+            if len(pb["target_fc"]):
+                st.markdown('<div class="ph"><b>Forecast window</b><span>move this much kW between the colours to level the forecast</span></div>', unsafe_allow_html=True); table_txt(pb["target_fc"], 1)
+        st.markdown('<div class="ph" style="margin-top:.4rem"><b>When to do what</b><span>from the forecast: quietest and busiest hours, first alarm</span></div>', unsafe_allow_html=True)
+        table_txt(pb["when"], 1)
+        a_, b_ = st.columns(2)
+        with a_: sec("risk")
+        with b_: sec("future")
+        if len(pb["daily"]):
+            st.markdown('<div class="ph"><b>Daily outlook</b><span>what the forecast expects each day and what to do about it</span></div>', unsafe_allow_html=True); table_txt(pb["daily"], 1)
+        st.caption("Every action needs review by a qualified engineer before anything is changed. The rules are fixed thresholds from your limits (Data & limits), not a guarantee.")
+
+    # ---- the evidence behind the advice
+    if dg:
         c1, c2, c3 = st.columns(3)
-        with c1, panel("What explains it", "share of the worst phase's deviation", key="imb_why"):
-            sh = DG["share"]; f = go.Figure(go.Bar(x=sh.values, y=sh.index, orientation="h", marker_color=[ACCENT, BLUE, WARN], text=[f"{v:.0f} %" for v in sh.values], textposition="outside", cliponaxis=False,
-                                                    hovertemplate="%{y}: %{x:.0f} %<extra></extra>"))
+        with c1, panel("What explains it", "share of the worst phase's deviation", key="ph_why"):
+            sh = dg["share"]; f = go.Figure(go.Bar(x=sh.values, y=sh.index, orientation="h", marker_color=[ACCENT, BLUE, WARN], text=[f"{v:.0f} %" for v in sh.values], textposition="outside", cliponaxis=False, hovertemplate="%{y}: %{x:.0f} %<extra></extra>"))
             f.update_layout(hovermode="closest", xaxis_range=[0, 115]); show(style(f, 250, False, top=20))
-            st.caption(f"kW imbalance follows the current imbalance (correlation {DG['corr_I']:.2f}) far more than the voltage imbalance ({DG['corr_V']:.2f}).")
-        with c2, panel("By load level", "imbalance % (bars) and extra amps on the worst phase (line)", key="imb_level"):
-            lv = DG["levels"]; f = make_subplots(specs=[[{"secondary_y": True}]])
-            f.add_bar(x=lv.index, y=lv["imb"], name="Imbalance %", marker_color=ACCENT, secondary_y=False, hovertemplate="%{x}<br>%{y:.1f} %<extra></extra>")
-            f.add_scatter(x=lv.index, y=lv["extra_A"], name=f"{DG['main_name']} extra A", mode="lines+markers", line=dict(color=BAD, width=2.4), secondary_y=True, hovertemplate="%{x}<br>%{y:.0f} A<extra></extra>")
-            f.update_layout(hovermode="closest"); f.update_yaxes(title="%", secondary_y=False); f.update_yaxes(title="A", secondary_y=True, showgrid=False); f.update_xaxes(type="category")
-            show(style(f, 250, True, top=50))
-        with c3, panel("How often", "share of loaded minutes", key="imb_status"):
-            stt = DG["status"]; f = go.Figure(go.Pie(labels=list(stt.index), values=list(stt.values), hole=.66, sort=False, marker=dict(colors=[GOOD, WARN, BAD], line=dict(color="#fff", width=2)), textinfo="percent",
-                                                      hovertemplate="%{label}<br>%{value:,.0f} min<extra></extra>"))
-            f.update_layout(hovermode="closest", annotations=[dict(text=f"<b>{DG['pct_above']:.0f}%</b><br><span style='font-size:11px;color:{MUTED}'>above limit</span>", showarrow=False, font=dict(size=20))])
-            show(style(f, 250, True, top=20).update_layout(legend=dict(orientation="h", y=-0.08, x=0)))
-        if real_clock and len(DG["by_hour"]) >= 6:
-            with panel("By hour of day", "average imbalance % in each hour · shows when the plant is most unbalanced", key="imb_hour"):
-                bh = DG["by_hour"]; f = go.Figure(go.Bar(x=[f"{h:02d}:00" for h in bh.index], y=bh.values, marker_color=ACCENT, hovertemplate="%{x}<br>%{y:.1f} %<extra></extra>"))
-                f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN); f.update_layout(hovermode="closest", yaxis_title="imbalance %"); show(style(f, 260, False, top=20))
-        with panel("What to do", "written from the measured numbers above", key="imb_act"):
-            tone_a, head_a, acts_a = imbalance_actions(DG, ALARM_PCT, SEVERE_PCT, real_clock, RATING)
-            l, r = st.columns([1.7, 1])
-            with l: note(advice_html(head_a, acts_a), tone_a)
-            with r:
-                st.markdown('<div class="ph"><b>Move plan</b><span>average currents</span></div>', unsafe_allow_html=True)
-                if len(DG["plan"]): table(DG["plan"], 1)
-                else: st.caption("The three phase currents are already within 1 A of each other.")
-                if KW_OVER_VI > 0.98 and DG["pf_meter"] < 0.97:
-                    note(f"<b>Data check:</b> the phase 'kW' columns equal V × I (kW / V·I = {KW_OVER_VI:.2f}) while the meter power factor is {DG['pf_meter']:.2f}. They behave like <b>kVA</b>, not true kW - real kW would be about {DG['pf_meter'] * 100:.0f} % of them. "
-                         "Imbalance % is not affected, but energy (kWh) and kW limits are over-stated by about " + f"{(1 / DG['pf_meter'] - 1) * 100:.0f} %.", "amber")
+            st.caption(f"kW imbalance follows the current imbalance (correlation {dg['corr_I']:.2f}) vs the voltage imbalance ({dg['corr_V']:.2f}).")
+        with c2, panel("By hour of day", "average measured imbalance % · when it is worst", key="ph_hour"):
+            if real_clock and len(dg["by_hour"]) >= 6:
+                bh = dg["by_hour"]; f = go.Figure(go.Bar(x=[f"{h:02d}:00" for h in bh.index], y=bh.values, marker_color=ACCENT, hovertemplate="%{x}<br>%{y:.1f} %<extra></extra>"))
+                f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN); f.update_layout(hovermode="closest", yaxis_title="imbalance %"); show(style(f, 250, False, top=20))
+            else: st.caption("Needs a real clock in the file.")
+        with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
+            st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
+            table(dg["per"][["Avg current A", "95 % of minutes below A", "Avg voltage V", "PF (kW / V·I)"]].rename_axis("Phase").reset_index(), 2)
+        if KW_OVER_VI > 0.98 and dg["pf_meter"] < 0.97:
+            note(f"<b>Data check:</b> the phase 'kW' columns equal V × I (kW / V·I = {KW_OVER_VI:.2f}) while the meter power factor is {dg['pf_meter']:.2f}, so they behave like <b>kVA</b>. "
+                 f"Imbalance % is not affected, but energy and kW limits are over-stated by about {(1 / dg['pf_meter'] - 1) * 100:.0f} %.", "amber")
+    else: note("Not enough loaded minutes (above the 'ignore below' limit) to measure the cause. Lower the limit in Data & limits.", "amber")
+
+    # ---- how far to trust the forecast (backtest of the three-phase notebook)
+    with panel("Can the forecast be trusted?", "backtest: the model learns from the weeks before each past week, forecasts it, and is scored against what really happened", key="ph_bt"):
+        if not ran: st.caption("Not run yet for these settings - press 'Run backtest' above (Exponential Smoothing: seconds; Auto ETS: a few minutes).")
+        elif bt is None: st.caption("Not enough history: the test needs the learning window plus one full week.")
+        else:
+            im = bt["imbalance"]
+            note(f"<b>{rel[0].title()}:</b> {rel[1]}.", {"RELIABLE": "good", "DEGRADED": "amber", "UNRELIABLE": "bad"}.get(rel[0], ""))
+            table(bt["per_phase"].drop(columns="n"), 2)
+            k2 = st.columns(4)
+            with k2[0]: kpi("Imbalance error", f"{im['imb_mae']:.1f} pts", "average |forecast − actual| imbalance", "info", "⚖️")
+            with k2[1]: kpi("Alarm call right", f"{im['status_ok']:.0f} %", f"alarm / no alarm, {im['hours']} test hours", "good" if im["status_ok"] >= 85 else "warn" if im["status_ok"] >= 65 else "bad", "✅")
+            with k2[2]: kpi("Culprit phase right", "–" if not np.isfinite(im["culprit_ok"]) else f"{im['culprit_ok']:.0f} %", "when the real hour was in alarm", "", "🎨")
+            with k2[3]: kpi("Alarm hours · real vs forecast", f"{im['alarm_hours_actual']} vs {im['alarm_hours_forecast']}", f"over {im['weeks']} test week(s)", "", "🚨")
+
     with st.expander("Check your own readings"):
         c = st.columns(4)
         rr, yy, bb = c[0].number_input("Red kW", 0.0, 5000.0, 170.0, 1.0, key="chk_r"), c[1].number_input("Yellow kW", 0.0, 5000.0, 169.0, 1.0, key="chk_y"), c[2].number_input("Blue kW", 0.0, 5000.0, 160.0, 1.0, key="chk_b")
@@ -1046,82 +831,4 @@ with tab_imb:
             rc = analyse([kw_calc]).iloc[0]
             if rc.Loaded: st.caption(f"Imbalance from these three results: **{rc.Imbalance_pct:.2f} %** · {rc.Worst_phase} is {abs(rc.Worst_dev):.1f} % {'above' if rc.Worst_dev > 0 else 'below'} the average · {rc.Status}")
 
-
-# ================================================================== PHASE FORECAST (SARIMAX per phase on the last 24 hours)
-with tab_fc:
-    mean_label = f"{SMOOTH}-min mean"
-    FC_LENGTHS = {"15 minutes": 15, "30 minutes": 30, "1 hour": 60, "2 hours": 120, "3 hours": 180, "6 hours": 360}
-    c = st.columns([1.1, 1.6, 1, 1, .9, .9])
-    train_on = c[0].selectbox("Learn from", ["Smoothed (rolling mean)", "Real values"], key="fc_train", help=f"The series SARIMAX is trained on and forecasts. Smoothed = rolling mean of the past {SMOOTH} min.")
-    cfg_name = c[1].selectbox("SARIMAX setting", list(SX_CONFIGS), key="fc_cfg")
-    len_name = c[2].selectbox("Forecast length", list(FC_LENGTHS), index=2, key="fc_len")
-    hist_name = c[3].selectbox("History shown", ["3 hours", "6 hours", "12 hours", "24 hours"], index=1, key="fc_hist")
-    n_or = int(c[4].number_input("Backtest moments", 4, 40, 12, 2, key="fc_nor", help="More moments = firmer answer but slower (3 SARIMAX fits per moment)."))
-    c[5].markdown("<div style='height:1.65rem'></div>", unsafe_allow_html=True); run_bt = c[5].button("Run backtest", type="primary", key="fc_run")
-    SRC = (D_raw if train_on == "Real values" else D)[KWCOLS].to_numpy(float)
-    nw = newest_window(SRC)
-    if nw is None: note("The newest 24 hours have too many gaps (or the file is shorter than 24 hours), so SARIMAX cannot learn from them.", "amber")
-    else:
-        window, pn, filled = nw; horizon = FC_LENGTHS[len_name]; K = horizon // SX_STEP
-        t0 = D.index[pn]; t_fut = pd.date_range(t0 + pd.Timedelta(minutes=SX_STEP), periods=K, freq=f"{SX_STEP}min")
-        F = sx_forecast(window, K, cfg_name); P = F["mean"]; rep = analyse(P)
-        DGm = diagnose(Dv[NEEDED], ALARM_PCT, MIN_KW, SEVERE_PCT); chronic = None if DGm["empty"] else DGm["pct_above"]
-        bt_key = (train_on, cfg_name, n_or, ALARM_PCT, SEVERE_PCT, MIN_KW, SMOOTH, str(t0))
-        if run_bt:
-            pbar = st.progress(0.0, text="Testing SARIMAX at past moments - about 1-3 minutes…")
-            out_bt = sx_backtest(D_raw, D, "Real values" if train_on == "Real values" else "mean", cfg_name, n_or, (15, 30, 60), progress=lambda x: pbar.progress(float(x), text="Testing SARIMAX at past moments…"))
-            pbar.empty(); st.session_state["bt"] = dict(key=bt_key, res=out_bt)
-        cur = st.session_state.get("bt"); res_bt = cur["res"] if cur and cur["key"] == bt_key else None
-        tone_v, verdict = bt_verdict(res_bt) if res_bt is not None else ("", None)
-        if not all(F["ok"]): note(f"A SARIMAX fit failed for {', '.join(n for n, ok in zip(NAMES, F['ok']) if not ok)} - that phase falls back to 'same as now'. Try another setting.", "amber")
-        if filled: note(f"{filled} gap point(s) in the last 24 hours were filled with straight lines.", "amber")
-        imb = rep.Imbalance_pct.to_numpy(); n_al, n_sev = int(rep.Alarm.sum()), int((rep.Status == "SEVERE").sum()); tot = P.sum(axis=1)
-        k = st.columns(4)
-        with k[0]: kpi(f"Imbalance at {t_fut[-1]:%H:%M}", "–" if np.isnan(imb[-1]) else f"{imb[-1]:.1f} %", f"limit {ALARM_PCT:g} % · {rep.Status.iloc[-1].lower()}", "good" if rep.Status.iloc[-1] == "OK" else "bad" if rep.Status.iloc[-1] == "SEVERE" else "warn" if rep.Status.iloc[-1] == "ALARM" else "", "⚖️", trend=np.nan_to_num(imb), trend_color=ACCENT)
-        with k[1]: kpi("Alarm points", f"{n_al}", f"of {K} forecast points · {n_sev} severe", "good" if n_al == 0 else "bad", "🚨")
-        with k[2]: kpi(f"Total power at {t_fut[-1]:%H:%M}", f"{tot[-1]:,.1f} kW", f"{tot[-1] - window[-1].sum():+,.1f} kW vs now ({window[-1].sum():,.1f} kW)", "info", "🔌", trend=tot)
-        with k[3]: kpi("Worst colour at the end", "–" if not rep.Loaded.iloc[-1] else rep.Worst_phase.iloc[-1], "" if not rep.Loaded.iloc[-1] else f"{rep.Direction.iloc[-1]} · {abs(rep.Worst_dev.iloc[-1]):.1f} % from the average", "info", "🎨")
-        st.write("")
-        with panel("Phase forecast & imbalance alarms", f"SARIMAX learns from the last 24 h ({SX_WSTEPS} points, one every {SX_STEP} min) · {cfg_name} · learned from {mean_label if train_on != "Real values" else "real values"} · forecast starts after {t0:%d %b %Y %H:%M}", key="fc_main"):
-            show_real = st.checkbox("Also show the real minute-by-minute values (noisy)", False, key="fc_show_real")
-            hmin = {"3 hours": 180, "6 hours": 360, "12 hours": 720, "24 hours": 1440}[hist_name]; w0 = t0 - pd.Timedelta(minutes=hmin)
-            hm, hr = D.loc[w0:t0, KWCOLS], D_raw.loc[w0:t0, KWCOLS]
-            f = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n} phase (kW)" for n in NAMES] + ["Phase imbalance %"])
-            xt = [t0] + list(t_fut)
-            for j, ph in enumerate(PHASES, 1):
-                if show_real: f.add_scatter(x=hr.index, y=hr[ph], name="Real values", legendgroup="r", showlegend=j == 1, line=dict(color=IDLE, width=1), row=j, col=1)
-                f.add_scatter(x=hm.index, y=hm[ph], name=mean_label, legendgroup="m", showlegend=j == 1, line=dict(color=INK, width=2), row=j, col=1)
-                a0 = float(window[-1, j - 1]); lo_, hi_ = F["lo"][:, j - 1], F["hi"][:, j - 1]
-                if np.isfinite(lo_).all(): f.add_scatter(x=xt + xt[::-1], y=[a0] + list(hi_) + ([a0] + list(lo_))[::-1], fill="toself", fillcolor=tint(PHASE_COL[ph], .16), mode="lines", line=dict(width=0), name="95 % range", legendgroup="b", showlegend=j == 1, hoverinfo="skip", row=j, col=1)
-                f.add_scatter(x=xt, y=[a0] + list(P[:, j - 1]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines+markers", line=dict(color=PHASE_COL[ph], width=2.6, dash="dash"), marker=dict(size=5), row=j, col=1)
-            ih_m = analyse(hm[KWCOLS].to_numpy()).Imbalance_pct.to_numpy(); ih_r = analyse(hr[KWCOLS].to_numpy()).Imbalance_pct.to_numpy()
-            if show_real: f.add_scatter(x=hr.index, y=ih_r, name="Real values", legendgroup="r", showlegend=False, line=dict(color=IDLE, width=1), row=4, col=1)
-            f.add_scatter(x=hm.index, y=ih_m, name=mean_label, legendgroup="m", showlegend=False, line=dict(color=INK, width=2), row=4, col=1)
-            f.add_scatter(x=t_fut, y=imb, name="Forecast", legendgroup="f", showlegend=False, mode="lines+markers", line=dict(color=ACCENT, width=2.6, dash="dash"), marker=dict(size=5), row=4, col=1)
-            for sev_, col_ in (("ALARM", WARN), ("SEVERE", BAD)):
-                m_ = (rep.Status == sev_).to_numpy()
-                if m_.any(): f.add_scatter(x=t_fut[m_], y=imb[m_], mode="markers", name=f"{sev_.title()} (forecast)", marker=dict(symbol="x", size=10, color=col_), row=4, col=1)
-            f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, row=4, col=1); f.add_hline(y=SEVERE_PCT, line_dash="dot", line_color=BAD, row=4, col=1)
-            f.add_shape(type="line", xref="x", yref="paper", x0=t0, x1=t0, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
-            style(f, 860, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f)
-            with st.expander(f"Forecast table · {K} points"):
-                table(pd.DataFrame({"Time": [t.strftime("%d %b %H:%M") for t in t_fut], "Red kW": P[:, 0], "Yellow kW": P[:, 1], "Blue kW": P[:, 2], "Total kW": tot, "Imbalance %": imb, "Worst": rep.Worst_phase.to_numpy(), "Direction": rep.Direction.to_numpy(), "Status": rep.Status.to_numpy()}).head(300), 2)
-            exp = pd.DataFrame({"Timestamp": t_fut, "Red_kW": P[:, 0], "Yellow_kW": P[:, 1], "Blue_kW": P[:, 2], "Total_kW": tot, "Imbalance_pct": imb, "Worst_phase": rep.Worst_phase.to_numpy(), "Direction": rep.Direction.to_numpy(), "Status": rep.Status.to_numpy()})
-            d1, _ = st.columns([1, 3]); d1.download_button("⬇ Forecast + alarms (CSV)", exp.to_csv(index=False).encode(), "GridSense_phase_forecast.csv", "text/csv", on_click="ignore", width="stretch")
-        with panel("What to do about the forecast", "AI advisor (Groq) re-reads the forecast every time the model, length, limits or backtest change · every number is filled in by Python and checked", key="fc_act"):
-            tone_f, head_f, acts_f = forecast_advice(P, rep, t_fut, chronic, verdict, horizon > 60)
-            try:
-                if DGm["empty"]: note(advice_html(head_f, acts_f), tone_f); st.caption("AI advisor skipped: too few loaded minutes in the measured data.")
-                else:
-                    fin = np.isfinite(imb)
-                    fc_facts = dict(window=f"next {len_name}", end_imb=float(imb[-1]) if fin[-1] else None, max_imb=float(np.nanmax(imb)) if fin.any() else None, n_alarm=n_al, n_points=K, end_total_kw=float(tot[-1]))
-                    rel, rel_why = ga.forecast_reliability(res_bt)
-                    ai_panel(ai_facts(DGm, fc_facts), rel, rel_why, "phase imbalance forecast", advice_html(head_f, acts_f), tone_f, "fc_ai_retry")
-            except Exception as exc: note(advice_html(head_f, acts_f), tone_f); st.caption(f"AI advisor unavailable ({type(exc).__name__}: {exc}). Make sure the newest gridsense_advisor.py is next to app.py.")
-        with panel("Is the forecast better than 'same as now'?", "backtest: SARIMAX learns from the 24 h before each past moment, forecasts 15 / 30 / 60 min, and is scored against what really happened", key="fc_bt"):
-            if res_bt is None: st.caption("Not run yet for these settings - press 'Run backtest' above. It tests the last 20 % of the file.")
-            else:
-                note(verdict, {"good": "good", "bad": "bad", "amber": "amber"}[tone_v])
-                table(res_bt.drop(columns="Moments"), 2); st.caption(f"{int(res_bt['Moments'].iloc[0])} past moments tested · errors in kW (phase, total) and percentage points (imbalance) · smaller is better")
-        note(f"<b>Alarm rule:</b> imbalance % = largest deviation of a phase from the average of the three ÷ the average × 100 (170 / 169 / 160 kW → 3.81 %). Alarm above {ALARM_PCT:g} %, severe above {SEVERE_PCT:g} %. "
-             "The 95 % range is the model's own interval; the backtest above is the fairer test of how far to trust it.")
+    note(f"<b>Alarm rule:</b> imbalance % = largest deviation of a phase from the average of the three ÷ the average × 100 (170 / 169 / 160 kW → 3.81 %). Alarm above {ALARM_PCT:g} %, severe above {SEVERE_PCT:g} %.")
