@@ -19,7 +19,8 @@ from pathlib import Path
 import numpy as np
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_MODEL = "llama-3.3-70b-versatile"          # change it in the app or with GROQ_MODEL if Groq retires / renames it
+DEFAULT_MODEL = "openai/gpt-oss-120b"                # Groq shut llama-3.3-70b-versatile down on 16 Aug 2026; set GROQ_MODEL to change it
+FALLBACK_MODELS = ["qwen/qwen3.6-27b", "openai/gpt-oss-20b"]   # tried automatically when Groq says the model does not exist
 PRIORITIES = ["low", "medium", "high", "critical"]
 CLASSES = {"confirmed", "strongly_supported", "possible", "unknown"}
 CONFIDENCE = {"low", "medium", "high"}
@@ -191,7 +192,9 @@ def build_messages(ev, ctx):
 def groq_chat(messages, api_key, model=DEFAULT_MODEL, timeout=45, retries=2, opener=None):
     """POST to Groq's OpenAI-compatible endpoint with JSON mode. Returns (text, None) or (None, error message). `opener` is only for tests."""
     opener = opener or urllib.request.urlopen
-    body = json.dumps(dict(model=model, messages=messages, temperature=0.1, max_tokens=2500, response_format={"type": "json_object"})).encode("utf-8")
+    payload = dict(model=model, messages=messages, temperature=0.1, max_tokens=4000, response_format={"type": "json_object"})
+    if model.startswith("openai/gpt-oss"): payload["reasoning_effort"] = "low"          # reasoning tokens would otherwise eat the answer budget
+    body = json.dumps(payload).encode("utf-8")
     err = "unknown error"
     for attempt in range(retries + 1):
         req = urllib.request.Request(GROQ_URL, data=body, method="POST", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "GridSense/1.0"})
@@ -356,8 +359,17 @@ def advise(facts, reliability, api_key, model=DEFAULT_MODEL, caller=groq_chat, t
     out = dict(source="fallback", error=None, answer=None, validation=None, rejected=[], evidence=ev, ceiling=ceiling, ctx=ctx)
     if not api_key: out["error"] = "no Groq API key found (paste it into GROQ_API_KEY_EMBEDDED at the top of app.py)"; return out
     msgs = build_messages(ev, ctx); obj = None
+    models = [model] + [m for m in FALLBACK_MODELS if m != model]
+
+    def call(m):
+        """Ask the models in order; move to the next one only when Groq does not know the current one (HTTP 404 / 400)."""
+        while True:
+            text, err = caller(m, api_key, models[0])
+            if err and ("HTTP 404" in err or "HTTP 400" in err) and len(models) > 1: models.pop(0); continue
+            return text, err
+
     for attempt in range(2):                                   # one repair attempt when the JSON is invalid
-        text, err = caller(msgs, api_key, model)
+        text, err = call(msgs)
         if err: out["error"] = err; return out
         obj, perr = parse_json(text)
         if obj is not None: break
