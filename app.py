@@ -214,7 +214,13 @@ def _parse(buffer, name):
     if name.endswith((".xlsx", ".xls")): return pd.read_excel(buffer)
     return pd.read_csv(buffer, encoding="utf-8-sig", low_memory=False)
 
-
+def parse_clock(col):
+    """ISO dates (2024-09-02 00:00:00) are read as year-month-day. Other layouts fall back to day-first."""
+    s = col.astype(str).str.strip()
+    t = pd.to_datetime(s, format="ISO8601", errors="coerce")
+    if t.notna().mean() < 0.9:
+        t = pd.to_datetime(s, dayfirst=True, errors="coerce")
+    return t
 @st.cache_data(show_spinner="Reading the file…")
 def read_raw_path(path, mtime):
     return _parse(path, path)
@@ -235,7 +241,7 @@ def clean_data(raw, device, start_iso):
     if missing: raise ValueError(f"These columns are missing: {missing}. The file has: {list(raw.columns)[:30]}")
     tcol = next((c for c in CLOCK_COLS if c in raw.columns), None)
     if tcol in ("Timestamps", "Timestamp"):
-        ts, clock = pd.to_datetime(raw[tcol], dayfirst=True, errors="coerce"), "file"
+        ts, clock = parse_clock(raw[tcol]), "file"
     else:                                              # Timestamp_Index or no clock at all: one row / index step = one minute from the chosen start
         idx = pd.to_numeric(raw[tcol], errors="coerce") if tcol else pd.Series(np.arange(len(raw), dtype=float), index=raw.index)
         ts, clock = pd.Timestamp(start_iso) + pd.to_timedelta((idx - idx.min()).to_numpy(float), unit="m"), "assumed"
