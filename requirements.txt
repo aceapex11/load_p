@@ -1,8 +1,6 @@
-streamlit>=1.40
-pandas>=2.0
-numpy>=1.26
-plotly>=5.20
-statsmodels>=0.14
-scikit-learn>=1.3
-pyarrow>=14        # only needed if you use a .parquet file
-pytest>=8          # only for the tests
+streamlit
+pandas
+numpy
+plotly
+statsmodels
+scipy
