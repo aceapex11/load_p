@@ -134,7 +134,7 @@ def playbook(dg, now, fc, thr, sev, min_kw, rating=0.0, demand=0.0, reliability=
         if real_clock and len(dg["by_hour"]) >= 6 and dg["by_hour"].max() > 1.25 * dg["by_hour"].min():
             hh, lh = int(dg["by_hour"].idxmax()), int(dg["by_hour"].idxmin())
             s2.append(f"<b>When it is worst:</b> around {hh:02d}:00 ({dg['by_hour'].max():.1f} %), best around {lh:02d}:00 ({dg['by_hour'].min():.1f} %) - check which machines run at {hh:02d}:00.")
-    else: s2.append("Not enough loaded minutes to separate current, voltage and power factor. Lower the 'ignore below' limit in Data & limits.")
+    else: s2.append("Not enough loaded minutes to separate current, voltage and power factor.")
     out["sections"].append(("why", "Why it happens", "", s2))
 
     # 3 ---------------- what to do now = how to rectify
@@ -186,7 +186,7 @@ def playbook(dg, now, fc, thr, sev, min_kw, rating=0.0, demand=0.0, reliability=
         if rating > 0:
             u = pk / rating * 100; hot = u.idxmax()
             s5.append(f"<b>Trips and overload:</b> {hot} peaks at {pk[hot]:,.0f} A = <b>{u[hot]:.0f} %</b> of the {rating:,.0f} A rating. " + ("It is over the rating: expect breaker trips, shed its load now." if u[hot] > 100 else "Little headroom: the loaded phase will trip first, stopping the machine without warning." if u[hot] > 85 else "There is headroom, but the loaded phase reaches the limit first."))
-        else: s5.append(f"<b>Trips and overload:</b> {pk.idxmax()} peaks at {pk.max():,.0f} A. Enter the breaker / cable rating in Data & limits to see how close it is.")
+        else: s5.append(f"<b>Trips and overload:</b> {pk.idxmax()} peaks at {pk.max():,.0f} A. Set RATING at the top of app.py to see how close it is.")
         if dg["pct_above"] > 50: s5.append("<b>It is permanent, not an event:</b> these effects are present most of the time, so cable ageing and unplanned trips build up silently.")
     if n_sev: s5.append(f"<b>Forecast severe hours ({n_sev}):</b> a large imbalance can trip protection or damage single-phase equipment.")
     elif n_al: s5.append(f"<b>Forecast alarm hours ({n_al}):</b> the effects above will appear mostly in these hours.")
