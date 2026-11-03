@@ -904,34 +904,28 @@ with tab_phase:
                 st.dataframe(tt[1], width="stretch")
             note("<ul>" + "".join(f"<li>{t_}</li>" for t_ in pp_explain(PP)) + "</ul>")
 
-      # ---- B) actual vs predicted on test data (last days hidden, model learns only from the 28 days before them)
-    with panel("Model check · actual vs predicted on test data", "the last days are hidden, the model learns from the hours before them, then its forecast is compared with what really happened", key="ph_bt"):
-        test_days = st.selectbox("Test period", [1, 2, 3, 4, 5, 6, 7], index=6, key="bt_days", format_func=lambda d: f"last {d} day{'s' if d > 1 else ''}")
-        test_h = test_days * 24
-        if len(ph_mod) < test_h + 2 * P_season:
-            st.caption("Not enough history for this test. Choose a shorter test period or seasonal cycle.")
+# ---- B) actual vs predicted on past weeks (follows the Forecast length / Seasonal cycle / Forecast method chosen at the top)
+    with panel("Model check · actual vs predicted on past weeks", "each week is hidden, forecast from the hours before it, then compared with what really happened", key="ph_bt"):
+        bt_weeks = st.selectbox("Weeks tested", [1, 2, 3, 4], index=1, key="bt_weeks")
+        ref = run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, bt_weeks, P_method, ALARM_PCT, MIN_KW)
+        if ref is None: st.caption("Not enough history: the test needs the 28-day learning window plus the weeks tested. Lower either one.")
         else:
-            idx = ph_mod.index[-test_h:]
-            train = ph_mod.iloc[:-test_h].iloc[-fit_steps:]                       # only hours BEFORE the test period
-            fc_t, _, _ = run_phases(train, test_h, P_model, P_season, P_method)
-            F_ = pd.DataFrame(fc_t[:test_h], index=idx, columns=PH3)              # predicted
-            A_ = ph_real.reindex(idx)[PH3]                                        # actual (real hours only)
-            A_d = A_.fillna(ph_mod.reindex(idx))                                  # missing hours drawn with the filled values
-            ra_, rf_ = analyse(A_d.to_numpy()), analyse(F_.to_numpy()); ra_.index = idx; rf_.index = idx
-
+            A_, F_ = ref["actual"], ref["pred"]; A_ = A_.fillna(ph_mod.reindex(A_.index))        # missing hours are drawn with the filled values; the error below uses real hours only
+            ra_, rf_ = analyse(A_.to_numpy()), analyse(F_.to_numpy()); ra_.index = A_.index; rf_.index = F_.index
             f = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n_} phase (kW)" for n_ in NAMES] + ["Imbalance % (calculated from the phase kW)"])
             for j, p in enumerate(PH3, 1):
-                f.add_scatter(x=idx, y=A_d[p], name="Actual", legendgroup="a", showlegend=j == 1, line=dict(color=INK, width=2), row=j, col=1)
-                f.add_scatter(x=idx, y=F_[p], name="Predicted", legendgroup="p", showlegend=j == 1, line=dict(color=PHASE_COL[KWCOLS[j - 1]], width=2.2, dash="dash"), row=j, col=1)
-            f.add_scatter(x=idx, y=ra_.Imbalance_pct.where(ra_.Loaded), name="Actual", legendgroup="a", showlegend=False, line=dict(color=INK, width=2), connectgaps=True, row=4, col=1)
-            f.add_scatter(x=idx, y=rf_.Imbalance_pct.where(rf_.Loaded), name="Predicted", legendgroup="p", showlegend=False, line=dict(color=ACCENT, width=2.2, dash="dash"), connectgaps=True, row=4, col=1)
+                f.add_scatter(x=A_.index, y=A_[p], name="Actual", legendgroup="a", showlegend=j == 1, line=dict(color=INK, width=2), row=j, col=1)
+                f.add_scatter(x=F_.index, y=F_[p], name="Predicted", legendgroup="p", showlegend=j == 1, line=dict(color=PHASE_COL[KWCOLS[j - 1]], width=2.2, dash="dash"), row=j, col=1)
+            f.add_scatter(x=A_.index, y=ra_.Imbalance_pct.where(ra_.Loaded), name="Actual", legendgroup="a", showlegend=False, line=dict(color=INK, width=2), connectgaps=True, row=4, col=1)
+            f.add_scatter(x=F_.index, y=rf_.Imbalance_pct.where(rf_.Loaded), name="Predicted", legendgroup="p", showlegend=False, line=dict(color=ACCENT, width=2.2, dash="dash"), connectgaps=True, row=4, col=1)
             f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, row=4, col=1)
             style(f, 780, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f, key="bt_main")
-
-            met = pd.DataFrame({n_: gf.score(A_[p].to_numpy(), F_[p].to_numpy()) for n_, p in zip(NAMES, PH3)}).T[["MAE", "MAPE", "WAPE"]].round(2)
+            sp_ = float(np.nanmean([F_[p].std() / A_[p].std() for p in PH3 if A_[p].std() > 0])); wp_ = float(ref["per_phase"]["WAPE"].mean())
+            st.caption(f"{ref['imbalance']['weeks']} week(s) · {P_method} · {P_season} h cycle · phase kW error {wp_:.1f} % (WAPE, real hours only) · the predicted line moves {sp_ * 100:.0f} % as much as the actual line"
+                       + (" - FLAT: the model is not learning the pattern; try a different seasonal cycle or the other forecast method." if sp_ < 0.5 else "."))
+            met = ref["per_phase"].set_index("Phase")[["MAE", "MAPE", "WAPE"]].round(2)
             met.columns = ["MAE (kW)", "MAPE (%)", "WAPE (%)"]
             met.loc["Average"] = met.mean().round(2)
             st.dataframe(met, width="stretch")
-            sp_ = float(np.nanmean([F_[p].std() / A_d[p].std() for p in PH3 if A_d[p].std() > 0]))
-            st.caption(f"Test: last {test_days} day(s) · {P_method} · {P_season} h cycle · the predicted line moves {sp_ * 100:.0f} % as much as the actual line"
-                       + (" - FLAT: the model is not learning the pattern; try a different seasonal cycle or the other forecast method." if sp_ < 0.5 else "."))
+            st.caption(f"Imbalance % error: {ref['imbalance']['imb_mae']:.1f} points on average · alarm / no-alarm called right in {ref['imbalance']['alarm_ok']:.0f} % of test hours")
+ 
