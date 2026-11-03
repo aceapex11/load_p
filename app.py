@@ -714,14 +714,15 @@ with tab_load:
 with tab_phase:
   if not H_OK: need_more_data()
   else:
-    c = st.columns([1, 1, 1.3, 1, 1.5])
+    c = st.columns([1, 1.3, 1, 1.5])
     P_model = "Exponential Smoothing"
     P_len = c[0].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
-    P_days = c[1].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
-    P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[2].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")]
-    P_hist = c[3].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
-    P_method = c[4].selectbox("Forecast method", gf.PHASE_METHODS, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The test below shows which one does better on your data.")
-    fit_steps = int(P_days) * 24; horizon = LD_LENGTHS[P_len]
+    P_days = 28                                                   # fixed: always learns from the last 28 days ("Learn from last" dropdown removed)
+    SEAS_D = {f"{d} day" + ("s" if d > 1 else ""): d * 24 for d in range(1, 8)}      # 1 day ... 7 days  ->  24 ... 168 h
+    P_season = SEAS_D[c[1].selectbox("Seasonal cycle", list(SEAS_D), index=6, key="ph_season")]
+    P_hist = c[2].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
+    P_method = c[3].selectbox("Forecast method", gf.PHASE_METHODS, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The test below shows which one does better on your data.")
+    fit_steps = P_days * 24; horizon = LD_LENGTHS[P_len]
     fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season, P_method)
     Pf = pd.DataFrame(fc_arr[:horizon], index=t_fut_all[:horizon], columns=PH3); rep = analyse(Pf.to_numpy())
     if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
