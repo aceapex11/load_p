@@ -904,11 +904,12 @@ with tab_phase:
                 st.dataframe(tt[1], width="stretch")
             note("<ul>" + "".join(f"<li>{t_}</li>" for t_ in pp_explain(PP)) + "</ul>")
 
-# ---- B) actual vs predicted on past weeks (follows the Forecast length / Seasonal cycle / Forecast method chosen at the top)
+
+      # ---- B) actual vs predicted on past weeks (follows the Forecast length / Learn from / Seasonal cycle / Forecast method chosen at the top)
     with panel("Model check · actual vs predicted on past weeks", "each week is hidden, forecast from the hours before it, then compared with what really happened", key="ph_bt"):
         bt_weeks = st.selectbox("Weeks tested", [1, 2, 3, 4], index=1, key="bt_weeks")
-        ref = run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, bt_weeks, P_method, ALARM_PCT, MIN_KW)
-        if ref is None: st.caption("Not enough history: the test needs the 28-day learning window plus the weeks tested. Lower either one.")
+        ref = run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, bt_weeks, P_method, ALARM_PCT, SEVERE_PCT, MIN_KW)
+        if ref is None: st.caption("Not enough history: the test needs the 'Learn from last' window plus the weeks tested. Lower either one.")
         else:
             A_, F_ = ref["actual"], ref["pred"]; A_ = A_.fillna(ph_mod.reindex(A_.index))        # missing hours are drawn with the filled values; the error below uses real hours only
             ra_, rf_ = analyse(A_.to_numpy()), analyse(F_.to_numpy()); ra_.index = A_.index; rf_.index = F_.index
@@ -922,10 +923,5 @@ with tab_phase:
             style(f, 780, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f, key="bt_main")
             sp_ = float(np.nanmean([F_[p].std() / A_[p].std() for p in PH3 if A_[p].std() > 0])); wp_ = float(ref["per_phase"]["WAPE"].mean())
             st.caption(f"{ref['imbalance']['weeks']} week(s) · {P_method} · {P_season} h cycle · phase kW error {wp_:.1f} % (WAPE, real hours only) · the predicted line moves {sp_ * 100:.0f} % as much as the actual line"
-                       + (" - FLAT: the model is not learning the pattern; try a different seasonal cycle or the other forecast method." if sp_ < 0.5 else "."))
-            met = ref["per_phase"].set_index("Phase")[["MAE", "MAPE", "WAPE"]].round(2)
-            met.columns = ["MAE (kW)", "MAPE (%)", "WAPE (%)"]
-            met.loc["Average"] = met.mean().round(2)
-            st.dataframe(met, width="stretch")
-            st.caption(f"Imbalance % error: {ref['imbalance']['imb_mae']:.1f} points on average · alarm / no-alarm called right in {ref['imbalance']['alarm_ok']:.0f} % of test hours")
- 
+                       + (" - FLAT: the model is not learning the pattern; try the other seasonal cycle or a different 'Learn from last'." if sp_ < 0.5 else "."))
+
