@@ -38,6 +38,13 @@ MIN_KW = 5.0         # average kW per phase below this = machine off
 SMOOTH = 30          # minutes of rolling mean (past minutes only)
 DEMAND = 0.0         # sanctioned demand in kW, 0 = unknown
 RATING = 0.0         # phase breaker / cable in A, 0 = unknown
+LOAD_CHG_PCT = 5.0   # forecast energy must differ more than this % from the previous period to count as an INCREASE / DECREASE
+CAPTIVE_KW = 0.0     # own (captive) generation capacity in kW, 0 = unknown
+HAS_BATTERY = False  # True if a battery storage system is available
+SHIFTABLE_PCT = 10.0 # % of the peak that could be moved to other hours (flexible loads)
+TARIFF = 0.0         # money per kWh, 0 = do not show a cost
+DEMAND_CHARGE = 0.0  # money per kW of peak demand, 0 = do not show a cost
+CURRENCY = ""        # e.g. "INR"
 MINR = 45            # an hour with fewer one-minute readings than this counts as missing (as in the notebooks)
 
 # COLOUR THEME  (one palette everywhere)
@@ -390,6 +397,76 @@ def power_advice(kind, first, last, peak, long_horizon, ctx=None):
 
 
 
+# ------------------------------------------------------------------ LOAD suggestions (rule-based, no AI): what happens when the total kW rises / falls, what to do, gain if managed, loss if not
+def load_suggestions(fv, t_f, prev_kwh):
+    """fv = forecast hourly kW, t_f = their timestamps, prev_kwh = energy used in the previous period of the same length.
+    Every number comes from these inputs and the settings at the top of the file (LOAD_CHG_PCT, CAPTIVE_KW, DEMAND, HAS_BATTERY, SHIFTABLE_PCT, TARIFF, DEMAND_CHARGE).
+    Returns dict(badge, tone, headline, risks=[(heading, text)], actions=[(heading, text)], managed, ignored, direction)."""
+    fv = np.asarray(fv, float); n = len(fv); kwh = float(fv.sum()); avg = float(fv.mean())
+    peak, pk_at = float(fv.max()), t_f[int(fv.argmax())]; low, lo_at = float(fv.min()), t_f[int(fv.argmin())]
+    d_kwh = kwh - prev_kwh; d_pct = d_kwh / prev_kwh * 100 if prev_kwh >= 1 else float("nan")
+    kind = "idle" if avg < MIN_KW else "up" if d_pct > LOAD_CHG_PCT else "down" if d_pct < -LOAD_CHG_PCT else "stable"
+    if not np.isfinite(d_pct) and kind != "idle": kind = "stable"
+    pct = "" if not np.isfinite(d_pct) else "about the same as the previous period" if abs(d_pct) < 0.5 else f"{abs(d_pct):.0f} % {'higher' if d_pct > 0 else 'lower'} than the previous period"
+    money = lambda x: f"{x:,.0f}{(' ' + CURRENCY) if CURRENCY else ''}"
+    short = peak - CAPTIVE_KW if CAPTIVE_KW > 0 and peak > CAPTIVE_KW else 0.0                    # peak above own generation -> must be bought / backed up
+    spare = CAPTIVE_KW - peak if CAPTIVE_KW > 0 and peak < CAPTIVE_KW else 0.0
+    over = peak - DEMAND if DEMAND > 0 and peak > DEMAND else 0.0                                   # peak above sanctioned demand -> penalty
+    room_pct = peak / DEMAND * 100 if DEMAND > 0 else float("nan")
+    near = int((fv >= 0.9 * peak).sum()) if peak > 0 else 0                                          # hours within 10 % of the peak
+    shave = peak * SHIFTABLE_PCT / 100; gap = avg - low
+    extra_cost = max(d_kwh, 0) * TARIFF; unused = max(-d_kwh, 0.0)
+    dc_cost = over * DEMAND_CHARGE; dc_save = min(shave, peak - low) * DEMAND_CHARGE if DEMAND_CHARGE > 0 else 0.0
+    at = lambda ts: f"{ts:%a %H:%M}"
+    risks, acts = [], []
+    if kind == "idle":
+        risks = [("Machine expected idle", f"Average forecast load is {avg:,.1f} kW, below {MIN_KW:g} kW. If the machine should be running, check the supply, the start-up and the process."),
+                 ("Idle fixed charges", "Demand and fixed charges are still billed while the machine produces nothing.")]
+        acts = [("Confirm the stop is planned", "If it is planned, switch off auxiliaries and use the time for maintenance."), ("Check for a fault", "If it is not planned, look for a tripped breaker, a supply problem or a sensor / data problem.")]
+        gain, lose = "A planned stop saves energy and gives a window for maintenance.", "An unplanned stop means lost production and fixed charges with no output."
+    elif kind == "up":
+        risks.append(("Higher electricity cost", f"Forecast energy is {kwh:,.0f} kWh over {span_text(n)}, {pct}. " + (f"If own generation cannot cover the extra {d_kwh:,.0f} kWh, grid or backup power may cost about {money(extra_cost)} more." if TARIFF > 0 else "If own generation cannot cover the extra energy, more grid or backup power may be needed, which raises cost.")))
+        risks.append(("Increased peak demand", f"Peak is {peak:,.1f} kW around {at(pk_at)}, with {near} hour(s) within 10 % of it." + (f" That is {short:,.1f} kW above own generation ({CAPTIVE_KW:g} kW)." if short else "") + (f" It is {over:,.1f} kW above the sanctioned demand ({DEMAND:g} kW) - a penalty may apply." if over else (f" It uses {room_pct:.0f} % of the sanctioned demand." if DEMAND > 0 else "")) + (" Without peak-load management, machines running together may push demand beyond capacity." if not (short or over) else "")))
+        risks.append(("Missed energy storage opportunity" if HAS_BATTERY else "Missed load-shifting opportunity", (f"If the battery is not charged in the low-load hours (around {at(lo_at)}, {low:,.1f} kW), it may be empty at the peak." if HAS_BATTERY else f"Without moving flexible work out of the peak, the {peak - low:,.1f} kW gap between peak and lowest hour stays wasted.")))
+        risks.append(("Increased operational risk", (f"The peak is above available power by {max(short, over):,.1f} kW, so backup supply or reduced operation may be needed to avoid a production stop." if short or over else "If demand exceeds available supply, backup supply or operational changes may be needed to avoid a production stop.")))
+        risks.append(("Higher energy management cost", f"Without coordinating demand and generation, extra cost may reach about {money(extra_cost + dc_cost)}." if (extra_cost + dc_cost) > 0 else "Without coordinating demand and generation, unnecessary generation, grid imports and avoidable cost may follow."))
+        acts.append(("Optimize internal power generation", f"Forecast demand is {kwh:,.0f} kWh over {span_text(n)} ({pct}). Plan own generation to cover it and book grid or backup capacity for the difference."))
+        acts.append(("Prepare for peak demand", f"Keep enough capacity ready around {at(pk_at)} for the {peak:,.1f} kW peak" + (f"; shortfall to cover: {short:,.1f} kW." if short else f"; spare capacity: {spare:,.1f} kW." if spare else ".")))
+        acts.append(("Optimize energy storage" if HAS_BATTERY else "Use the low-load hours", (f"Charge the battery in low-demand hours (around {at(lo_at)}) and discharge it during the peak." if HAS_BATTERY else f"Run flexible work in the low-load hours (around {at(lo_at)}, {low:,.1f} kW) rather than near the peak.")))
+        acts.append(("Shift flexible loads", f"Stagger large motor start-ups and move non-critical work away from {at(pk_at)}. Moving about {SHIFTABLE_PCT:g} % of the peak could cut it by roughly {shave:,.1f} kW."))
+        acts.append(("Monitor power availability", "Compare the forecast with available internal generation and plan grid support or backup if a shortfall is expected." + (f" Expected shortfall: {short:,.1f} kW." if short else "")))
+        gain = f"Moving flexible load can lower the peak by about {shave:,.1f} kW (to about {peak - shave:,.1f} kW)" + (f", saving roughly {money(dc_save)} in demand charges" if dc_save > 0 else "") + ", and keeps backup supply and production stops away."
+        lose = (f"Extra energy and peak charges may cost about {money(extra_cost + dc_cost)}" if (extra_cost + dc_cost) > 0 else "Extra grid or backup power and peak charges may be paid") + (f", the peak may exceed available power by {max(short, over):,.1f} kW" if short or over else "") + ", and production could be disrupted."
+    elif kind == "down":
+        risks.append(("Under-utilised generation", f"Forecast energy is {kwh:,.0f} kWh over {span_text(n)}, {pct}. Up to {unused:,.0f} kWh of the usual generation may go unused" + (f", worth about {money(unused * TARIFF)}." if TARIFF > 0 else ".")))
+        risks.append(("Surplus capacity and wasted fuel", (f"Peak is only {peak:,.1f} kW against {CAPTIVE_KW:g} kW of own generation, so {spare:,.1f} kW stays idle; running units at low load wastes fuel." if spare else f"Peak is {peak:,.1f} kW around {at(pk_at)}; generation sized for a higher load may run inefficiently and waste fuel.")))
+        risks.append(("Low-load inefficiency", f"The lowest hour is {low:,.1f} kW around {at(lo_at)}, {gap:,.1f} kW under the average of {avg:,.1f} kW. Motors and generators are least efficient at low load."))
+        risks.append(("Possible production slowdown", "A fall of this size may be a planned slowdown - or a stoppage, a fault or a data problem. Verify that it is planned."))
+        risks.append(("Fixed-cost pressure", (f"Contract demand of {DEMAND:g} kW is still billed while the peak is only {peak:,.1f} kW ({room_pct:.0f} % used)." if DEMAND > 0 else "Fixed and demand charges are still billed although less energy is used, so the cost per kWh rises.")))
+        acts.append(("Right-size generation", f"Run fewer generating units or lower the setpoint to match {kwh:,.0f} kWh over {span_text(n)} and avoid unnecessary generation."))
+        acts.append(("Use the surplus", ("Charge the battery when own generation exceeds consumption, and discharge it later." if HAS_BATTERY else f"Move flexible work into the low-demand hours (around {at(lo_at)}) so the equipment runs at a better load.") + (f" About {spare:,.1f} kW of capacity is spare." if spare else "")))
+        acts.append(("Consolidate loads", f"Run machines together instead of partly loaded, and switch off idle equipment around {at(lo_at)} ({low:,.1f} kW)."))
+        acts.append(("Review contract demand", (f"The peak ({peak:,.1f} kW) is {room_pct:.0f} % of the contract demand ({DEMAND:g} kW). If this continues, ask whether the contract demand can be reduced." if DEMAND > 0 and room_pct < 80 else "Compare the forecast peak with the contract demand; if it stays well below, a lower contract demand may cut fixed charges.")))
+        acts.append(("Check why demand fell", "Look at maintenance, a planned shutdown, a sensor or data problem, or a hidden machine fault."))
+        gain = f"Matching generation to demand can avoid up to {unused:,.0f} kWh of unnecessary generation" + (f" (about {money(unused * TARIFF)})" if TARIFF > 0 else "") + " and reduces fuel use and low-load wear."
+        lose = f"Up to {unused:,.0f} kWh of generation may be wasted" + (f" (about {money(unused * TARIFF)})" if TARIFF > 0 else "") + ", fixed charges are paid for unused capacity, and a hidden machine fault may go unnoticed."
+    else:
+        risks = [("Demand is steady", f"Forecast energy is {kwh:,.0f} kWh over {span_text(n)}{', ' + pct if pct else ''} - no major change is expected."),
+                 ("Peak to watch", f"Peak is {peak:,.1f} kW around {at(pk_at)}" + (f" ({room_pct:.0f} % of sanctioned demand)." if DEMAND > 0 else ".")),
+                 ("Low-load hours", f"The lowest hour is {low:,.1f} kW around {at(lo_at)}.")]
+        acts = [("Keep the current plan", "Generation and storage settings can stay as they are."), ("Prepare for the peak", f"Keep capacity ready around {at(pk_at)} for {peak:,.1f} kW and stagger motor starts."), ("Keep monitoring", "The forecast updates as new readings arrive.")]
+        gain, lose = "Staggering motor starts keeps the peak low and the bill steady.", "Without peak control, a coincident start-up can still create a costly peak."
+    tone = "bad" if (short or over) else "amber" if (kind == "up" or (kind == "down" and np.isfinite(d_pct) and d_pct < -10)) else "good" if kind == "stable" else "amber"
+    badge = "Attention" if tone == "bad" or (kind == "down" and np.isfinite(d_pct) and d_pct < -10) else "Watch" if kind in ("up", "down") else "Normal"
+    return dict(badge=badge, tone=tone, direction=kind, headline=f"Forecasted peak demand: {peak:,.1f} kW around {pk_at:%A, %H:%M}", risks=risks, actions=acts, managed=gain, ignored=lose)
+
+
+def load_cards_html(r, horizon_text):
+    """The two cards (risk & cost impact / energy management recommendations) as HTML for note()."""
+    li = lambda items: "<ul>" + "".join(f"<li><b>{i}. {h}</b> - {t}</li>" for i, (h, t) in enumerate(items, 1)) + "</ul>"
+    return (f"<b>POTENTIAL RISK &amp; COST IMPACT</b> · {r['badge']}{li(r['risks'])}", f"<b>ENERGY MANAGEMENT RECOMMENDATIONS</b> · {horizon_text} forecast<br>{r['headline']}{li(r['actions'])}")
+
+
 # ------------------------------------------------------------------ hourly helpers for the two forecast tabs
 AVG_BLOCKS_H = {"1 hour": 1, "3 hours": 3, "6 hours": 6, "12 hours": 12, "24 hours": 24}
 LD_LENGTHS = {"24 hours": 24, "3 days": 72, "7 days": 168}
@@ -649,6 +726,16 @@ with tab_load:
         with cr:
             tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 72, dict(avg=avg_f, slope=slope, pf=PF_AVG, demand=DEMAND, peak_at=t_f[int(np.argmax(fv))]))
             note(advice_html(head_a, acts_a), tone_a)
+
+    ls_ = load_suggestions(fv, t_f, energy_before); risk_html_, rec_html_ = load_cards_html(ls_, span_text(horizon))
+    with panel("Load forecast · risks and recommendations", f"rule-based from the forecast total kW and the previous {span_text(horizon)} · no AI is used", key="ld_sugg"):
+        lc_ = st.columns(2)
+        with lc_[0]: note(risk_html_, ls_["tone"])
+        with lc_[1]: note(rec_html_, "")
+        lc2_ = st.columns(2)
+        with lc2_[0]: note(f"<b>If managed:</b> {ls_['managed']}", "good")
+        with lc2_[1]: note(f"<b>If not managed:</b> {ls_['ignored']}", ls_["tone"] if ls_["tone"] != "good" else "amber")
+        st.caption("Set CAPTIVE_KW, HAS_BATTERY, SHIFTABLE_PCT, TARIFF and DEMAND_CHARGE at the top of app.py for site-specific numbers; a value left at 0 is simply not mentioned. A qualified engineer should review every action.")
 
     with panel("Forecast ahead", f"{L_model} · {lbl_tot} · learns from {L_days_txt} · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
         left, right = st.columns([1, 2.4])
