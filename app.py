@@ -439,7 +439,73 @@ def run_phases(window, steps, model, season, method=gf.PHASE_METHODS[0]):
 def run_phase_backtest(load_real, load_model, model, season, fit_steps, n_weeks, method, alarm, sev, min_kw):
     return gf.backtest_phases(load_real, load_model, model, season, fit_steps, 168, n_weeks, lambda P: analyse(P, alarm, min_kw, sev), None, method)
 
+PP_PARAMS = {"Load (kW)": ["RKW", "YKW", "BKW"], "Current (A)": ["I1", "I2", "I3"], "Voltage (V)": ["V1", "V2", "V3"]}
+PP_TOL = {"Load (kW)": 2.0, "Current (A)": 2.0, "Voltage (V)": 0.5}     # % change that counts as rising / falling
 
+
+def pp_frame(tl, run_kw, rule="1h", min_readings=10):
+    """Loaded minutes only, averaged per hour / day. A period with too few loaded minutes is NaN (lines break)."""
+    d = tl[tl["KW"] > run_kw].set_index("Timestamps")
+    cols = [c for v in PP_PARAMS.values() for c in v]
+    g = d[cols].resample(rule)
+    return g.mean().where(g[cols[0]].count() >= min_readings)
+
+
+def pp_dev(F, cols):
+    X = F[cols].to_numpy(float); m = X.mean(axis=1, keepdims=True); ok = np.isfinite(m) & (m > 0)
+    return pd.DataFrame(np.where(ok, (X / np.where(ok, m, 1.0) - 1) * 100, np.nan), index=F.index, columns=NAMES)
+
+
+def pp_imb(F, cols):
+    return pp_dev(F, cols).abs().max(axis=1)
+
+
+def pp_halves(F):
+    G = F.dropna(); h = len(G) // 2
+    return (None, None) if h < 2 else (G.iloc[:h], G.iloc[h:])
+
+
+def pp_trend(F):
+    """Change of every phase / parameter, first half vs second half of the window."""
+    a, b = pp_halves(F)
+    if a is None: return None
+    chg = pd.DataFrame(index=NAMES, columns=list(PP_PARAMS), dtype=float)
+    for p, cols in PP_PARAMS.items():
+        for n, c in zip(NAMES, cols):
+            x0, x1 = a[c].mean(), b[c].mean(); chg.loc[n, p] = (x1 / x0 - 1) * 100 if x0 else np.nan
+    txt = pd.DataFrame(index=NAMES, columns=list(PP_PARAMS), dtype=object)
+    for p in PP_PARAMS:
+        txt[p] = [("–" if pd.isna(v) else ("▲" if v > PP_TOL[p] else "▼" if v < -PP_TOL[p] else "●") + f" {v:+.1f} %") for v in chg[p]]
+    return chg, txt
+
+
+def pp_explain(F):
+    """Rule-based reading: how the load imbalance moved, which parameter moved with it, which phase is responsible."""
+    a, b = pp_halves(F)
+    if a is None: return ["Not enough loaded hours in this window to explain a change."]
+    imb = {p: (pp_imb(a, c).mean(), pp_imb(b, c).mean()) for p, c in PP_PARAMS.items()}
+    (k0, k1), (i0, i1), (v0, v1) = imb["Load (kW)"], imb["Current (A)"], imb["Voltage (V)"]; dk = k1 - k0
+    out = [f"<b>Load imbalance</b> went from {k0:.1f} % to {k1:.1f} % ({dk:+.1f} points). Current imbalance: {i0:.1f} → {i1:.1f} %. Voltage imbalance: {v0:.1f} → {v1:.1f} %."]
+    G = F.dropna()
+    if len(G) >= 10:
+        k_, i_, v_ = (pp_imb(G, PP_PARAMS[p]) for p in PP_PARAMS)
+        r = lambda x, y: float(np.corrcoef(x, y)[0, 1]) if np.std(x) > 0 and np.std(y) > 0 else float("nan")
+        out.append(f"Over the whole window the load imbalance follows the <b>current</b> imbalance (r = {r(k_, i_):.2f}) and the <b>voltage</b> imbalance (r = {r(k_, v_):.2f}).")
+    if abs(dk) < 0.5:
+        out.append("The imbalance is <b>stable</b> in this window - no parameter is pushing it up or down."); return out
+    sgn = 1 if dk > 0 else -1; s_i, s_v = (i1 - i0) * sgn, (v1 - v0) * sgn
+    if max(s_i, s_v) < 0.2:
+        out.append("Neither the current nor the voltage imbalance moved the same way, so they do not explain the change."); return out
+    drv = "Current (A)" if s_i >= s_v else "Voltage (V)"; word = drv.split(" ")[0].lower()
+    out.append(f"The imbalance is {'rising' if dk > 0 else 'falling'} <b>with {word}</b>: " + ("a load problem - the phases draw unequal current." if word == "current" else "a supply problem - the voltage between phases is changing; ask the utility."))
+    d0, d1 = pp_dev(a, PP_PARAMS[drv]).mean(), pp_dev(b, PP_PARAMS[drv]).mean(); mv = (d1 - d0).abs().idxmax()
+    out.append(f"Most responsible phase: <b>{mv}</b> - its {word} moved from {d0[mv]:+.1f} % to {d1[mv]:+.1f} % against the three-phase average.")
+    return out
+
+
+@st.cache_data(show_spinner="Building the load / current / voltage table…")
+def params_cached(tl_, run_kw, rule, min_readings):
+    return pp_frame(tl_, run_kw, rule, min_readings)
 # ------------------------------------------------------------------ page
 bar = st.empty()                                                  # the app bar is filled in once the data is known
 src = find_data()
@@ -704,17 +770,68 @@ with tab_phase:
         st.caption("Every action needs review by a qualified engineer before anything is changed.")
 
     # ---- the evidence behind the advice
-    if dg:
-        c1, c2, c3 = st.columns(3)
-        with c1, panel("What explains it", "share of the worst phase's deviation", key="ph_why"):
-            sh = dg["share"]; f = go.Figure(go.Bar(x=sh.values, y=sh.index, orientation="h", marker_color=[ACCENT, BLUE, WARN], text=[f"{v:.0f} %" for v in sh.values], textposition="outside", cliponaxis=False, hovertemplate="%{y}: %{x:.0f} %<extra></extra>"))
-            f.update_layout(hovermode="closest", xaxis_range=[0, 115]); show(style(f, 250, False, top=20))
-            st.caption(f"kW imbalance follows the current imbalance (correlation {dg['corr_I']:.2f}) vs the voltage imbalance ({dg['corr_V']:.2f}).")
-        with c2, panel("By hour of day", "average measured imbalance % · when it is worst", key="ph_hour"):
-            if real_clock and len(dg["by_hour"]) >= 6:
-                bh = dg["by_hour"]; f = go.Figure(go.Bar(x=[f"{h:02d}:00" for h in bh.index], y=bh.values, marker_color=ACCENT, hovertemplate="%{x}<br>%{y:.1f} %<extra></extra>"))
-                f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN); f.update_layout(hovermode="closest", yaxis_title="imbalance %"); show(style(f, 250, False, top=20))
-            else: st.caption("Needs a real clock in the file.")
-        with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
-            st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
-    else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
+        # ---- A) which parameter moves each phase: load, current, voltage per colour + the imbalance each one creates
+    with panel("Phase parameters · what is rising or falling", "loaded minutes only · load, current and voltage of each colour, and the imbalance each one creates", key="ph_params"):
+        pc = st.columns([1, 1, 3])
+        pp_rule = pc[0].selectbox("Average by", ["Hour", "Day"], key="pp_rule")
+        pp_days = pc[1].selectbox("Window", [7, 14, 28], key="pp_days", format_func=lambda x: f"last {x} days")
+        PP = params_cached(tl, RUN_KW, "1h" if pp_rule == "Hour" else "1D", 10 if pp_rule == "Hour" else 60).iloc[-(pp_days * (24 if pp_rule == "Hour" else 1)):]
+        if PP.dropna().shape[0] < 4: st.caption("Not enough loaded periods in this window.")
+        else:
+            pcol = [PHASE_COL[k_] for k_ in PHASES]
+            f = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.07, subplot_titles=list(PP_PARAMS))
+            for r_, cols_ in enumerate(PP_PARAMS.values(), 1):
+                for n_, c_, col_ in zip(NAMES, cols_, pcol):
+                    f.add_scatter(x=PP.index, y=PP[c_], name=n_, legendgroup=n_, showlegend=r_ == 1, line=dict(color=col_, width=2), connectgaps=False, row=r_, col=1)
+            style(f, 560, legend_y=1.0, top=100); f.update_annotations(font=dict(size=13, color=INK)); show(f, key="pp_main")
+
+            g1, g2 = st.columns(2)
+            with g1:
+                f = go.Figure()
+                for (pn_, cols_), col_ in zip(PP_PARAMS.items(), [ACCENT, BLUE, WARN]):
+                    f.add_scatter(x=PP.index, y=pp_imb(PP, cols_), name=pn_.split(" ")[0], line=dict(color=col_, width=2), connectgaps=False)
+                f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, annotation_text=f"alarm {ALARM_PCT:g} %", annotation_position="top left")
+                f.update_layout(title="Imbalance % of load, current and voltage", yaxis_title="%"); show(style(f, 300, True, top=70), key="pp_imb")
+            with g2:
+                dv = pp_dev(PP, PP_PARAMS["Load (kW)"]); f = go.Figure()
+                for n_, col_ in zip(NAMES, pcol): f.add_scatter(x=dv.index, y=dv[n_], name=n_, line=dict(color=col_, width=2), connectgaps=False)
+                f.add_hline(y=0, line_color=MUTED, line_width=1); f.add_hrect(y0=-ALARM_PCT, y1=ALARM_PCT, fillcolor=tint(GOOD, .08), line_width=0)
+                f.update_layout(title="Which phase is off: load vs the 3-phase average", yaxis_title="% above / below average"); show(style(f, 300, True, top=70), key="pp_dev")
+
+            tt = pp_trend(PP)
+            if tt:
+                st.markdown('<div class="ph"><b>What changed</b><span>first half vs second half of the window · ▲ rising · ▼ falling · ● steady (±2 % load and current, ±0.5 % voltage)</span></div>', unsafe_allow_html=True)
+                st.dataframe(tt[1], width="stretch")
+            note("<ul>" + "".join(f"<li>{t_}</li>" for t_ in pp_explain(PP)) + "</ul>")
+
+    # ---- B) test on past weeks: actual vs predicted, and which forecast method is better on THIS data
+    with panel("Model check · actual vs predicted on past weeks", "each week is hidden, forecast from the hours before it, then compared with what really happened", key="ph_bt"):
+        bc = st.columns([1, 2, 3])
+        bt_weeks = bc[0].selectbox("Weeks tested", [1, 2, 3, 4], index=1, key="bt_weeks")
+        bt_show = bc[1].selectbox("Method shown in the graph", gf.PHASE_METHODS, index=gf.PHASE_METHODS.index(P_method), key="bt_show")
+        bts = {m_: run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, bt_weeks, m_, ALARM_PCT, SEVERE_PCT, MIN_KW) for m_ in gf.PHASE_METHODS}
+        ref = bts[bt_show]
+        if ref is None: st.caption("Not enough history: the test needs the 'Learn from last' window plus the weeks tested. Lower either one.")
+        else:
+            rel = gf.reliability(ref, ALARM_PCT)
+            note(f"<b>{rel[0]}</b> - {rel[1]}", {"RELIABLE": "good", "DEGRADED": "amber", "UNRELIABLE": "bad"}.get(rel[0], ""))
+            rows_m = [{"Method": m_, "Phase kW error (WAPE %)": b_["per_phase"]["WAPE"].mean(), "Imbalance error (points)": b_["imbalance"]["imb_mae"], "Alarm call right %": b_["imbalance"]["alarm_ok"], "Severe call right %": b_["imbalance"]["sev_ok"],
+                       "Right phase named %": b_["imbalance"]["culprit_ok"], "Test hours": b_["imbalance"]["hours"]} for m_, b_ in bts.items() if b_ is not None]
+            bs_ = ref["baseline"]
+            rows_m.append({"Method": "Baseline: same hour last week", "Phase kW error (WAPE %)": np.nan, "Imbalance error (points)": bs_["imb_mae"], "Alarm call right %": bs_["alarm_ok"], "Severe call right %": bs_["sev_ok"],
+                           "Right phase named %": bs_["culprit_ok"], "Test hours": bs_["hours"]})
+            tm = pd.DataFrame(rows_m).set_index("Method").round(1); st.dataframe(tm, width="stretch")
+            fm = tm.drop(index="Baseline: same hour last week")["Imbalance error (points)"].dropna()
+            if len(fm) == 2: st.caption(f"Lower imbalance error wins: on this data **{fm.idxmin()}** is closer ({fm.min():.1f} vs {fm.max():.1f} points). Judge the choice by this table, not by the chart alone.")
+
+            A_, F_ = ref["actual"], ref["pred"]; ra_, rf_ = analyse(A_.to_numpy()), analyse(F_.to_numpy()); ra_.index = A_.index; rf_.index = F_.index
+            f = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n_} phase (kW)" for n_ in NAMES] + ["Imbalance % (calculated from the phase kW)"])
+            for j, p in enumerate(PH3, 1):
+                f.add_scatter(x=A_.index, y=A_[p], name="Actual", legendgroup="a", showlegend=j == 1, line=dict(color=INK, width=2), connectgaps=False, row=j, col=1)
+                f.add_scatter(x=F_.index, y=F_[p], name="Predicted", legendgroup="p", showlegend=j == 1, line=dict(color=PHASE_COL[KWCOLS[j - 1]], width=2.2, dash="dash"), row=j, col=1)
+            f.add_scatter(x=A_.index, y=ra_.Imbalance_pct.where(ra_.Loaded), name="Actual", legendgroup="a", showlegend=False, line=dict(color=INK, width=2), connectgaps=False, row=4, col=1)
+            f.add_scatter(x=F_.index, y=rf_.Imbalance_pct.where(rf_.Loaded), name="Predicted", legendgroup="p", showlegend=False, line=dict(color=ACCENT, width=2.2, dash="dash"), row=4, col=1)
+            f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, row=4, col=1)
+            style(f, 780, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f, key="bt_main")
+            st.caption(f"{ref['imbalance']['weeks']} week(s) tested · method: {bt_show}. Black = what really happened, dashed = what the model predicted before it happened.")
+            st.dataframe(ref["per_phase"].set_index("Phase").round(2), width="stretch")
