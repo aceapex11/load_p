@@ -408,8 +408,8 @@ def _badge(text, tone):
 def card_html(title, badge, tone, items, headline="", numbered=True, border=None):
     """One white card: TITLE + badge, optional bold headline, then heading + one short sentence per item (single line of HTML - Streamlit markdown must not see blank lines)."""
     c = CARD_TONE[border or tone]
-    rows = "".join(f'<div style="padding:9px 0;border-top:1px solid #EEF1F6"><div style="font-weight:600;color:{INK};font-size:.9rem">{f"{i}. " if numbered else ""}{h}</div><div style="color:#475569;font-size:.85rem;line-height:1.4">{t}</div></div>' for i, (h, t) in enumerate(items, 1))
-    head = f'<div style="font-weight:600;color:{INK};font-size:.9rem;margin:8px 0 4px">{headline}</div>' if headline else ""
+    rows = "".join(f'<p style="margin:0 0 .7rem;color:#334155;font-size:.88rem;line-height:1.55"><b style="color:{INK}">{h}.</b> {t}</p>' for h, t in items)
+    head = f'<div style="font-weight:600;color:{INK};font-size:.9rem;margin:10px 0 8px">{headline}</div>' if headline else '<div style="height:10px"></div>'
     return f'<div style="border:1px solid {c[0]};border-radius:14px;padding:14px 18px;background:#fff;margin-bottom:.6rem"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-weight:700;color:{INK};font-size:.8rem;letter-spacing:.03em">{title}</span>{_badge(badge, tone)}</div>{head}{rows}</div>'
 
 
@@ -493,17 +493,15 @@ def phase_analysis_html(Pf, rep, dg, win=None):
         else:
             mv = " and ".join(f"{r['To']} (about {r['Move A']:.0f} A)" for _, r in dg["plan"].iterrows()) if dg and len(dg["plan"]) else " / ".join(lo)
             src = dg["plan"].iloc[0]["From"] if dg and len(dg["plan"]) else " / ".join(hi)
-            acts = [f"Inspect single-phase loads on {' / '.join(hi)}.", f"Move suitable loads from {src} to {mv}.", "Verify phase currents after one working day."]
+            acts = [f"Inspect single-phase loads on {' / '.join(hi)}.", f"Move suitable loads from {src} to {mv}" + (f", best done {win['quiet'][0]:%a %d %b %H:%M} → {win['quiet'][1]:%H:%M} (lowest load)." if win else "."), "Verify phase currents after one working day."]
         loss = dg["loss"] if dg else float(((Pf ** 2).sum(axis=1) / (3 * Pf.mean(axis=1) ** 2).replace(0, np.nan) - 1).mean() * 100)
         imp = [f"Increased cable losses and heating (about {max(loss, 0):.1f} % extra I²R heat on {hi[0]}).",
                f"Higher neutral current ({dg['neutral_mean']:.0f} A) and equipment stress." if dg and dg["neutral_mean"] >= 1 else "Higher neutral current and equipment stress.",
                "Increased risk of overheating and unwanted trips." + (f" {hi[0]} peaks at {dg['per']['Peak A'].max() / RATING * 100:.0f} % of the {RATING:,.0f} A rating." if dg and RATING > 0 else "")]
-    first = Pf.index[int(np.flatnonzero(rep.Alarm.to_numpy())[0])] if n_al else None
-    foot = (f"Forecast: {n_al} of {len(Pf)} hours in alarm" + (f" ({n_sev} severe)" if n_sev else "") + f", first {first:%a %d %b %H:%M}" + (f". Best time to rewire: {win['quiet'][0]:%a %d %b %H:%M} → {win['quiet'][1]:%H:%M}." if win else ".")) if n_al else f"Forecast: no alarm hour expected in the next {len(Pf)} hours."
     c = CARD_TONE[tone]
     return (f'<div style="border:1px solid {c[0]};border-radius:14px;padding:14px 18px;background:#fff"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-weight:700;color:{INK};font-size:.8rem;letter-spacing:.03em">3-PHASE LOAD ANALYSIS</span>{_badge(badge, tone)}</div>'
             + sec("Phase-wise load distribution") + f'<div style="display:flex;gap:12px;flex-wrap:wrap">{tiles}</div>' + cause + sec("Recommended actions") + ul(acts) + (sec("Potential impact if not corrected") + ul(imp) if imp else "")
-            + f'<div style="margin-top:12px;padding-top:8px;border-top:1px solid #EEF1F6;color:{MUTED};font-size:.78rem">{foot}</div></div>')
+            + '</div>')
 
 
 # ------------------------------------------------------------------ hourly helpers for the two forecast tabs
@@ -754,7 +752,7 @@ with tab_load:
         kind = trend_kind(float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else trend_kind(float(fv[0]), float(fv[-1]))
         first_v, last_v = (float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else (float(fv[0]), float(fv[-1]))
         slope = float(np.polyfit(np.arange(len(blk)) * AVG_BLOCKS_H[avg_choice], blk["Avg kW"], 1)[0]) if two else float("nan")
-        cl, cr = st.columns([2.2, 1.1])
+        cl = st.container()
         with cl:
             f = go.Figure(go.Bar(x=labels, y=blk["Avg kW"], marker_color=ACCENT, text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in blk["Change %"]], textposition="outside", cliponaxis=False,
                                  customdata=np.c_[blk["Change kW"].fillna(0), blk["Hours"]], hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} h<extra></extra>"))
@@ -762,19 +760,15 @@ with tab_load:
             show(style(f, 300, False, top=60))
             st.caption((f"Average growth: {blk['Change kW'].mean():+,.1f} kW per block · trend {slope:+,.1f} kW per hour" if two else "Only one block fits in this window - pick a shorter interval or a longer forecast.")
                        + (f" · last block is partial ({int(blk['Hours'].iloc[-1])} h)" if blk["Hours"].iloc[-1] < blk["Hours"].iloc[0] else ""))
-        with cr:
-            tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 72, dict(avg=avg_f, slope=slope, pf=PF_AVG, demand=DEMAND, peak_at=t_f[int(np.argmax(fv))]))
-            note(advice_html(head_a, acts_a), tone_a)
 
     ls_ = load_suggestions(fv, t_f, energy_before)
-    with panel("Load forecast · risks and recommendations", f"rule-based · forecast total kW vs the previous {span_text(horizon)} · no AI is used", key="ld_sugg"):
+    with panel("Load forecast · risks and recommendations", "", key="ld_sugg"):
         lc_ = st.columns(2)
         lc_[0].markdown(card_html("POTENTIAL RISK &amp; COST IMPACT", ls_["badge"], ls_["tone"], ls_["risks"]), unsafe_allow_html=True)
         lc_[1].markdown(card_html("ENERGY MANAGEMENT RECOMMENDATIONS", f"{span_text(horizon)} forecast", "info", ls_["actions"], headline=ls_["headline"]), unsafe_allow_html=True)
         lc2_ = st.columns(2)
         with lc2_[0]: note(f"<b>If managed:</b> {ls_['managed']}", "good")
         with lc2_[1]: note(f"<b>If not managed:</b> {ls_['ignored']}", ls_["tone"] if ls_["tone"] != "good" else "amber")
-        st.caption("Set CAPTIVE_KW, HAS_BATTERY, SHIFTABLE_PCT, TARIFF and DEMAND_CHARGE at the top of app.py for site-specific numbers. A qualified engineer should review every action.")
 
     with panel("Forecast ahead", f"{L_model} · {lbl_tot} · learns from {L_days_txt} · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
         left, right = st.columns([1, 2.4])
@@ -874,10 +868,9 @@ with tab_phase:
     if dg and not dg["pf_ok"]: note("The kW columns match voltage × current almost exactly (power factor ≈ 1), so they look like <b>kVA</b>, not kW. The power-factor share is therefore left out of 'What explains it'. Check with the meter owner.", "amber")
 
     # ---- 3-phase load analysis card (rule-based, short)
-    with panel("3-phase load analysis", "rule-based from the measured numbers and the phase forecast · no AI is used", key="ph_plan"):
+    with panel("3-phase load analysis", "", key="ph_plan"):
         win_ = gr.best_windows(Pf.sum(axis=1).to_numpy(), Pf.index) if n_al else None
         st.markdown(phase_analysis_html(Pf, rep, dg, win_), unsafe_allow_html=True)
-        st.caption("Every action needs review by a qualified engineer before anything is changed.")
 
     # ---- the evidence behind the advice
         # ---- A) which parameter moves each phase: load, current, voltage per colour + the imbalance each one creates
