@@ -387,7 +387,10 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
     The wording is fixed (copied from the reference screenshots); only the numbers come from the forecast: energy, change vs the previous period, peak kW and its time."""
     values = np.asarray(forecast_values, float); energy_kwh = float(values.sum()); peak_kw = float(values.max()); peak_time = forecast_times[int(values.argmax())]
     forecast_series = pd.Series(values, index=pd.DatetimeIndex(forecast_times)); hour_of_day_avg = forecast_series.groupby(forecast_series.index.hour).mean(); busiest_hour = int(hour_of_day_avg.idxmax())      # average demand of every hour of the day
-    day_peak_lines = "<br>".join(f"{day:%a %d %b} · <b>{day_rows.max():,.1f} kW</b> around {day_rows.idxmax():%H:%M}" for day, day_rows in forecast_series.groupby(forecast_series.index.normalize()))   # peak of every day
+    # the ONE day with the peak usage, and what that day looks like
+    day_stats = forecast_series.groupby(forecast_series.index.normalize()).agg(["sum", "count"]); full_days = day_stats[day_stats["count"] == 24]; peak_day = peak_time.normalize()      # only full 24 h days are compared
+    peak_day_vs_mean = "" if len(full_days) < 2 or peak_day not in full_days.index or full_days["sum"].mean() < 1 else (f" That day uses about {full_days.loc[peak_day, 'sum']:,.0f} kWh, {abs(full_days.loc[peak_day, 'sum'] / full_days['sum'].mean() - 1) * 100:.0f}% "
+                                                                                                                            f"{'above' if full_days.loc[peak_day, 'sum'] >= full_days['sum'].mean() else 'below'} the daily average of {full_days['sum'].mean():,.0f} kWh.")
     days = horizon_hours // 24 if horizon_hours % 24 == 0 else None
     period = (f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"); badge_period = (f"{days}-day" if days else f"{horizon_hours}-hour")
     change_pct = (energy_kwh - previous_energy_kwh) / previous_energy_kwh * 100 if previous_energy_kwh >= 1 else float("nan")
@@ -399,7 +402,7 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
              ("Increased Operational Risk", "If demand exceeds available power supply, the company may need backup supply or operational adjustments to avoid production disruption."),
              ("Higher Energy Management Cost", "Without demand and generation coordination, the company may miss opportunities to reduce unnecessary generation, grid imports and avoidable operating expenses.")]
     actions = [("Optimize Internal Power Generation", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {period}{change_sentence}. Align captive power generation schedules with the expected demand to avoid unnecessary generation."),
-               ("Prepare for Peak Demand", f"Keep sufficient generation capacity available to handle the expected peak of each day:<br>{day_peak_lines}"),
+               ("Prepare for Peak Demand", f"Peak usage is expected on <b>{peak_time:%A, %d %b}</b>, reaching <b>{peak_kw:,.1f} kW</b> around {peak_time:%H:%M}. Keep sufficient generation capacity available on that day to handle the expected peak.{peak_day_vs_mean}"),
                ("Optimize Energy Storage", "If battery storage is available, charge during low-demand periods or when internal generation exceeds consumption. Discharge during forecasted peak-demand periods."),
                ("Shift Flexible Loads", "Stagger large motor start-ups and move non-critical operations away from peak-demand hours to reduce simultaneous power demand."),
                ("Monitor Power Availability", "Compare forecasted demand with available internal generation. Plan grid support or backup capacity if a supply shortfall is expected.")]
