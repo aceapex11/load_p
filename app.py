@@ -629,7 +629,7 @@ with tab_phase:
     k = st.columns(5)
     with k[0]: kpi("Imbalance now", "idle" if not now["loaded"] else f"{now['imb']:.1f} %", "machine idle" if not now["loaded"] else f"{now['worst']} {now['direction']} · limit {ALARM_PCT:g} %", "good" if now["status"] == "OK" else "bad" if now["status"] == "SEVERE" else "warn" if now["status"] == "ALARM" else "info", "⚖️")
     with k[1]:
-        if dg: kpi("Average imbalance · measured", f"{dg['mean_imb']:.1f} %", f"above the limit in {dg['pct_above']:.0f} % of loaded minutes · hourly means: {hr_mean:.1f} %", "good" if dg["mean_imb"] <= ALARM_PCT else "warn" if dg["mean_imb"] <= SEVERE_PCT else "bad", "📏")
+        if dg: kpi("Average imbalance · measured", f"{dg['mean_imb']:.1f} %", f"above limit in {dg['pct_above']:.0f} % of minutes · hourly {hr_mean:.1f} %")
         else: kpi("Average imbalance · measured", "–", "too few loaded minutes", "", "📏")
     unver = REL is None or REL[0] in ("UNRELIABLE", "INSUFFICIENT DATA")
     with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe" + (" · not verified" if unver else ""), "info" if unver else ("good" if n_al == 0 else "bad"), "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
