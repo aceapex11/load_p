@@ -297,7 +297,8 @@ def diagnose(frame, thr, min_kw, sev):
     nema = lambda X: np.abs(X - X.mean(axis=1, keepdims=True)).max(axis=1) / X.mean(axis=1) * 100
     dP, dV, dI, dF = dev(K), dev(V), dev(I), dev(PFp)
     imb_kw, imb_I, imb_V = np.abs(dP), nema(I), nema(V)
-    sh = pd.DataFrame({"Current": np.abs(dI), "Voltage": np.abs(dV), "Power factor": np.abs(dF)})
+    pf_ok = float(np.median(PFp)) < 0.97                                      # kW / (V x I) near 1 everywhere = the "kW" columns are really V x I (kVA): no PF information in them
+    sh = pd.DataFrame({"Current": np.abs(dI), "Voltage": np.abs(dV), "Power factor": np.abs(dF) if pf_ok else np.zeros(len(dF))})
     share = (sh.div(sh.sum(axis=1).replace(0, np.nan), axis=0).mean() * 100).fillna(0)
     cor = lambda a, b: float(np.corrcoef(a, b)[0, 1]) if np.std(a) > 0 and np.std(b) > 0 else float("nan")
     cnt = np.bincount(w, minlength=3); main = int(cnt.argmax()); others = [i for i in range(3) if i != main]
@@ -318,7 +319,7 @@ def diagnose(frame, thr, min_kw, sev):
                 mean_I=float(imb_I.mean()), mean_V=float(imb_V.mean()), p95_V=float(np.percentile(imb_V, 95)), corr_I=cor(imb_kw, imb_I), corr_V=cor(imb_kw, imb_V), share=share,
                 per=per, main=main, main_name=NAMES[main], extra_A=float(extra_A.mean()), extra_kW=float(extra_kW.mean()), levels=levels, const=bool(const), lvA_const=float(lvA.iloc[1:].mean()),
                 ctot=cor(imb_kw, tot), plan=plan, Im=Im, Km=Km, neutral_mean=float(neutral.mean()), neutral_p95=float(np.percentile(neutral, 95)), loss=float(loss.mean()),
-                by_hour=by_hour, status=status, pf_phase=float(PFp.mean()), pf_meter=float(d["PF"].mean()), high_share=float(per.iloc[main, 1]))
+                by_hour=by_hour, status=status, pf_ok=bool(pf_ok), pf_phase=float(PFp.mean()), pf_meter=float(d["PF"].mean()), high_share=float(per.iloc[main, 1]))
 
 
 def trend_kind(first, last):
@@ -422,8 +423,13 @@ def run_holdout(y_real, y_model, model, season, fixed, fit_steps):
 
 
 @st.cache_data(show_spinner="Training the model on Red, Yellow and Blue (Auto ETS can take a minute or two)…")
-def run_phases(window, steps, model, season):
-    return gf.forecast_phases(window, steps, model, season)
+def run_phases(window, steps, model, season, method=gf.PHASE_METHODS[0]):
+    return gf.forecast_phases(window, steps, model, season, None, method)
+
+
+@st.cache_data(show_spinner="Testing the phase forecast on past weeks (Auto ETS can take a few minutes)…")
+def run_phase_backtest(load_real, load_model, model, season, fit_steps, n_weeks, method, alarm, sev, min_kw):
+    return gf.backtest_phases(load_real, load_model, model, season, fit_steps, 168, n_weeks, lambda P: analyse(P, alarm, min_kw, sev), None, method)
 
 
 # ------------------------------------------------------------------ page
@@ -593,20 +599,30 @@ with tab_load:
 with tab_phase:
   if not H_OK: need_more_data()
   else:
-    c = st.columns([1.3, 1, 1, 1.3, 1])
+    c = st.columns([1.3, 1, 1, 1.3, 1, 1.4])
     P_model = c[0].selectbox("Model", gf.MODELS, key="ph_model", help="Exponential Smoothing = damped-trend Holt-Winters. Auto ETS = best ETS model by AICc per phase (slower, can take a minute or two).")
     P_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
     P_days = c[2].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
     P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[3].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")] if P_model == "Exponential Smoothing" else gf.ETS_SEASON
     P_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
+    P_method = c[5].selectbox("Forecast method", gf.PHASE_METHODS, key="ph_method", help="Each phase separately = the notebook. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The imbalance % depends only on the shares, so errors in the total no longer leak into it. The test below shows which one does better on your data.")
     fit_steps = int(P_days) * 24; horizon = LD_LENGTHS[P_len]
-    fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season)
+    fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season, P_method)
+    BT = run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, 4, P_method, ALARM_PCT, SEVERE_PCT, MIN_KW)
+    REL = gf.reliability(BT, ALARM_PCT)                                  # None when the history is too short to test
     Pf = pd.DataFrame(fc_arr[:horizon], index=t_fut_all[:horizon], columns=PH3); rep = analyse(Pf.to_numpy())
     if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
-    if P_model == "Auto ETS": st.caption("Auto ETS chose: " + " · ".join(f"{NAMES[i]} {lbls[p]}" for i, p in enumerate(PH3)))
+    if P_model == "Auto ETS" or P_method == gf.PHASE_METHODS[1]: st.caption("Models chosen: " + " · ".join(f"{NAMES[i]} {lbls[p]}" for i, p in enumerate(PH3)) + (f" · total {lbls['total']}" if "total" in lbls else ""))
+    if REL is None: note("The history is too short to test this forecast on past weeks, so the forecast alarms below are <b>not verified</b>.", "amber")
+    else:
+        tone_r = {"RELIABLE": "good", "DEGRADED": "amber", "UNRELIABLE": "bad"}.get(REL[0], "amber")
+        advice_r = {"RELIABLE": "The forecast alarms can be used for planning.", "DEGRADED": "Use the forecast alarms as a hint only and check the measured imbalance.",
+                    "UNRELIABLE": "Do not plan from the forecast alarm hours. Use the measured imbalance (the cause and the plan below do not depend on the forecast)."}.get(REL[0], "")
+        note(f"<b>Forecast check on the last {BT['imbalance']['weeks']} weeks: {REL[0]}.</b> {advice_r}<br>{REL[1]}.", tone_r)
 
     DG = diagnose(Dv[NEEDED], ALARM_PCT, MIN_KW, SEVERE_PCT); dg = None if DG["empty"] else DG
     r0 = a_now.iloc[0]
+    hr_ = analyse(ph_real.dropna().to_numpy()); hr_mean = float(hr_.Imbalance_pct[hr_.Loaded].mean()) if hr_.Loaded.any() else float("nan")      # same hourly basis as the forecast
     now = dict(loaded=bool(r0.Loaded), imb=float(r0.Imbalance_pct) if r0.Loaded else 0.0, worst=r0.Worst_phase, dev=float(r0.Worst_dev) if r0.Loaded else 0.0, direction=r0.Direction, status=r0.Status)
     pb = gr.playbook(dg, now, dict(P=Pf, rep=rep), ALARM_PCT, SEVERE_PCT, MIN_KW, RATING, DEMAND, None, real_clock)
 
@@ -616,9 +632,10 @@ with tab_phase:
     k = st.columns(5)
     with k[0]: kpi("Imbalance now", "idle" if not now["loaded"] else f"{now['imb']:.1f} %", "machine idle" if not now["loaded"] else f"{now['worst']} {now['direction']} · limit {ALARM_PCT:g} %", "good" if now["status"] == "OK" else "bad" if now["status"] == "SEVERE" else "warn" if now["status"] == "ALARM" else "info", "⚖️")
     with k[1]:
-        if dg: kpi("Average imbalance · measured", f"{dg['mean_imb']:.1f} %", f"above the limit in {dg['pct_above']:.0f} % of loaded minutes", "good" if dg["mean_imb"] <= ALARM_PCT else "warn" if dg["mean_imb"] <= SEVERE_PCT else "bad", "📏")
+        if dg: kpi("Average imbalance · measured", f"{dg['mean_imb']:.1f} %", f"above the limit in {dg['pct_above']:.0f} % of loaded minutes · hourly means: {hr_mean:.1f} %", "good" if dg["mean_imb"] <= ALARM_PCT else "warn" if dg["mean_imb"] <= SEVERE_PCT else "bad", "📏")
         else: kpi("Average imbalance · measured", "–", "too few loaded minutes", "", "📏")
-    with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe", "good" if n_al == 0 else "bad", "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
+    unver = REL is None or REL[0] in ("UNRELIABLE", "INSUFFICIENT DATA")
+    with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe" + (" · not verified" if unver else ""), "info" if unver else ("good" if n_al == 0 else "bad"), "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
     with k[3]: kpi("First forecast alarm", "none" if first_alarm is None else f"{first_alarm:%a %H:%M}", "no alarm expected" if first_alarm is None else f"{first_alarm:%d %b} · in {(first_alarm - t_last).total_seconds() / 3600:.0f} h", "good" if first_alarm is None else "warn", "⏰")
     with k[4]: kpi("Worst colour · forecast", "–" if not np.isfinite(imb).any() else rep.Worst_phase.iloc[worst_k], "" if not np.isfinite(imb).any() else f"{rep.Direction.iloc[worst_k]} · peak {imb[worst_k]:.1f} % at {Pf.index[worst_k]:%a %H:%M}", "info", "🎨")
     st.write("")
@@ -643,6 +660,16 @@ with tab_phase:
         f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
         f.update_yaxes(title_text="kW")
         style(f, 640, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f)
+
+    with panel("Forecast by day", "hourly calls are noisy - the day-level picture is steadier", key="ph_days"):
+        fd = Pf.assign(imb=rep.Imbalance_pct.to_numpy(), worst=rep.Worst_phase.to_numpy(), alarm=rep.Alarm.to_numpy(), sev=(rep.Status == "SEVERE").to_numpy(), day=Pf.index.date)
+        rows_d = []
+        for d_, g_ in fd.groupby("day"):
+            ga = g_[g_["alarm"]]
+            rows_d.append({"Day": f"{d_:%a %d %b}", "Hours": len(g_), "Avg imbalance %": round(float(g_["imb"].mean()), 1) if g_["imb"].notna().any() else np.nan,
+                           "Alarm hours": int(g_["alarm"].sum()), "Severe hours": int(g_["sev"].sum()), "Main phase out of balance": ga["worst"].mode().iloc[0] if len(ga) else "-"})
+        st.dataframe(pd.DataFrame(rows_d).set_index("Day"), width="stretch")
+    if dg and not dg["pf_ok"]: note("The kW columns match voltage × current almost exactly (power factor ≈ 1), so they look like <b>kVA</b>, not kW. The power-factor share is therefore not reliable and is left out of 'What explains it'. Check with the meter owner.", "amber")
 
     # ---- short review (rule-based, same numbers as before, five lines)
     rv = []
@@ -694,5 +721,35 @@ with tab_phase:
         with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
             st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
     else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
+
+    with st.expander("Check your own readings"):
+        c = st.columns(4)
+        rr, yy, bb = c[0].number_input("Red kW", 0.0, 5000.0, 170.0, 1.0, key="chk_r"), c[1].number_input("Yellow kW", 0.0, 5000.0, 169.0, 1.0, key="chk_y"), c[2].number_input("Blue kW", 0.0, 5000.0, 160.0, 1.0, key="chk_b")
+        res = analyse([[rr, yy, bb]]).iloc[0]
+        with c[3]:
+            if not res.Loaded: kpi("Result", "No load", f"average below {MIN_KW:g} kW per phase", "", "ℹ️")
+            else: kpi("Imbalance", f"{res.Imbalance_pct:.2f} %", f"{res.Worst_phase} is {abs(res.Worst_dev):.1f} % {'above' if res.Worst_dev > 0 else 'below'} the average · {res.Status}", "good" if res.Status == "OK" else "bad" if res.Status == "SEVERE" else "warn", "🧮")
+
+        st.markdown("**Don't know the kW? Work it out from voltage, current and power factor**")
+        try: dv, di, dpf = [float(x) for x in (tl[VOLT].median().median(), tl[CURR].median().median(), tl["PF"].median())]
+        except Exception: dv, di, dpf = 230.0, 100.0, 0.9
+        dpf = min(max(dpf, 0.05), 1.0) if np.isfinite(dpf) else 0.9
+        mode = st.radio("How was the voltage measured?", ["Per phase (phase-to-neutral volts, one current per phase)", "Whole three-phase load (line-to-line volts, one average current)"], key="calc_mode", horizontal=True)
+        q = st.columns(4)
+        pf_in = q[3].number_input("Power factor", 0.05, 1.0, round(dpf, 2), 0.01, key="calc_pf", help="Start value is the median power factor of your file.")
+        if mode.startswith("Per phase"):
+            vv = [q[i].number_input(f"{n} voltage (V)", 0.0, 1000.0, round(dv, 1), 1.0, key=f"calc_v{i}") for i, n in enumerate(NAMES)]
+            q2 = st.columns(4); ii = [q2[i].number_input(f"{n} current (A)", 0.0, 10000.0, round(di, 1), 1.0, key=f"calc_i{i}") for i, n in enumerate(NAMES)]
+            kw_calc = [v * a * pf_in / 1000 for v, a in zip(vv, ii)]; tot_calc = sum(kw_calc)
+        else:
+            vl = q[0].number_input("Line-to-line voltage (V)", 0.0, 2000.0, round(dv * 3 ** .5, 1), 1.0, key="calc_vl"); il = q[1].number_input("Current (A)", 0.0, 10000.0, round(di, 1), 1.0, key="calc_il")
+            tot_calc = 3 ** .5 * vl * il * pf_in / 1000; kw_calc = [tot_calc / 3] * 3
+        o = st.columns(4)
+        for i, n in enumerate(NAMES): o[i].metric(f"{n} kW", f"{kw_calc[i]:,.2f}")
+        o[3].metric("Total kW", f"{tot_calc:,.2f}")
+        st.caption("kW = voltage × current × power factor ÷ 1000 per phase (three-phase total: √3 × line voltage × current × power factor ÷ 1000). With one average current the three phases come out equal, so the imbalance is 0 %.")
+        if mode.startswith("Per phase"):
+            rc = analyse([kw_calc]).iloc[0]
+            if rc.Loaded: st.caption(f"Imbalance from these three results: **{rc.Imbalance_pct:.2f} %** · {rc.Worst_phase} is {abs(rc.Worst_dev):.1f} % {'above' if rc.Worst_dev > 0 else 'below'} the average · {rc.Status}")
 
     note(f"<b>Alarm rule:</b> imbalance % = largest deviation of a phase from the average of the three ÷ the average × 100 (170 / 169 / 160 kW → 3.81 %). Alarm above {ALARM_PCT:g} %, severe above {SEVERE_PCT:g} %.")
