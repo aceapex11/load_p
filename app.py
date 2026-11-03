@@ -32,7 +32,7 @@ PNAME = {"RKW": "Red", "YKW": "Yellow", "BKW": "Blue"}
 NAMES = [PNAME[p] for p in PHASES]
 
 # LIMITS - edit here.  (The old "Data & limits" panel is gone.)
-ALARM_PCT = 3.0      # imbalance % above this = ALARM
+ALARM_PCT = 5.0      # imbalance % above this = ALARM
 SEVERE_PCT = 10.0    # imbalance % above this = SEVERE
 MIN_KW = 5.0         # average kW per phase below this = machine off
 SMOOTH = 30          # minutes of rolling mean (past minutes only)
