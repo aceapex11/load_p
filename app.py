@@ -719,7 +719,7 @@ with tab_phase:
 
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
     with panel("Phase load · measured and forecast", f"hourly means · {P_model} · learns from the last {P_days} days · forecast starts after {t_last:%d %b %Y %H:%M} · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
-        hh = ph_mod.iloc[-HIST_H[P_hist]:], xt = [t_last] + list(Pf.index)
+        hh = ph_mod.iloc[-HIST_H[P_hist]:]; xt = [t_last] + list(Pf.index)
         f = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=[f"{n} phase (kW)" for n in NAMES])
         for j, p in enumerate(PH3, 1):
             col = PHASE_COL[KWCOLS[j - 1]]
@@ -797,7 +797,7 @@ with tab_phase:
             with g1:
                 f = go.Figure()
                 for (pn_, cols_), col_ in zip(PP_PARAMS.items(), [ACCENT, BLUE, WARN]):
-                    f.add_scatter(x=PP.index, y=pp_imb(PP, cols_), name=pn_.split(" ")[0], line=dict(color=col_, width=2), connectgaps=True):
+                    f.add_scatter(x=PP.index, y=pp_imb(PP, cols_), name=pn_.split(" ")[0], line=dict(color=col_, width=2), connectgaps=True)
                 f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, annotation_text=f"alarm {ALARM_PCT:g} %", annotation_position="top left")
                 f.update_layout(title="Imbalance % of load, current and voltage", yaxis_title="%"); show(style(f, 300, True, top=70), key="pp_imb")
             with g2:
