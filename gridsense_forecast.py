@@ -1,7 +1,7 @@
 """GridSense forecasting engine - the two notebooks, as functions (no Streamlit import).
 
 exponential_smoothing_load_forecasting.ipynb          -> total kW: hourly mean, damped-trend additive Holt-Winters with fixed alpha / beta / gamma / phi, last 168 h held out for testing
-three_phase_imbalance_detection_forecasting.ipynb     -> Red / Yellow / Blue kW: hourly mean, Exponential Smoothing (damped trend, additive season) and Auto ETS (lowest AICc),
+three_phase_imbalance_detection_forecasting.ipynb     -> Red / Yellow / Blue kW: hourly mean, Exponential Smoothing (damped trend, additive season)
                                                          learns from the last 28 days, tested on past weeks, then the imbalance is calculated from the forecast phases
 """
 import numpy as np
@@ -9,10 +9,7 @@ import pandas as pd
 
 PH = ["R", "Y", "B"]
 NOTEBOOK_FIXED = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.95)   # ES_ALPHA / BETA / GAMMA / PHI of the load notebook
-MODELS = ["Exponential Smoothing", "Auto ETS"]
-ETS_SEASON = 24                                                                                                  # Auto ETS: daily pattern (as in the notebook)
-ETS_GRID = [(e, t, d, s) for e in ("add", "mul") for (t, d) in ((None, False), ("add", False), ("add", True)) for s in (None, "add", "mul")]
-
+MODELS = ["Exponential Smoothing"]
 
 # ------------------------------------------------------------------ hourly data (same idea as both notebooks)
 def hourly_frame(tl, cols, min_readings=45, max_fill=6):
@@ -41,34 +38,11 @@ def _holt_winters(y, steps, season, fixed):
     return np.asarray(res.forecast(steps), float)
 
 
-def _ets_name(e, t, d, s):
-    return "ETS({},{},{})".format("A" if e == "add" else "M", "N" if t is None else ("Ad" if d else "A"), "N" if s is None else ("A" if s == "add" else "M"))
-
-
-def _auto_ets(y, steps, season=ETS_SEASON):
-    """Tries every ETS model and keeps the one with the lowest AICc (best fit without over-fitting)."""
-    from statsmodels.tsa.exponential_smoothing.ets import ETSModel
-    positive = bool(np.all(y > 0)); best = None
-    for e, t, d, s in ETS_GRID:
-        if not positive and (e == "mul" or s == "mul"): continue
-        if s and len(y) < 2 * season: continue
-        try:
-            res = ETSModel(y, error=e, trend=t, damped_trend=d, seasonal=s, seasonal_periods=season if s else None).fit(disp=False, maxiter=100)
-            fc = np.asarray(res.forecast(steps), float)
-            if not (np.isfinite(res.aicc) and np.all(np.isfinite(fc))): continue
-            if best is None or res.aicc < best[0]: best = (res.aicc, fc, _ets_name(e, t, d, s))
-        except Exception: continue
-    if best is None: raise RuntimeError("no ETS model could be fitted")
-    return best[1], best[2]
-
-
 def forecast_series(y, steps, model="Exponential Smoothing", season=168, fixed=None):
     """One series -> (forecast >= 0, model label, ok).  A failed fit repeats the last value (and says so)."""
     y = np.asarray(y, float)
     try:
-        if model == "Auto ETS": fc, label = _auto_ets(y, steps)
-        else: fc, label = _holt_winters(y, steps, season, fixed), ("Holt-Winters" + (" (weekly)" if season == 168 else " (daily)" if season == 24 else f" (season {season} h)") if len(y) >= 2 * season else "Holt-Winters (no season: too little data)")
-        if not np.all(np.isfinite(fc)): raise ValueError("non-finite forecast")
+        fc, label = _holt_winters(y, steps, season, fixed), ("Holt-Winters" + (" (weekly)" if season == 168 else " (daily)" if season == 24 else f" (season {season} h)") if len(y) >= 2 * season else "Holt-Winters (no season: too little data)")        if not np.all(np.isfinite(fc)): raise ValueError("non-finite forecast")
         return np.clip(fc, 0, None), label, True
     except Exception as ex:
         return np.repeat(max(float(y[-1]), 0.0), steps), f"failed ({type(ex).__name__}): last value used", False
