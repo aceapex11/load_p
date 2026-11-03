@@ -68,28 +68,28 @@ TREND_TOLERANCE_PCT = {"Load (kW)": 2.0, "Current (A)": 2.0, "Voltage (V)": 0.5}
 # ------------------------------------------------------------------ COLOUR THEME
 # COLOUR THEME  (one palette everywhere)
 #   neutrals : slate  (INK text / actual values, MUTED secondary, GRID lines)
-#   accent   : blue   (ACCENT = measured load + forecasts + selected buttons; ACCENT_LIGHT = its tint)
-#   status   : blue = good / info, black = warning / alarm           (no green, amber or red anywhere)
-#   phases   : R rose, Y amber, B blue                              (the phase wires only - the one exception)
+#   accent   : indigo (ACCENT = measured load + forecasts + selected buttons; ACCENT_LIGHT = its tint)
+#   status   : green = good, amber = warning, rose = alarm / bad   (status only)
+#   phases   : R rose, Y amber, B blue                              (phase charts only)
 TEXT_COLOR, MUTED_COLOR, GRID_COLOR = "#0F172A", "#64748B", "#EDF0F6"
 
 
-ACCENT, ACCENT_LIGHT = "#2563EB", "#60A5FA"
+ACCENT, ACCENT_LIGHT = "#6366F1", "#818CF8"
 LOAD_COLOR = FORECAST_COLOR = ACCENT
 CONFIDENCE_Z, CONFIDENCE_TEXT = 1.96, "95 %"                              # width of the forecast interval
-GOOD_COLOR, WARN_COLOR, BAD_COLOR = "#2563EB", "#0F172A", "#0F172A"
+GOOD_COLOR, WARN_COLOR, BAD_COLOR = "#10B981", "#F59E0B", "#F43F5E"
 BLUE_COLOR = "#3B82F6"
 IDLE_COLOR, NO_DATA_COLOR, AXIS_COLOR = "#CBD5E1", BAD_COLOR, "#E2E8F0"            # idle share (slate), NO DATA (red), axis lines / empty bars
 
 
 def hex_to_rgba(hex_color, alpha):
-    """'#2563EB', .16  ->  'rgba(37,99,235,.16)'  (transparent fills that follow the theme colours)."""
+    """'#6366F1', .16  ->  'rgba(99,102,241,.16)'  (transparent fills that follow the theme colours)."""
     h = hex_color.lstrip("#"); return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{alpha})"
 
 
 PHASE_COLORS = {"RKW": "#F43F5E", "YKW": "#F59E0B", "BKW": "#3B82F6"}
 
-# ------------------------------------------------------------------ DESIGN SYSTEM (light + blue accent, forced in CSS - no config file needed)
+# ------------------------------------------------------------------ DESIGN SYSTEM (light + indigo accent, forced in CSS - no config file needed)
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
@@ -102,14 +102,14 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 
 /* app bar */
 .appbar { display:flex; align-items:center; gap:.9rem; background:#FFFFFF; border:1px solid #E6EAF2; border-radius:18px; padding:.85rem 1.2rem; margin-bottom:1rem; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 8px 24px -12px rgba(15,23,42,.10); }
-.appbar .logo { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:1.3rem; background:linear-gradient(135deg,#60A5FA,#2563EB 55%,#1D4ED8); box-shadow:0 6px 16px -6px rgba(37,99,235,.7); }
+.appbar .logo { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:1.3rem; background:linear-gradient(135deg,#818CF8,#6366F1 55%,#4F46E5); box-shadow:0 6px 16px -6px rgba(99,102,241,.7); }
 .appbar .t { font-weight:800; font-size:1.2rem; letter-spacing:-.4px; color:#0F172A !important; } .appbar .s { font-size:.78rem; color:#64748B !important; margin-top:-1px; }
 .appbar .sp { flex:1; }
 .chip { display:inline-flex; align-items:center; gap:.35rem; padding:.28rem .7rem; border-radius:999px; font-size:.76rem; font-weight:500; border:1px solid #E6EAF2; background:#F8FAFD; color:#475569 !important; }
 .pill { display:inline-flex; align-items:center; gap:.45rem; padding:.3rem .8rem; border-radius:999px; font-size:.78rem; font-weight:600; }
-.pill.run { background:#E6F0FF; color:#1D4ED8 !important; } .pill.idle { background:#F1F4F9; color:#475569 !important; } .pill.warn { background:#EEF0F4; color:#0F172A !important; } .pill.bad { background:#E5E7EB; color:#0F172A !important; }
+.pill.run { background:#E8FAF3; color:#047857 !important; } .pill.idle { background:#F1F4F9; color:#475569 !important; } .pill.warn { background:#FFF4DD; color:#B45309 !important; } .pill.bad { background:#FFE9ED; color:#BE123C !important; }
 .dot { width:8px; height:8px; border-radius:50%; background:currentColor; } .run .dot { animation:pulse 1.6s infinite; }
-@keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(37,99,235,.55);} 70%{box-shadow:0 0 0 8px rgba(37,99,235,0);} 100%{box-shadow:0 0 0 0 rgba(37,99,235,0);} }
+@keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(16,185,129,.55);} 70%{box-shadow:0 0 0 8px rgba(16,185,129,0);} 100%{box-shadow:0 0 0 0 rgba(16,185,129,0);} }
 
 /* tabs as a segmented pill nav */
 .stTabs [data-baseweb="tab-list"] { gap:.25rem; background:#E9EDF5; padding:.3rem; border-radius:14px; width:fit-content; border:0; }
@@ -122,33 +122,32 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 [data-testid="stVerticalBlockBorderWrapper"], [class*="st-key-panel"] { background:#FFFFFF !important; border:1px solid #E6EAF2 !important; border-radius:18px !important; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 28px -16px rgba(15,23,42,.12); }
 .ph { display:flex; align-items:baseline; gap:.6rem; margin:.1rem 0 .2rem; } .ph b { font-size:1rem; font-weight:700; color:#0F172A !important; letter-spacing:-.2px; } .ph span { font-size:.8rem; color:#64748B !important; }
 .kpi { position:relative; overflow:hidden; background:#FFFFFF; border:1px solid #E6EAF2; border-radius:18px; padding:1rem 1.1rem .9rem; height:100%; min-height:9rem; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 28px -16px rgba(15,23,42,.12); }.kpi .top { display:flex; align-items:center; gap:.55rem; } .kpi .ic { width:30px; height:30px; border-radius:9px; display:grid; place-items:center; font-size:.95rem; background:#F3F5FB; }
-.kpi .ic { filter:grayscale(1); }
 .kpi .l { color:#64748B !important; font-size:.8rem; font-weight:500; }
 .kpi .v { font-family:'JetBrains Mono',monospace; font-size:1.75rem; font-weight:600; letter-spacing:-1px; margin-top:.55rem; color:#0F172A !important; }
 .kpi .s { font-size:.78rem; margin-top:.1rem; color:#64748B !important; }
 .kpi.kb .v { color:#2563EB !important; } .kpi.kk .v { color:#0F172A !important; }
 .kpi .spark { position:absolute; right:0; bottom:0; width:46%; height:38px; opacity:.9; }
-.hero-f { border-radius:18px; padding:1.3rem 1.4rem; height:100%; background:radial-gradient(420px 200px at 100% 0%, rgba(37,99,235,.16), transparent 70%), linear-gradient(180deg,#FFFFFF,#F5F9FF); border:1px solid #DCE6F8; }
-.hero-f .l { font-size:.8rem; font-weight:600; color:#1D4ED8 !important; text-transform:uppercase; letter-spacing:.06em; }
+.hero-f { border-radius:18px; padding:1.3rem 1.4rem; height:100%; background:radial-gradient(420px 200px at 100% 0%, rgba(99,102,241,.16), transparent 70%), linear-gradient(180deg,#FFFFFF,#F7F8FF); border:1px solid #E3E6FA; }
+.hero-f .l { font-size:.8rem; font-weight:600; color:#4F46E5 !important; text-transform:uppercase; letter-spacing:.06em; }
 .hero-f .big { font-family:'JetBrains Mono',monospace; font-size:2.9rem; font-weight:600; letter-spacing:-2px; color:#0F172A !important; line-height:1.1; margin-top:.35rem; } .hero-f .big small { font-size:1.1rem; color:#64748B !important; letter-spacing:0; }
 .hero-f .r { color:#475569 !important; font-size:.86rem; margin-top:.35rem; }
-.badge { display:inline-block; padding:.18rem .55rem; border-radius:8px; font-size:.78rem; font-weight:600; margin-top:.6rem; } .badge.up { background:#E6F0FF; color:#1D4ED8 !important; } .badge.down { background:#E5E7EB; color:#0F172A !important; } .badge.flat { background:#F1F4F9; color:#475569 !important; }
-.mini { display:flex; gap:1.3rem; margin-top:1rem; padding-top:.9rem; border-top:1px dashed #D6E2F5; } .mini div b { display:block; font-family:'JetBrains Mono',monospace; font-size:1rem; color:#0F172A !important; } .mini div span { font-size:.74rem; color:#64748B !important; }
-.live { border-radius:18px; padding:1.2rem 1.3rem; background:linear-gradient(180deg,#FFFFFF,#F5F9FF); border:1px solid #DCE6F8; height:100%; }
+.badge { display:inline-block; padding:.18rem .55rem; border-radius:8px; font-size:.78rem; font-weight:600; margin-top:.6rem; } .badge.up { background:#E8FAF3; color:#047857 !important; } .badge.down { background:#FFE9ED; color:#BE123C !important; } .badge.flat { background:#F1F4F9; color:#475569 !important; }
+.mini { display:flex; gap:1.3rem; margin-top:1rem; padding-top:.9rem; border-top:1px dashed #DDE2F3; } .mini div b { display:block; font-family:'JetBrains Mono',monospace; font-size:1rem; color:#0F172A !important; } .mini div span { font-size:.74rem; color:#64748B !important; }
+.live { border-radius:18px; padding:1.2rem 1.3rem; background:linear-gradient(180deg,#FFFFFF,#F7F8FF); border:1px solid #E3E6FA; height:100%; }
 .live .big { font-family:'JetBrains Mono',monospace; font-size:3.2rem; font-weight:600; letter-spacing:-2px; color:#0F172A !important; line-height:1; margin:.7rem 0 .2rem; } .live .big small { font-size:1.1rem; color:#64748B !important; }
 .bar { margin:.55rem 0; } .bar .row { display:flex; justify-content:space-between; font-size:.8rem; color:#475569 !important; font-weight:500; } .bar .row b { font-family:'JetBrains Mono',monospace; color:#0F172A !important; }
 .bar .trk { height:8px; background:#EEF1F7; border-radius:99px; margin-top:.25rem; overflow:hidden; } .bar .fil { height:100%; border-radius:99px; }
-.note { border-left:3px solid #2563EB; background:#F1F6FF; padding:.7rem 1rem; border-radius:0 12px 12px 0; color:#475569 !important; font-size:.88rem; margin:.5rem 0 .9rem; } .note b, .note i { color:#1E293B !important; }
-.note.amber { border-left-color:#0F172A; background:#F3F4F6; }
-.note.good { border-left-color:#2563EB; background:#E6F0FF; } .note.bad { border-left-color:#0F172A; background:#F3F4F6; } .note ul { margin:.4rem 0 0 1.1rem; padding:0; } .note li { margin:.15rem 0; }
+.note { border-left:3px solid #6366F1; background:#F4F5FF; padding:.7rem 1rem; border-radius:0 12px 12px 0; color:#475569 !important; font-size:.88rem; margin:.5rem 0 .9rem; } .note b, .note i { color:#1E293B !important; }
+.note.amber { border-left-color:#F59E0B; background:#FFF8EB; }
+.note.good { border-left-color:#10B981; background:#E8FAF3; } .note.bad { border-left-color:#F43F5E; background:#FFF1F3; } .note ul { margin:.4rem 0 0 1.1rem; padding:0; } .note li { margin:.15rem 0; }
 
 /* inputs (forced light) */
 [data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="base-input"], input, [data-testid="stNumberInputContainer"] { background:#FFFFFF !important; color:#0F172A !important; border-color:#DDE2EE !important; border-radius:10px !important; }
-[data-baseweb="popover"] *, ul[role="listbox"], li[role="option"] { background:#FFFFFF !important; color:#0F172A !important; } li[role="option"]:hover { background:#EAF2FF !important; }
+[data-baseweb="popover"] *, ul[role="listbox"], li[role="option"] { background:#FFFFFF !important; color:#0F172A !important; } li[role="option"]:hover { background:#F1F3FF !important; }
 [data-testid="stExpander"] { background:#FFFFFF; border:1px solid #E6EAF2 !important; border-radius:14px; } [data-testid="stExpander"] summary, [data-testid="stExpander"] summary p { color:#0F172A !important; font-weight:600; }
 [data-testid="stBaseButton-secondary"] { background:#FFFFFF !important; color:#0F172A !important; border:1px solid #DDE2EE !important; border-radius:10px !important; font-weight:600; }
-input:focus, [data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within { border-color:#2563EB !important; box-shadow:0 0 0 1px #2563EB !important; }
-[data-testid="stSlider"] [role="slider"] { background-color:#2563EB !important; box-shadow:none !important; } [data-testid="stSliderThumbValue"], [data-testid="stSliderThumbValue"] * { color:#1D4ED8 !important; }
+input:focus, [data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within { border-color:#6366F1 !important; box-shadow:0 0 0 1px #6366F1 !important; }
+[data-testid="stSlider"] [role="slider"] { background-color:#6366F1 !important; box-shadow:none !important; } [data-testid="stSliderThumbValue"], [data-testid="stSliderThumbValue"] * { color:#4F46E5 !important; }
 [data-testid="stBaseButton-primary"] { background:#0F172A !important; color:#FFFFFF !important; border:0 !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-primary"] p { color:#FFFFFF !important; }
 </style>""", unsafe_allow_html=True)
 
@@ -368,7 +367,7 @@ def percent_change_text(p):
     return "" if pd.isna(p) else f" ({p:+.1f} %)"
 
 
-CARD_TONE_COLORS = {"bad": ("#0F172A", "#E5E7EB", "#0F172A"), "amber": ("#0F172A", "#E5E7EB", "#0F172A"), "good": ("#2563EB", "#DBEAFE", "#1D4ED8"), "info": ("#2563EB", "#DBEAFE", "#1D4ED8")}
+CARD_TONE_COLORS = {"bad": ("#F43F5E", "#FFE4E8", "#BE123C"), "amber": ("#F59E0B", "#FFEBD5", "#C2410C"), "good": ("#10B981", "#D8F5E9", "#047857"), "info": ("#6366F1", "#E7E8FF", "#4338CA")}
 
 
 def _status_badge_html(text, tone):
@@ -704,7 +703,7 @@ latest_balance_table = analyse_balance(smoothed_complete_minutes.iloc[-1][PHASE_
 status_pill_html = (f'<span class="pill run"><span class="dot"></span>Running now</span>' if timeline_stats["now_running"] else
           f'<span class="pill idle"><span class="dot"></span>Idle · last ran {timeline_stats["last_run"]:%d %b %H:%M}</span>')
 clock_chip_html = '<span class="chip">clock assumed</span>' if not has_real_clock else ""
-app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg></div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase imbalance</div></div><div class="sp"></div>
+app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase imbalance</div></div><div class="sp"></div>
 {status_pill_html}<span class="chip">{data_file_label}</span><span class="chip">{minute_rows.Timestamps.min():%d %b} → {minute_rows.Timestamps.max():%d %b %Y}</span><span class="chip">{len(minute_rows):,} readings</span>{clock_chip_html}</div>""", unsafe_allow_html=True)
 
 # three pages: overview, load forecast, phase balance
@@ -940,7 +939,7 @@ with tab_phase:
             imbalance_chart_column, deviation_chart_column = st.columns(2)
             with imbalance_chart_column:
                 fig = go.Figure()
-                for (parameter_label, parameter_cols), line_color in zip(PHASE_PARAMETER_COLS.items(), [ACCENT, TEXT_COLOR, ACCENT_LIGHT]):
+                for (parameter_label, parameter_cols), line_color in zip(PHASE_PARAMETER_COLS.items(), [ACCENT, BLUE_COLOR, WARN_COLOR]):
                     fig.add_scatter(x=phase_params_window.index, y=imbalance_pct_of(phase_params_window, parameter_cols), name=parameter_label.split(" ")[0], line=dict(color=line_color, width=2), connectgaps=True)
                 fig.add_hline(y=ALARM_LIMIT_PCT, line_dash="dot", line_color=WARN_COLOR, annotation_text=f"alarm {ALARM_LIMIT_PCT:g} %", annotation_position="top left")
                 fig.update_layout(title="Imbalance % of load, current and voltage", yaxis_title="%"); show_figure(style_figure(fig, 300, True, top=70), key="pp_imb")
