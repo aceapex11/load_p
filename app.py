@@ -862,7 +862,9 @@ with tab_load:
         shift_hours = shift_table["Hours"].to_numpy()[shift_use]; shift_kwh = shift_table["Avg kW"].to_numpy()[shift_use] * shift_hours; mean_shift_kwh = float(shift_kwh.mean())
         shift_low_kwh, shift_high_kwh = float((shift_low_table["Avg kW"].to_numpy()[shift_use] * shift_hours).mean()), float((shift_high_table["Avg kW"].to_numpy()[shift_use] * shift_hours).mean())
         busiest_shift_vs_mean_pct = (shift_kwh.max() / mean_shift_kwh - 1) * 100 if mean_shift_kwh >= 1 else float("nan")
-        with energy_kpi_columns[4]: kpi_card("Average 8 h", f"{mean_shift_kwh:,.0f} kWh", f"average {float(shift_table['Avg kW'].to_numpy()[shift_use].mean()):,.1f} kW" + ("" if len(shift_kwh) < 2 or not np.isfinite(busiest_shift_vs_mean_pct) else f" · busiest 8 h block {busiest_shift_vs_mean_pct:+.0f} % vs this") + f"<br>{CONFIDENCE_TEXT} range {shift_low_kwh:,.0f} – {shift_high_kwh:,.0f} kWh", "", "🕗")
+        busiest_shift_row = shift_table[shift_use].iloc[int(shift_kwh.argmax())]; busiest_shift_text = f"{busiest_shift_row['Start']:%a %d %b %H:%M} → {busiest_shift_row['End']:%H:%M}"      # the 8 h period with the most energy
+        busiest_shift_html = "" if len(shift_kwh) < 2 else f"<br>busiest 8 h: <b>{busiest_shift_text}</b> · {shift_kwh.max():,.0f} kWh" + ("" if not np.isfinite(busiest_shift_vs_mean_pct) else f" ({busiest_shift_vs_mean_pct:+.0f} % vs this)")
+        with energy_kpi_columns[4]: kpi_card("Average 8 h", f"{mean_shift_kwh:,.0f} kWh", f"average {float(shift_table['Avg kW'].to_numpy()[shift_use].mean()):,.1f} kW" + busiest_shift_html, "", "🕗")
         st.write("")
         valid_block_names = [n for n, h in AVERAGE_BLOCK_HOURS.items() if h <= horizon_hours]
         block_select_column, _ = st.columns([1.2, 3])
