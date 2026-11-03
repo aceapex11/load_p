@@ -1,10 +1,11 @@
 """GridSense - machine load intelligence (light mode). Rule-based advice, no AI service, no API key.
-Data            : device_16_full_data.csv - one row per minute with V1-V3, I1-I3, PF, RKW, YKW, BKW and a Timestamps column
+Data            : device_16_prediction_dataset.csv - one row per minute with V1-V3, I1-I3, PF, RKW, YKW, BKW
+                  (an optional Timestamps / Timestamp / Timestamp_Index column is used when present; you can also upload the file in the app)
 Overview        : load timeline (kW, phases, current, voltage, imbalance) and where the time went (uptime)
-Load forecast   : hourly total kW with Exponential Smoothing, tested on the last 168 hours, power advice
-Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast, imbalance alarms,
+Load forecast   : hourly total kW, Exponential Smoothing or Auto ETS (exponential_smoothing_load_forecasting notebook), tested on the last 168 hours, power advice
+Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast (three_phase_imbalance_detection_forecasting notebook), imbalance alarms,
                   and a rule-based action plan: what is out of phase, why, what to do now, when to do what, what can happen, how to bring it in phase, future balance
-Files next to app.py: gridsense_forecast.py (the forecasting model) and gridsense_rules.py (the rule-based advisor)
+Files next to app.py: gridsense_forecast.py (the notebooks' models) and gridsense_rules.py (the rule-based advisor)
 """
 import datetime as dt
 import io
@@ -37,7 +38,7 @@ MIN_KW = 5.0         # average kW per phase below this = machine off
 SMOOTH = 30          # minutes of rolling mean (past minutes only)
 DEMAND = 0.0         # sanctioned demand in kW, 0 = unknown
 RATING = 0.0         # phase breaker / cable in A, 0 = unknown
-MINR = 45            # an hour with fewer one-minute readings than this counts as missing
+MINR = 45            # an hour with fewer one-minute readings than this counts as missing (as in the notebooks)
 
 # COLOUR THEME  (one palette everywhere)
 #   neutrals : slate  (INK text / actual values, MUTED secondary, GRID lines)
@@ -228,7 +229,7 @@ def read_raw_path(path, mtime):
 
 @st.cache_data(show_spinner="Cleaning the data…")
 def clean_data(raw, device, start_iso):
-    """Cleaning: pick one device, build the minute clock, tiny negatives -> 0, impossible meter values removed.
+    """Same cleaning as the notebooks: pick one device, build the minute clock, tiny negatives -> 0, impossible meter values removed.
     Returns the cleaned rows (one per recorded minute, total KW = R + Y + B) and a few facts about the file."""
     raw = raw.copy()
     if "DeviceID" in raw.columns and raw["DeviceID"].nunique() > 1 and device is not None: raw = raw[raw["DeviceID"] == device]
@@ -384,8 +385,7 @@ def power_advice(kind, first, last, peak, long_horizon, ctx=None):
 AVG_BLOCKS_H = {"1 hour": 1, "3 hours": 3, "6 hours": 6, "12 hours": 12, "24 hours": 24}
 LD_LENGTHS = {"24 hours": 24, "3 days": 72, "7 days": 168}
 HIST_H = {"24 hours": 24, "3 days": 72, "7 days": 168, "14 days": 336}
-SEASONS = {"Daily cycle (24 h)": 24, "Weekly cycle (168 h)": 168, "144 h cycle": 144}
-MODEL = "Exponential Smoothing"                                   # the only forecasting model
+SEASONS = {"Daily cycle (24 h)": 24, "Weekly cycle (168 h)": 168, "Load notebook value (144 h)": 144}
 MAX_STEPS = 168                                                   # every forecast is made 7 days ahead once; the page slices what you ask for
 
 
@@ -412,18 +412,18 @@ def hourly_cached(tl_, min_readings):
 
 
 @st.cache_data(show_spinner="Training the model and forecasting the total load…")
-def run_total(y_tail, steps, season, fixed):
-    return gf.forecast_series(y_tail.to_numpy(), steps, season, fixed)
+def run_total(y_tail, steps, model, season, fixed):
+    return gf.forecast_series(y_tail.to_numpy(), steps, model, season, fixed)
 
 
 @st.cache_data(show_spinner="Testing the model on the last 168 hours…")
-def run_holdout(y_real, y_model, season, fixed, fit_steps):
-    return gf.holdout_total(y_real, y_model, season, fixed, fit_steps)
+def run_holdout(y_real, y_model, model, season, fixed, fit_steps):
+    return gf.holdout_total(y_real, y_model, model, season, fixed, fit_steps)
 
 
-@st.cache_data(show_spinner="Training the model on Red, Yellow and Blue…")
-def run_phases(window, steps, season):
-    return gf.forecast_phases(window, steps, season)
+@st.cache_data(show_spinner="Training the model on Red, Yellow and Blue (Auto ETS can take a minute or two)…")
+def run_phases(window, steps, model, season):
+    return gf.forecast_phases(window, steps, model, season)
 
 
 # ------------------------------------------------------------------ page
@@ -459,7 +459,7 @@ bar.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class=
 
 
 tab_overview, tab_load, tab_phase = st.tabs(["Overview", "Load forecast", "Phase balance"])
-HF = hourly_cached(tl, MINR)                                      # hourly series for both forecast tabs
+HF = hourly_cached(tl, MINR)                                      # hourly series for both forecast tabs (notebook method)
 H_OK = HF is not None and len(HF["model"]) >= 72
 if H_OK:
     H_real, H_mod = HF["real"], HF["model"]
@@ -508,20 +508,22 @@ with tab_overview:
         show(style(f, 400, True, top=40).update_layout(legend=dict(orientation="h", y=-0.08, x=0.1), margin=dict(l=10, r=10, t=40, b=60)))
 
 
-# ================================================================== LOAD FORECAST (hourly total kW - Exponential Smoothing)
+# ================================================================== LOAD FORECAST (hourly total kW - Exponential Smoothing / Auto ETS)
 with tab_load:
   if not H_OK: need_more_data()
   else:
-    c = st.columns([1, 1, 1.3, 1])
-    L_len = c[0].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ld_len")
-    L_days = c[1].selectbox("Learn from", [0, 14, 28, 56, 90], index=0, key="ld_days", format_func=lambda x: "All history" if x == 0 else f"last {x} days", help="All history uses every hour before the test week. A short window (14-28 days) throws away most of the history and gives a larger error.")
-    L_season = SEASONS[c[2].selectbox("Seasonal cycle", list(SEASONS), index=2, key="ld_season", help="Hourly data: 24 = daily pattern, 168 = weekly pattern.")]
-    L_hist = c[3].selectbox("History shown", list(HIST_H), index=2, key="ld_hist")
-    fixed = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.95)
+    c = st.columns([1.25, 1, 1, 1.3, 1])
+    L_model = c[0].selectbox("Model", gf.MODELS, key="ld_model", help="Exponential Smoothing = damped-trend Holt-Winters (load notebook). Auto ETS = tries every ETS model and keeps the lowest AICc (slower).")
+    L_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ld_len")
+    L_days = c[2].selectbox("Learn from", [0, 14, 28, 56, 90], index=0, key="ld_days", format_func=lambda x: "All history (as notebook)" if x == 0 else f"last {x} days", help="The notebook learns from ALL hours before the test week. A short window (14-28 days) throws away most of the history and gives a larger error.")
+    L_season = SEASONS[c[3].selectbox("Seasonal cycle", list(SEASONS), index=2, key="ld_season", help="Hourly data: 24 = daily pattern, 168 = weekly pattern. The load notebook has 144 with a comment saying 24.")] if L_model == "Exponential Smoothing" else gf.ETS_SEASON
+    if L_model == "Auto ETS": c[3].caption("Auto ETS uses the daily cycle (24 h).")
+    L_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ld_hist")
+    fixed = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.95) if L_model == "Exponential Smoothing" else None   # the load notebook's values
     fit_steps = len(y_mod) if int(L_days) == 0 else int(L_days) * 24
     L_days_txt = "all available history" if int(L_days) == 0 else f"the last {L_days} days"
-    fc_tot, lbl_tot, ok_tot = run_total(y_mod.iloc[-fit_steps:], MAX_STEPS, L_season, fixed)
-    if not ok_tot: note(f"The model could not be fitted ({lbl_tot}); the forecast is a flat line. Try a different cycle.", "amber")
+    fc_tot, lbl_tot, ok_tot = run_total(y_mod.iloc[-fit_steps:], MAX_STEPS, L_model, L_season, fixed)
+    if not ok_tot: note(f"The model could not be fitted ({lbl_tot}); the forecast is a flat line. Try the other model or a different cycle.", "amber")
     horizon = LD_LENGTHS[L_len]; fv = fc_tot[:horizon]; t_f = t_fut_all[:horizon]
     last_actual = float(y_mod.iloc[-1]); end_value = float(fv[-1])
     change = f"{abs(end_value - last_actual) / last_actual * 100:.1f} %" if last_actual >= 1 else f"{abs(end_value - last_actual):.1f} kW"
@@ -555,7 +557,7 @@ with tab_load:
             tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 72, dict(avg=avg_f, slope=slope, pf=PF_AVG, demand=DEMAND, peak_at=t_f[int(np.argmax(fv))]))
             note(advice_html(head_a, acts_a), tone_a)
 
-    with panel("Forecast ahead", f"{MODEL} · {lbl_tot} · learns from {L_days_txt} · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
+    with panel("Forecast ahead", f"{L_model} · {lbl_tot} · learns from {L_days_txt} · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
         left, right = st.columns([1, 2.4])
         with left:
             st.markdown(f"""<div class="hero-f"><div class="l">Expected load · {t_f[-1]:%d %b %H:%M}</div><div class="big">{end_value:,.1f}<small> kW</small></div>
@@ -565,15 +567,15 @@ with tab_load:
             hist = y_real.iloc[-HIST_H[L_hist]:]; f = go.Figure()
             f.add_shape(type="rect", xref="x", yref="paper", x0=t_last, x1=t_f[-1], y0=0, y1=1, fillcolor=tint(ACCENT, .06), line_width=0)
             f.add_scatter(x=hist.index, y=hist.values, name="Actual hourly kW", mode="lines", line=dict(color=INK, width=2.2), connectgaps=False)
-            f.add_scatter(x=[t_last] + list(t_f), y=[last_actual] + list(fv), name=f"Forecast ({MODEL})", mode="lines", line=dict(color=FORECAST, width=3))
+            f.add_scatter(x=[t_last] + list(t_f), y=[last_actual] + list(fv), name=f"Forecast ({L_model})", mode="lines", line=dict(color=FORECAST, width=3))
             f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
             f.add_annotation(x=t_last, yref="paper", y=1.0, text="last data point", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED))
             f.update_yaxes(title="kW"); show(style(f, 340, True, top=70))
         st.caption("Exponential Smoothing gives one line, no confidence band. How far to trust it is shown in 'Model check' below.")
 
-    # ---- model check on the last 168 hours
+    # ---- model check on the last 168 hours (the load notebook's test)
     st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b><span>the last 168 hours are hidden, forecast from the hours before, then compared with what really happened</span></div>', unsafe_allow_html=True)
-    ho = run_holdout(y_real, y_mod, L_season, fixed, fit_steps)
+    ho = run_holdout(y_real, y_mod, L_model, L_season, fixed, fit_steps)
     if ho is None: st.caption("Not enough history for a 7-day test.")
     else:
         sc = ho["scores"]; mean_a = float(np.nanmean(ho["actual"].to_numpy()))
@@ -583,7 +585,7 @@ with tab_load:
         with k[2]: kpi("WAPE", f"{sc['WAPE']:.1f} %", "total error ÷ total load · smaller is better", "good" if sc["WAPE"] < 10 else "warn" if sc["WAPE"] < 25 else "bad", "✅")
         with k[3]: kpi("SMAPE", f"{sc['SMAPE']:.1f} %", "average % error · smaller is better", "", "🧪")
         f = go.Figure(); f.add_scatter(x=ho["actual"].index, y=ho["actual"].values, name="Actual hourly kW", line=dict(color=INK, width=2), connectgaps=False)
-        f.add_scatter(x=ho["pred"].index, y=ho["pred"].values, name=f"Predicted ({MODEL})", line=dict(color=FORECAST, width=2, dash="dash")); f.update_yaxes(title="kW")
+        f.add_scatter(x=ho["pred"].index, y=ho["pred"].values, name=f"Predicted ({L_model})", line=dict(color=FORECAST, width=2, dash="dash")); f.update_yaxes(title="kW")
         with st.container(border=True, key="panel_ld_test"): show(style(f, 340, True, top=60))
 
 
@@ -591,15 +593,17 @@ with tab_load:
 with tab_phase:
   if not H_OK: need_more_data()
   else:
-    c = st.columns([1, 1, 1.3, 1])
-    P_len = c[0].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
-    P_days = c[1].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
-    P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[2].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")]
-    P_hist = c[3].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
+    c = st.columns([1.3, 1, 1, 1.3, 1])
+    P_model = c[0].selectbox("Model", gf.MODELS, key="ph_model", help="Exponential Smoothing = damped-trend Holt-Winters. Auto ETS = best ETS model by AICc per phase (slower, can take a minute or two).")
+    P_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
+    P_days = c[2].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
+    P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[3].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")] if P_model == "Exponential Smoothing" else gf.ETS_SEASON
+    P_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
     fit_steps = int(P_days) * 24; horizon = LD_LENGTHS[P_len]
-    fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_season)
+    fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season)
     Pf = pd.DataFrame(fc_arr[:horizon], index=t_fut_all[:horizon], columns=PH3); rep = analyse(Pf.to_numpy())
-    if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try a different cycle.", "amber")
+    if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
+    if P_model == "Auto ETS": st.caption("Auto ETS chose: " + " · ".join(f"{NAMES[i]} {lbls[p]}" for i, p in enumerate(PH3)))
 
     DG = diagnose(Dv[NEEDED], ALARM_PCT, MIN_KW, SEVERE_PCT); dg = None if DG["empty"] else DG
     r0 = a_now.iloc[0]
@@ -620,7 +624,7 @@ with tab_phase:
     st.write("")
 
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
-    with panel("Phase load · measured and forecast", f"hourly means · {MODEL} · learns from the last {P_days} days · forecast starts after {t_last:%d %b %Y %H:%M} · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
+    with panel("Phase load · measured and forecast", f"hourly means · {P_model} · learns from the last {P_days} days · forecast starts after {t_last:%d %b %Y %H:%M} · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
         hh = ph_real.iloc[-HIST_H[P_hist]:]; xt = [t_last] + list(Pf.index)
         f = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=[f"{n} phase (kW)" for n in NAMES])
         for j, p in enumerate(PH3, 1):
