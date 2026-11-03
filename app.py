@@ -557,51 +557,157 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
 
 
 def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet_busy_window=None, phase_low_kw=None, phase_high_kw=None):
-    """'3-phase load analysis' in the SAME blue two-column block as the load forecast.
-    LEFT  : phase-wise load distribution (forecast average per colour + interval), likely cause, potential impact if not corrected.
-    RIGHT : phase balance recommendations (inspect / move loads / verify).   Forecast average per colour + measured causes."""
-    forecast_avg_by_phase = forecast_phase_kw.mean(); overall_avg_kw = float(forecast_avg_by_phase.mean()); deviation_pct = (forecast_avg_by_phase / overall_avg_kw - 1) * 100 if overall_avg_kw >= 1 else forecast_avg_by_phase * 0
-    n_alarm_hours = int(forecast_table.Alarm.sum()); worst_deviation_pct = float(deviation_pct.abs().max())
-    is_out_of_balance = worst_deviation_pct > ALARM_LIMIT_PCT or n_alarm_hours > 0; tone = "amber" if is_out_of_balance else "good"
-    badge = "Imbalance detected" if is_out_of_balance else "Balanced"
-    n_hours = len(forecast_phase_kw); n_days = n_hours // 24 if n_hours % 24 == 0 else None; badge_period = f"{n_days}-day" if n_days else f"{n_hours}-hour"
-    label_of = dict(zip(forecast_phase_kw.columns, PHASE_LABELS))
-    phase_tiles_html = ""
-    for p, nm_ in zip(forecast_phase_kw.columns, PHASE_LABELS):
-        d = float(deviation_pct[p]); off = abs(d) > ALARM_LIMIT_PCT; lab = "Overloaded" if d > ALARM_LIMIT_PCT else "Underloaded" if d < -ALARM_LIMIT_PCT else "Near average"
-        col = CARD_TONE_COLORS["bad"][2] if off else TEXT_COLOR
-        interval_html = "" if phase_low_kw is None or phase_high_kw is None else f'<div style="font-size:.72rem;color:{MUTED_COLOR};margin-top:2px">{CONFIDENCE_TEXT} range {float(phase_low_kw[p].mean()):,.1f} – {float(phase_high_kw[p].mean()):,.1f} kW</div>'
-        phase_tiles_html += (f'<div style="flex:1;min-width:105px"><div style="font-size:.72rem;color:{MUTED_COLOR};letter-spacing:.04em">{nm_.upper()}</div><div style="font-size:1.4rem;font-weight:700;color:{col}">{forecast_avg_by_phase[p]:,.1f} kW</div>'
-                  f'<div style="font-size:.78rem;color:{col if off else MUTED_COLOR}">{"↑" if d >= 0 else "↓"} {abs(d):.1f} % · {lab}</div>{interval_html}</div>')
-    section_title_html = lambda t: f'<div style="font-weight:700;color:{TEXT_COLOR};font-size:.9rem;margin:.9rem 0 .35rem">{t}</div>'
-    high_phases = [nm for p, nm in zip(forecast_phase_kw.columns, PHASE_LABELS) if deviation_pct[p] > ALARM_LIMIT_PCT] or [PHASE_LABELS[int(np.argmax(forecast_avg_by_phase.to_numpy()))]]; low_phases = [nm for p, nm in zip(forecast_phase_kw.columns, PHASE_LABELS) if deviation_pct[p] < -ALARM_LIMIT_PCT] or [PHASE_LABELS[int(np.argmin(forecast_avg_by_phase.to_numpy()))]]
-    cause_html, top_cause = "", None
-    if diagnosis:
-        top_cause = diagnosis["share"].idxmax(); current_flagged, voltage_flagged = diagnosis["mean_I"] > ALARM_LIMIT_PCT, diagnosis["mean_V"] > ALARM_LIMIT_PCT
-        cause_row_html = lambda lab, v, flag: f'<div style="display:flex;justify-content:space-between;padding:3px 0;color:#475569;font-size:.88rem"><span>{lab} ({v:.1f} %)</span>{_status_badge_html(("Above " if flag else "Within ") + f"{ALARM_LIMIT_PCT:g} %", "bad" if flag else "good")}</div>'
-        cause_html = (section_title_html("Likely cause analysis") + cause_row_html("Current imbalance", diagnosis["mean_I"], current_flagged) + cause_row_html("Voltage imbalance", diagnosis["mean_V"], voltage_flagged)
-                 + f'<div style="font-weight:700;color:{TEXT_COLOR};font-size:.9rem;margin-top:6px">Possible cause: ' + {"Current": "Uneven load distribution", "Voltage": "Supply voltage unbalance", "Power factor": "Unequal power factor between phases"}[top_cause] + "</div>")
-    # RIGHT side: recommendations as (heading, sentence)
-    if not is_out_of_balance:
-        actions, impacts = [("No action needed", f"The colours are within {ALARM_LIMIT_PCT:g} %."), ("Keep the load spread", "Keep new single-phase loads spread across R, Y and B.")], []
+    # Compact action-vs-impact summary for the Phase Balance tab. The forecast
+    # identifies the high/low phase; measured current/voltage are diagnostic clues,
+    # not definitive proof of the electrical fault source.
+    esc = lambda value: html_lib.escape(str(value), quote=True)
+    forecast_avg = forecast_phase_kw.mean()
+    overall_avg_kw = float(forecast_avg.mean())
+    deviation_pct = (forecast_avg / overall_avg_kw - 1) * 100 if overall_avg_kw >= 1 else forecast_avg * 0
+    n_hours = len(forecast_phase_kw)
+    n_alarm_hours = int(forecast_table.Alarm.sum()) if "Alarm" in forecast_table else 0
+    worst_deviation_pct = float(deviation_pct.abs().max()) if len(deviation_pct) else 0.0
+    is_out_of_balance = worst_deviation_pct > ALARM_LIMIT_PCT or n_alarm_hours > 0
+    n_days = n_hours // 24 if n_hours % 24 == 0 else None
+    badge_period = f"{n_days}-day" if n_days else f"{n_hours}-hour"
+    labels = dict(zip(forecast_phase_kw.columns, PHASE_LABELS))
+
+    # Identify the forecast phase furthest above and below the 3-phase mean.
+    high_col, low_col = deviation_pct.idxmax(), deviation_pct.idxmin()
+    high_phase, low_phase = labels[high_col], labels[low_col]
+    high_dev, low_dev = float(deviation_pct[high_col]), float(deviation_pct[low_col])
+    forecast_line = f"{high_phase} is highest ({high_dev:+.1f}% vs average); {low_phase} is lowest ({low_dev:+.1f}%)."
+
+    has_diagnosis = bool(diagnosis) and not diagnosis.get("empty", False)
+    current_pct = float(diagnosis["mean_I"]) if has_diagnosis else float("nan")
+    voltage_pct = float(diagnosis["mean_V"]) if has_diagnosis else float("nan")
+    current_flagged = bool(has_diagnosis and current_pct > ALARM_LIMIT_PCT)
+    voltage_flagged = bool(has_diagnosis and voltage_pct > ALARM_LIMIT_PCT)
+    measured_worst_phase = diagnosis.get("main_name") if has_diagnosis else None
+
+    # Explain whether the measurements point more towards phase loading or supply voltage.
+    if not has_diagnosis:
+        driver_title = "Cause not confirmed from meter readings"
+        driver_copy = "Not enough valid current/voltage history is available to separate a load-side issue from a supply-side issue. Measure all three phases before moving circuits."
+    elif current_flagged and voltage_flagged:
+        driver_title = "Both current and voltage imbalance exceed the limit"
+        driver_copy = f"Current is {current_pct:.1f}% and voltage is {voltage_pct:.1f}% (limit {ALARM_LIMIT_PCT:.0f}%). Measured load deviation most often involves {measured_worst_phase or high_phase}. Check supply and phase loading together."
+    elif current_flagged:
+        driver_title = "Current / phase-loading imbalance is the stronger signal"
+        driver_copy = f"Current imbalance is {current_pct:.1f}% (above {ALARM_LIMIT_PCT:.0f}%), while voltage is {voltage_pct:.1f}% (within limit). This points more towards uneven phase loading than a supply-voltage issue. Measured phase most often affected: {measured_worst_phase or high_phase}."
+    elif voltage_flagged:
+        driver_title = "Voltage imbalance is the stronger signal"
+        driver_copy = f"Voltage imbalance is {voltage_pct:.1f}% (above {ALARM_LIMIT_PCT:.0f}%), while current is {current_pct:.1f}% (within limit). Have a qualified electrician check the incoming supply, transformer/tap and connections before shifting loads."
     else:
-        if top_cause == "Voltage": actions = [("Check the supply voltage", "Ask the utility to check the supply voltage and transformer tap."), ("Hold off on rewiring", "Do not rewire before the voltage is checked."), ("Re-check the voltages", "Re-check the phase voltages afterwards.")]
-        else:
-            move_targets = " and ".join(f"{r['To']} (about {r['Move A']:.0f} A)" for _, r in diagnosis["plan"].iterrows()) if diagnosis and len(diagnosis["plan"]) else " / ".join(low_phases)
-            source_phase = diagnosis["plan"].iloc[0]["From"] if diagnosis and len(diagnosis["plan"]) else " / ".join(high_phases)
-            actions = [("Inspect single-phase loads", f"Inspect single-phase loads on {' / '.join(high_phases)}."),
-                       ("Move suitable loads", f"Move suitable loads from {source_phase} to {move_targets}" + (f", best done {quiet_busy_window['quiet'][0]:%a %d %b %H:%M} → {quiet_busy_window['quiet'][1]:%H:%M} (lowest load)." if quiet_busy_window else ".")),
-                       ("Verify phase currents", "Verify phase currents after one working day.")]
-        extra_heating_pct = diagnosis["loss"] if diagnosis else float(((forecast_phase_kw ** 2).sum(axis=1) / (3 * forecast_phase_kw.mean(axis=1) ** 2).replace(0, np.nan) - 1).mean() * 100)
-        impacts = [("Increased cable losses and heating", f"About {max(extra_heating_pct, 0):.1f} % extra I²R heat on {high_phases[0]}."),
-                   ("Higher neutral current and equipment stress", f"Neutral current is about {diagnosis['neutral_mean']:.0f} A." if diagnosis and diagnosis["neutral_mean"] >= 1 else "The neutral carries the unbalanced current."),
-                   ("Increased risk of overheating and unwanted trips", f"{high_phases[0]} peaks at {diagnosis['per']['Peak A'].max() / PHASE_RATING_A * 100:.0f} % of the {PHASE_RATING_A:,.0f} A rating." if diagnosis and PHASE_RATING_A > 0 else "A sustained imbalance heats cables and can trip protection.")]
-    worst_p = deviation_pct.idxmax(); headline = (f"Forecasted imbalance: {label_of[worst_p]} {deviation_pct[worst_p]:+.1f} % vs the 3-phase average" if is_out_of_balance else "Forecasted load is balanced across Red, Yellow and Blue")
-    left_html = (_blue_title_row_html("3-PHASE LOAD ANALYSIS", badge_html=_status_badge_html(badge, tone)) + f'<div style="color:{MUTED_COLOR};font-size:.78rem;margin:.5rem 0 .2rem">Based on {_machine_text()} {badge_period} phase forecast</div>'
-                 + section_title_html("Phase-wise load distribution") + f'<div style="display:flex;gap:12px;flex-wrap:wrap">{phase_tiles_html}</div>' + cause_html
-                 + (section_title_html("Potential impact if not corrected") + _blue_item_rows_html(impacts) if impacts else ""))
-    right_html = _blue_title_row_html("PHASE BALANCE RECOMMENDATIONS", f"{badge_period} forecast") + f'<div style="font-weight:700;color:{TEXT_COLOR};font-size:.95rem;margin:.5rem 0 .6rem">{headline}</div>' + _blue_item_rows_html(actions)
-    return _blue_card_html(left_html, right_html)
+        driver_title = "Forecast load is uneven; measured current and voltage are within the limit"
+        driver_copy = f"Current is {current_pct:.1f}% and voltage is {voltage_pct:.1f}% (both within {ALARM_LIMIT_PCT:.0f}%). Confirm the meter readings and inspect {high_phase} single-phase circuits before making changes."
+
+    # Tailor the recommended actions to the measured signal.
+    if not is_out_of_balance:
+        actions = [
+            ("Keep new loads balanced", "Distribute new single-phase equipment across Red, Yellow and Blue."),
+            ("Continue monitoring", f"Check phase kW, current and voltage; investigate if any deviation exceeds {ALARM_LIMIT_PCT:.0f}%.")
+        ]
+    elif voltage_flagged and not current_flagged:
+        actions = [
+            ("Check the incoming supply", "Have a qualified electrician verify phase-to-phase voltages, transformer tap and supply connections."),
+            ("Do not shift loads yet", "Confirm and correct the voltage issue first; load transfers alone may not resolve a supply imbalance."),
+            ("Verify after correction", "Re-measure all phase voltages and currents, then re-check load distribution.")
+        ]
+    elif current_flagged and voltage_flagged:
+        actions = [
+            ("Inspect supply and phase currents", "Check incoming voltage, phase currents, neutral and connections with a qualified electrician."),
+            ("Correct the supply issue first", "After voltage is stable, redistribute suitable single-phase loads if current imbalance remains."),
+            ("Verify the balance", f"Re-check all phases after one working day and aim to stay within {ALARM_LIMIT_PCT:.0f}%.")
+        ]
+    elif current_flagged:
+        move_plan = diagnosis.get("plan") if has_diagnosis else None
+        move_text = ""
+        if move_plan is not None and len(move_plan):
+            planned = [f"{row['From']} → {row['To']} (about {row['Move A']:.0f} A)" for _, row in move_plan.iterrows() if float(row.get("Move A", 0)) >= 1.0]
+            move_text = "; ".join(planned)
+        if not move_text:
+            move_text = f"from {high_phase} towards {low_phase}"
+        when_text = (f" Suggested low-load window: {quiet_busy_window['quiet'][0]:%a %d %b %H:%M} → {quiet_busy_window['quiet'][1]:%H:%M}." if quiet_busy_window else " Choose a low-load operating window for an approved transfer.")
+        actions = [
+            ("Inspect the high-load phase", f"Check single-phase circuits on {high_phase} and compare R/Y/B current readings."),
+            ("Redistribute suitable loads", f"Consider moving suitable loads {move_text}.{when_text}"),
+            ("Verify after the change", f"Re-check phase currents and kW after one working day; target deviation within {ALARM_LIMIT_PCT:.0f}%.")
+        ]
+    else:
+        actions = [
+            ("Confirm the phase readings", f"Measure current and voltage on all phases; start by inspecting {high_phase} and its single-phase circuits."),
+            ("Balance only after verification", f"If voltage is stable and current is uneven, move suitable loads from {high_phase} towards {low_phase}."),
+            ("Re-check the result", f"Compare phase kW, current and voltage after one working day; target deviation within {ALARM_LIMIT_PCT:.0f}%.")
+        ]
+
+    # Impacts are separated into their own card; numeric values are included only
+    # where measured diagnosis supports them. Neutral estimate carries assumptions.
+    if has_diagnosis:
+        extra_heating = max(float(diagnosis.get("loss", 0.0)), 0.0)
+        heating_copy = f"Measured current pattern estimates about {extra_heating:.1f}% extra I²R heating versus balanced loading."
+        neutral_a = float(diagnosis.get("neutral_mean", 0.0))
+        neutral_copy = (f"Estimated neutral current is about {neutral_a:.0f} A (4-wire approximation; actual value depends on phase angles and harmonics)." if neutral_a >= 1 else "Unbalanced phase currents can create neutral current in a 3-phase, 4-wire system.")
+    else:
+        heating_copy = "Unequal phase currents can increase I²R losses and conductor heating."
+        neutral_copy = "Unbalanced phase currents can create neutral current in a 3-phase, 4-wire system."
+    impacts = [
+        ("Increased cable losses and heating", heating_copy),
+        ("Higher neutral current and equipment stress", neutral_copy),
+        ("Increased risk of overheating and unwanted trips", "A sustained imbalance can overheat cables and contribute to protective trips; check phase loading against equipment ratings.")
+    ]
+
+    def render_rows(items, icons):
+        return "".join(
+            '<div class="phase-summary-item">'
+            f'<span class="phase-summary-icon">{icons[i % len(icons)]}</span>'
+            f'<div><div class="phase-summary-item-title">{esc(title)}</div>'
+            f'<div class="phase-summary-item-copy">{esc(copy)}</div></div></div>'
+            for i, (title, copy) in enumerate(items)
+        )
+
+    badge_text, badge_class = ("Watch", "amber") if is_out_of_balance else ("Within limit", "good")
+    return f'''<style>
+    .phase-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:stretch; margin:2px 0 8px; font-family:Inter,Arial,sans-serif; }}
+    .phase-summary-card {{ min-width:0; height:100%; display:flex; flex-direction:column; background:linear-gradient(155deg,#fff 0%,#fbfcff 100%); border:1px solid #dfe7f3; border-left:3px solid #93c5fd; border-radius:14px; padding:12px 14px 10px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:phaseSummaryEnter .35s ease both; }}
+    .phase-summary-card:hover,.phase-summary-card:focus-within {{ transform:translateY(-3px); border-color:#93c5fd; box-shadow:0 10px 22px -14px rgba(37,99,235,.48),0 3px 8px rgba(15,23,42,.05); }}
+    .phase-summary-head {{ display:flex; justify-content:space-between; align-items:center; gap:8px; }}
+    .phase-summary-title {{ color:#0f172a; font-size:.78rem; font-weight:800; letter-spacing:.035em; }}
+    .phase-summary-badge {{ flex:0 0 auto; padding:3px 8px; border-radius:99px; font-size:.66rem; font-weight:700; }}
+    .phase-summary-badge.amber {{ background:#fff4dd; color:#b45309; }} .phase-summary-badge.good {{ background:#e8faf3; color:#047857; }}
+    .phase-summary-sub {{ margin:3px 0 7px; color:#64748b; font-size:.7rem; }}
+    .phase-summary-feature {{ padding:8px 10px; border-radius:9px; background:#f3f6ff; margin-bottom:6px; }}
+    .phase-summary-feature strong {{ display:block; font-size:.79rem; color:#172033; line-height:1.35; }}
+    .phase-summary-feature span {{ display:block; margin-top:2px; font-size:.7rem; line-height:1.45; color:#526078; }}
+    .phase-summary-diagnosis {{ border:1px solid #e7edf7; border-radius:9px; padding:8px 10px; margin:0 0 5px; background:#fff; }}
+    .phase-summary-diagnosis b {{ display:block; color:#172033; font-size:.73rem; margin-bottom:2px; }}
+    .phase-summary-diagnosis span {{ display:block; color:#526078; font-size:.69rem; line-height:1.45; }}
+    .phase-summary-item {{ display:grid; grid-template-columns:20px minmax(0,1fr); gap:6px; padding:7px 0; border-top:1px solid #edf1f7; }}
+    .phase-summary-icon {{ font-size:.9rem; line-height:1.35; }}
+    .phase-summary-item-title {{ color:#172033; font-size:.74rem; font-weight:700; margin-bottom:2px; }}
+    .phase-summary-item-copy {{ color:#526078; font-size:.69rem; line-height:1.45; }}
+    .phase-summary-impact {{ margin-top:auto; padding:8px 10px; border-radius:9px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:.69rem; line-height:1.45; }}
+    .phase-summary-impact b {{ display:block; margin-bottom:2px; color:#9a3412; font-size:.72rem; }}
+    @keyframes phaseSummaryEnter {{ from {{ opacity:0; transform:translateY(6px); }} to {{ opacity:1; transform:translateY(0); }} }}
+    @media (max-width:760px) {{ .phase-summary-wrap {{ grid-template-columns:1fr; }} }}
+    @media (prefers-reduced-motion:reduce) {{ .phase-summary-card {{ animation:none; transition:none; }} .phase-summary-card:hover {{ transform:none; }} }}
+    </style>
+    <div class="phase-summary-wrap">
+      <section class="phase-summary-card" tabindex="0" aria-label="Actions to take for phase imbalance">
+        <div class="phase-summary-head"><div class="phase-summary-title">✅ ACTIONS TO TAKE</div><span class="phase-summary-badge good">Recommended plan</span></div>
+        <div class="phase-summary-sub">What to do based on the {esc(badge_period)} phase forecast</div>
+        <div class="phase-summary-feature"><strong>Forecasted imbalance: {esc(forecast_line)}</strong><span>Limit: {ALARM_LIMIT_PCT:.0f}% · {n_alarm_hours} of {n_hours} forecast hours flagged.</span></div>
+        <div class="phase-summary-diagnosis"><b>Likely driver from measured current/voltage readings</b><span>{esc(driver_title)}. {esc(driver_copy)}</span></div>
+        {render_rows(actions, ("🔎", "⚖️", "✅"))}
+      </section>
+      <section class="phase-summary-card" tabindex="0" aria-label="Consequences if phase imbalance is not corrected">
+        <div class="phase-summary-head"><div class="phase-summary-title">⚠️ IF YOU DON'T ACT</div><span class="phase-summary-badge {badge_class}">{esc(badge_text)}</span></div>
+        <div class="phase-summary-sub">What may happen if the phase imbalance continues</div>
+        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>Forecast indicates the phases are not sharing the load evenly.</span></div>
+        {render_rows(impacts, ("🔥", "⚡", "🚨"))}
+        <div class="phase-summary-impact"><b>Potential overall impact</b>Higher conductor losses, equipment heating and avoidable protection trips if the imbalance is sustained.</div>
+      </section>
+    </div>'''
 
 # ------------------------------------------------------------------ FORECAST HELPERS (cached wrappers around gridsense_forecast.py)
 def hours_to_text(hours):
@@ -1091,7 +1197,11 @@ with tab_phase:
     # ---- 3-phase load analysis card (rule-based, short)
     # best time to move loads = quietest 3-hour window
     quiet_busy_window = gr.find_quietest_and_busiest_windows(forecast_phase_kw.sum(axis=1).to_numpy(), forecast_phase_kw.index) if n_alarm_hours else None
-    st.markdown(phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet_busy_window, phase_low_kw, phase_high_kw), unsafe_allow_html=True)
+    phase_summary_html = phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet_busy_window, phase_low_kw, phase_high_kw)
+    try:
+        st.html(phase_summary_html)
+    except AttributeError:
+        st.markdown(phase_summary_html, unsafe_allow_html=True)
 
     # ---- the evidence behind the advice
         # ---- A) which parameter moves each phase: load, current, voltage per colour + the imbalance each one creates
