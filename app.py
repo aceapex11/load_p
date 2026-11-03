@@ -2,7 +2,7 @@
 Data            : device_16_prediction_dataset.csv - one row per minute with V1-V3, I1-I3, PF, RKW, YKW, BKW
                   (an optional Timestamps / Timestamp / Timestamp_Index column is used when present; you can also upload the file in the app)
 Overview        : load timeline (kW, phases, current, voltage, imbalance) and where the time went (uptime)
-Load forecast   : hourly total kW, Exponential Smoothing or Auto ETS (exponential_smoothing_load_forecasting notebook), tested on the last 168 hours, power advice
+Load forecast   : hourly total kW, Exponential Smoothing  tested on the last 168 hours, power advice
 Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast (three_phase_imbalance_detection_forecasting notebook), imbalance alarms,
                   and a rule-based action plan: what is out of phase, why, what to do now, when to do what, what can happen, how to bring it in phase, future balance
 Files next to app.py: gridsense_forecast.py (the notebooks' models) and gridsense_rules.py (the rule-based advisor)
@@ -94,7 +94,7 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 /* cards */
 [data-testid="stVerticalBlockBorderWrapper"], [class*="st-key-panel"] { background:#FFFFFF !important; border:1px solid #E6EAF2 !important; border-radius:18px !important; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 28px -16px rgba(15,23,42,.12); }
 .ph { display:flex; align-items:baseline; gap:.6rem; margin:.1rem 0 .2rem; } .ph b { font-size:1rem; font-weight:700; color:#0F172A !important; letter-spacing:-.2px; } .ph span { font-size:.8rem; color:#64748B !important; }
-.kpi { position:relative; overflow:hidden; background:#FFFFFF; border:1px solid #E6EAF2; border-radius:18px; padding:1rem 1.1rem .9rem; height:100%; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 28px -16px rgba(15,23,42,.12); }
+f"above limit in {dg['pct_above']:.0f} % of minutes · hourly {hr_mean:.1f} %"
 .kpi .top { display:flex; align-items:center; gap:.55rem; } .kpi .ic { width:30px; height:30px; border-radius:9px; display:grid; place-items:center; font-size:.95rem; background:#F3F5FB; }
 .kpi .l { color:#64748B !important; font-size:.8rem; font-weight:500; }
 .kpi .v { font-family:'JetBrains Mono',monospace; font-size:1.75rem; font-weight:600; letter-spacing:-1px; margin-top:.55rem; color:#0F172A !important; }
@@ -386,7 +386,7 @@ def power_advice(kind, first, last, peak, long_horizon, ctx=None):
 AVG_BLOCKS_H = {"1 hour": 1, "3 hours": 3, "6 hours": 6, "12 hours": 12, "24 hours": 24}
 LD_LENGTHS = {"24 hours": 24, "3 days": 72, "7 days": 168}
 HIST_H = {"24 hours": 24, "3 days": 72, "7 days": 168, "14 days": 336}
-SEASONS = {"Daily cycle (24 h)": 24, "Weekly cycle (168 h)": 168, "Load notebook value (144 h)": 144}
+SEASONS = {"Daily cycle (24 h)": 24, "Weekly cycle (168 h)": 168, "144 h": 144}
 MAX_STEPS = 168                                                   # every forecast is made 7 days ahead once; the page slices what you ask for
 
 
@@ -422,12 +422,12 @@ def run_holdout(y_real, y_model, model, season, fixed, fit_steps):
     return gf.holdout_total(y_real, y_model, model, season, fixed, fit_steps)
 
 
-@st.cache_data(show_spinner="Training the model on Red, Yellow and Blue (Auto ETS can take a minute or two)…")
+@st.cache_data(show_spinner="Training the model on Red, Yellow and Blue ")
 def run_phases(window, steps, model, season, method=gf.PHASE_METHODS[0]):
     return gf.forecast_phases(window, steps, model, season, None, method)
 
 
-@st.cache_data(show_spinner="Testing the phase forecast on past weeks (Auto ETS can take a few minutes)…")
+@st.cache_data(show_spinner="Testing the phase forecast on past weeks ")
 def run_phase_backtest(load_real, load_model, model, season, fit_steps, n_weeks, method, alarm, sev, min_kw):
     return gf.backtest_phases(load_real, load_model, model, season, fit_steps, 168, n_weeks, lambda P: analyse(P, alarm, min_kw, sev), None, method)
 
@@ -514,18 +514,17 @@ with tab_overview:
         show(style(f, 400, True, top=40).update_layout(legend=dict(orientation="h", y=-0.08, x=0.1), margin=dict(l=10, r=10, t=40, b=60)))
 
 
-# ================================================================== LOAD FORECAST (hourly total kW - Exponential Smoothing / Auto ETS)
+# ================================================================== LOAD FORECAST (hourly total kW - Exponential Smoothing)
 with tab_load:
   if not H_OK: need_more_data()
   else:
-    c = st.columns([1.25, 1, 1, 1.3, 1])
-    L_model = c[0].selectbox("Model", gf.MODELS, key="ld_model", help="Exponential Smoothing = damped-trend Holt-Winters (load notebook). Auto ETS = tries every ETS model and keeps the lowest AICc (slower).")
-    L_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ld_len")
-    L_days = c[2].selectbox("Learn from", [0, 14, 28, 56, 90], index=0, key="ld_days", format_func=lambda x: "All history (as notebook)" if x == 0 else f"last {x} days", help="The notebook learns from ALL hours before the test week. A short window (14-28 days) throws away most of the history and gives a larger error.")
-    L_season = SEASONS[c[3].selectbox("Seasonal cycle", list(SEASONS), index=2, key="ld_season", help="Hourly data: 24 = daily pattern, 168 = weekly pattern. The load notebook has 144 with a comment saying 24.")] if L_model == "Exponential Smoothing" else gf.ETS_SEASON
-    if L_model == "Auto ETS": c[3].caption("Auto ETS uses the daily cycle (24 h).")
-    L_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ld_hist")
-    fixed = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.95) if L_model == "Exponential Smoothing" else None   # the load notebook's values
+    c = st.columns([1, 1, 1.3, 1])
+    L_model = "Exponential Smoothing"
+    L_len = c[0].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ld_len")
+    L_days = c[1].selectbox("Learn from", [0, 14, 28, 56, 90], index=0, key="ld_days", format_func=lambda x: "All history" if x == 0 else f"last {x} days", help="A short window (14-28 days) throws away most of the history and gives a larger error.")
+    L_season = SEASONS[c[2].selectbox("Seasonal cycle", list(SEASONS), index=2, key="ld_season", help="Hourly data: 24 = daily pattern, 168 = weekly pattern.")]
+    L_hist = c[3].selectbox("History shown", list(HIST_H), index=2, key="ld_hist")
+    fixed = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.95)
     fit_steps = len(y_mod) if int(L_days) == 0 else int(L_days) * 24
     L_days_txt = "all available history" if int(L_days) == 0 else f"the last {L_days} days"
     fc_tot, lbl_tot, ok_tot = run_total(y_mod.iloc[-fit_steps:], MAX_STEPS, L_model, L_season, fixed)
@@ -599,20 +598,19 @@ with tab_load:
 with tab_phase:
   if not H_OK: need_more_data()
   else:
-    c = st.columns([1.3, 1, 1, 1.3, 1, 1.4])
-    P_model = c[0].selectbox("Model", gf.MODELS, key="ph_model", help="Exponential Smoothing = damped-trend Holt-Winters. Auto ETS = best ETS model by AICc per phase (slower, can take a minute or two).")
-    P_len = c[1].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
-    P_days = c[2].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
-    P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[3].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")] if P_model == "Exponential Smoothing" else gf.ETS_SEASON
-    P_hist = c[4].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
-    P_method = c[5].selectbox("Forecast method", gf.PHASE_METHODS, key="ph_method", help="Each phase separately = the notebook. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The imbalance % depends only on the shares, so errors in the total no longer leak into it. The test below shows which one does better on your data.")
+    c = st.columns([1, 1, 1.3, 1, 1.5])
+    P_model = "Exponential Smoothing"
+    P_len = c[0].selectbox("Forecast length", list(LD_LENGTHS), index=2, key="ph_len")
+    P_days = c[1].selectbox("Learn from last", [14, 28, 56], index=1, key="ph_days", format_func=lambda x: f"{x} days")
+    P_season = {"Weekly cycle (168 h)": 168, "Daily cycle (24 h)": 24}[c[2].selectbox("Seasonal cycle", ["Weekly cycle (168 h)", "Daily cycle (24 h)"], key="ph_season")]
+    P_hist = c[3].selectbox("History shown", list(HIST_H), index=2, key="ph_hist")
+    P_method = c[4].selectbox("Forecast method", gf.PHASE_METHODS, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The test below shows which one does better on your data.")
     fit_steps = int(P_days) * 24; horizon = LD_LENGTHS[P_len]
     fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season, P_method)
     BT = run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, 4, P_method, ALARM_PCT, SEVERE_PCT, MIN_KW)
     REL = gf.reliability(BT, ALARM_PCT)                                  # None when the history is too short to test
     Pf = pd.DataFrame(fc_arr[:horizon], index=t_fut_all[:horizon], columns=PH3); rep = analyse(Pf.to_numpy())
     if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
-    if P_model == "Auto ETS" or P_method == gf.PHASE_METHODS[1]: st.caption("Models chosen: " + " · ".join(f"{NAMES[i]} {lbls[p]}" for i, p in enumerate(PH3)) + (f" · total {lbls['total']}" if "total" in lbls else ""))
     if REL is None: note("The history is too short to test this forecast on past weeks, so the forecast alarms below are <b>not verified</b>.", "amber")
     else:
         tone_r = {"RELIABLE": "good", "DEGRADED": "amber", "UNRELIABLE": "bad"}.get(REL[0], "amber")
