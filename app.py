@@ -695,34 +695,4 @@ with tab_phase:
             st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
     else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
 
-    with st.expander("Check your own readings"):
-        c = st.columns(4)
-        rr, yy, bb = c[0].number_input("Red kW", 0.0, 5000.0, 170.0, 1.0, key="chk_r"), c[1].number_input("Yellow kW", 0.0, 5000.0, 169.0, 1.0, key="chk_y"), c[2].number_input("Blue kW", 0.0, 5000.0, 160.0, 1.0, key="chk_b")
-        res = analyse([[rr, yy, bb]]).iloc[0]
-        with c[3]:
-            if not res.Loaded: kpi("Result", "No load", f"average below {MIN_KW:g} kW per phase", "", "ℹ️")
-            else: kpi("Imbalance", f"{res.Imbalance_pct:.2f} %", f"{res.Worst_phase} is {abs(res.Worst_dev):.1f} % {'above' if res.Worst_dev > 0 else 'below'} the average · {res.Status}", "good" if res.Status == "OK" else "bad" if res.Status == "SEVERE" else "warn", "🧮")
-
-        st.markdown("**Don't know the kW? Work it out from voltage, current and power factor**")
-        try: dv, di, dpf = [float(x) for x in (tl[VOLT].median().median(), tl[CURR].median().median(), tl["PF"].median())]
-        except Exception: dv, di, dpf = 230.0, 100.0, 0.9
-        dpf = min(max(dpf, 0.05), 1.0) if np.isfinite(dpf) else 0.9
-        mode = st.radio("How was the voltage measured?", ["Per phase (phase-to-neutral volts, one current per phase)", "Whole three-phase load (line-to-line volts, one average current)"], key="calc_mode", horizontal=True)
-        q = st.columns(4)
-        pf_in = q[3].number_input("Power factor", 0.05, 1.0, round(dpf, 2), 0.01, key="calc_pf", help="Start value is the median power factor of your file.")
-        if mode.startswith("Per phase"):
-            vv = [q[i].number_input(f"{n} voltage (V)", 0.0, 1000.0, round(dv, 1), 1.0, key=f"calc_v{i}") for i, n in enumerate(NAMES)]
-            q2 = st.columns(4); ii = [q2[i].number_input(f"{n} current (A)", 0.0, 10000.0, round(di, 1), 1.0, key=f"calc_i{i}") for i, n in enumerate(NAMES)]
-            kw_calc = [v * a * pf_in / 1000 for v, a in zip(vv, ii)]; tot_calc = sum(kw_calc)
-        else:
-            vl = q[0].number_input("Line-to-line voltage (V)", 0.0, 2000.0, round(dv * 3 ** .5, 1), 1.0, key="calc_vl"); il = q[1].number_input("Current (A)", 0.0, 10000.0, round(di, 1), 1.0, key="calc_il")
-            tot_calc = 3 ** .5 * vl * il * pf_in / 1000; kw_calc = [tot_calc / 3] * 3
-        o = st.columns(4)
-        for i, n in enumerate(NAMES): o[i].metric(f"{n} kW", f"{kw_calc[i]:,.2f}")
-        o[3].metric("Total kW", f"{tot_calc:,.2f}")
-        st.caption("kW = voltage × current × power factor ÷ 1000 per phase (three-phase total: √3 × line voltage × current × power factor ÷ 1000). With one average current the three phases come out equal, so the imbalance is 0 %.")
-        if mode.startswith("Per phase"):
-            rc = analyse([kw_calc]).iloc[0]
-            if rc.Loaded: st.caption(f"Imbalance from these three results: **{rc.Imbalance_pct:.2f} %** · {rc.Worst_phase} is {abs(rc.Worst_dev):.1f} % {'above' if rc.Worst_dev > 0 else 'below'} the average · {rc.Status}")
-
     note(f"<b>Alarm rule:</b> imbalance % = largest deviation of a phase from the average of the three ÷ the average × 100 (170 / 169 / 160 kW → 3.81 %). Alarm above {ALARM_PCT:g} %, severe above {SEVERE_PCT:g} %.")
