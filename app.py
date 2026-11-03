@@ -375,11 +375,11 @@ def _status_badge_html(text, tone):
 
 
 def suggestion_card_html(title, badge, tone, items, headline="", numbered=True, border=None):
-    """One white card: TITLE + badge, optional bold headline, then heading + one short sentence per item (single line of HTML - Streamlit markdown must not see blank lines)."""
+    """ONE white card: TITLE + badge, bold headline, then numbered items (bold heading, sentence below, thin line between).  Single line of HTML - Streamlit markdown must not see blank lines."""
     tone_colors = CARD_TONE_COLORS[border or tone]
-    rows = "".join(f'<p style="margin:0 0 .7rem;color:#334155;font-size:.88rem;line-height:1.55"><b style="color:{TEXT_COLOR}">{h}.</b> {t}</p>' for h, t in items)
-    head = f'<div style="font-weight:600;color:{TEXT_COLOR};font-size:.9rem;margin:10px 0 8px">{headline}</div>' if headline else '<div style="height:10px"></div>'
-    return f'<div style="border:1px solid {tone_colors[0]};border-radius:14px;padding:14px 18px;background:#fff;margin-bottom:.6rem"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-weight:700;color:{TEXT_COLOR};font-size:.8rem;letter-spacing:.03em">{title}</span>{_status_badge_html(badge, tone)}</div>{head}{rows}</div>'
+    rows = "".join(f'<div style="padding:.7rem 0;border-top:1px solid #EEF0F5"><div style="font-weight:600;color:{TEXT_COLOR};font-size:.92rem;margin-bottom:.2rem">{f"{i}. " if numbered else ""}{h}</div><div style="color:#334155;font-size:.88rem;line-height:1.55">{t}</div></div>' for i, (h, t) in enumerate(items, 1))
+    head = f'<div style="font-weight:700;color:{TEXT_COLOR};font-size:.95rem;margin:12px 0 8px">{headline}</div>' if headline else '<div style="height:10px"></div>'
+    return f'<div style="border:1px solid {tone_colors[0]};border-radius:14px;padding:14px 20px 6px;background:#fff;margin-bottom:.8rem"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-weight:700;color:{TEXT_COLOR};font-size:.8rem;letter-spacing:.03em">{title}</span>{_status_badge_html(badge, tone)}</div>{head}{rows}</div>'
 
 
 def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh):
@@ -407,7 +407,7 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
                  ("Missed energy storage" if HAS_BATTERY else "Missed load shifting", f"Battery not charged around {format_time(lowest_time)} may be empty at the peak." if HAS_BATTERY else f"Flexible work left in the peak wastes the {peak - lowest_kw:,.1f} kW gap to the lowest hour."),
                  ("Increased operational risk", f"Peak exceeds available power by {capacity_gap_kw:,.1f} kW; backup or reduced operation may be needed." if capacity_gap_kw else "If demand exceeds supply, production may stop."),
                  ("Higher energy management cost", f"Uncoordinated demand may add about {format_money(extra_cost)}." if extra_cost > 0 else "Unmanaged peaks and grid imports raise avoidable cost.")]
-        actions = [("Optimize internal generation", f"Plan own generation for {energy_kwh:,.0f} kWh and arrange grid or backup for the rest."),
+        actions = [("Optimize internal generation", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {hours_to_text(n_hours)}, {change_text}. Plan own generation for it and arrange grid or backup for the rest."),
                 ("Prepare for peak demand", f"Keep {peak:,.1f} kW capacity ready around {format_time(peak_time)}" + (f" (shortfall {shortfall_kw:,.1f} kW)." if shortfall_kw else f" (spare {spare_kw:,.1f} kW)." if spare_kw else ".")),
                 ("Optimize energy storage" if HAS_BATTERY else "Use the low-load hours", f"Charge the battery around {format_time(lowest_time)}; discharge at the peak." if HAS_BATTERY else f"Run flexible work around {format_time(lowest_time)} ({lowest_kw:,.1f} kW), not at the peak."),
                 ("Shift flexible loads", f"Stagger motor starts away from {format_time(peak_time)}; moving {SHIFTABLE_LOAD_PCT:g} % cuts the peak by about {peak_cut_kw:,.1f} kW."),
@@ -420,7 +420,7 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
                  ("Low-load inefficiency", f"Lowest hour {lowest_kw:,.1f} kW around {format_time(lowest_time)}; motors and generators are least efficient at low load."),
                  ("Possible production slowdown", "Check the drop is planned, not a stoppage, fault or data problem."),
                  ("Fixed-cost pressure", f"Contract demand {SANCTIONED_DEMAND_KW:g} kW is billed while the peak uses {demand_use_pct:.0f} %." if SANCTIONED_DEMAND_KW > 0 else "Fixed and demand charges stay the same, so cost per kWh rises.")]
-        actions = [("Right-size generation", f"Run fewer units or a lower setpoint to match {energy_kwh:,.0f} kWh."),
+        actions = [("Right-size generation", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {hours_to_text(n_hours)}, {change_text}. Run fewer units or a lower setpoint to match it."),
                 ("Use the surplus", "Charge the battery when generation exceeds demand." if HAS_BATTERY else f"Move flexible work into the low hours around {format_time(lowest_time)}."),
                 ("Consolidate loads", f"Run machines together; switch off idle equipment around {format_time(lowest_time)}."),
                 ("Review contract demand", f"Peak is {demand_use_pct:.0f} % of contract demand; ask if it can be lowered." if SANCTIONED_DEMAND_KW > 0 and demand_use_pct < 80 else "If the peak stays well below contract demand, a lower contract may cut fixed charges."),
@@ -429,7 +429,7 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
         if_ignored_text = f"Up to {unused_kwh:,.0f} kWh" + (f" (about {format_money(unused_kwh * TARIFF_PER_KWH)})" if TARIFF_PER_KWH > 0 else "") + " wasted, fixed charges on unused capacity, and a hidden fault may go unnoticed."
     else:
         risks = [("Demand is steady", f"{energy_kwh:,.0f} kWh needed, {change_text or 'no major change'}."), ("Peak to watch", f"{peak:,.1f} kW around {format_time(peak_time)}" + (f" ({demand_use_pct:.0f} % of sanctioned demand)." if SANCTIONED_DEMAND_KW > 0 else ".")), ("Low-load hours", f"Lowest {lowest_kw:,.1f} kW around {format_time(lowest_time)}.")]
-        actions = [("Keep the current plan", "Generation and storage settings can stay as they are."), ("Prepare for the peak", f"Keep {peak:,.1f} kW ready around {format_time(peak_time)}; stagger motor starts."), ("Keep monitoring", "The forecast updates as new readings arrive.")]
+        actions = [("Keep the current plan", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {hours_to_text(n_hours)}, {change_text or 'no major change'}. Generation and storage settings can stay as they are."), ("Prepare for the peak", f"Keep {peak:,.1f} kW ready around {format_time(peak_time)}; stagger motor starts."), ("Keep monitoring", "The forecast updates as new readings arrive.")]
         if_managed_text, if_ignored_text = "Staggered motor starts keep the peak low and the bill steady.", "A coincident start-up can still create a costly peak."
     # a drop of more than 10 % needs attention
     big_drop = trend_direction == "down" and np.isfinite(energy_change_pct) and energy_change_pct < -10
@@ -802,14 +802,9 @@ with tab_load:
             fig.update_layout(hovermode="closest", yaxis_title=f"average kW per {block_choice}", title=f"Average power every {block_choice}  ·  label = change vs previous block"); fig.update_xaxes(type="category")
             show_figure(style_figure(fig, 300, False, top=60))
 
+    # ONE suggestions block, built only from the forecast numbers above (rule-based, no AI)
     load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
-    with panel("Load forecast · risks and recommendations", "", key="ld_sugg"):
-        advice_columns = st.columns(2)
-        advice_columns[0].markdown(suggestion_card_html("POTENTIAL RISK &amp; COST IMPACT", load_advice["badge"], load_advice["tone"], load_advice["risks"]), unsafe_allow_html=True)
-        advice_columns[1].markdown(suggestion_card_html("ENERGY MANAGEMENT RECOMMENDATIONS", f"{hours_to_text(horizon_hours)} forecast", "info", load_advice["actions"], headline=load_advice["headline"]), unsafe_allow_html=True)
-        managed_columns = st.columns(2)
-        with managed_columns[0]: note_box(f"<b>If managed:</b> {load_advice['managed']}", "good")
-        with managed_columns[1]: note_box(f"<b>If not managed:</b> {load_advice['ignored']}", load_advice["tone"] if load_advice["tone"] != "good" else "amber")
+    st.markdown(suggestion_card_html("ENERGY MANAGEMENT RECOMMENDATIONS", f"{hours_to_text(horizon_hours)} forecast", load_advice["tone"], load_advice["actions"], headline=load_advice["headline"]), unsafe_allow_html=True)
 
     # 7-day test (cached): its errors give the width of the forecast interval, and the Model check below reuses it
     holdout_result = run_total_load_holdout(total_measured_hourly, total_filled_hourly, load_model_name, load_season_hours, fixed_smoothing, max_training_hours)
@@ -850,7 +845,7 @@ with tab_phase:
     control_columns = st.columns([1, 1.3, 1, 1.5])
     phase_model_name = "Exponential Smoothing"
     phase_length_choice = control_columns[0].selectbox("Forecast length", list(FORECAST_LENGTH_HOURS), index=6, key="ph_len")
-    phase_training_days = 14                                # fixed learning window (the dropdown was removed)
+    phase_training_days = 14                                  # fixed learning window (the dropdown was removed)
     phase_season_hours = SEASON_LENGTH_HOURS[control_columns[1].selectbox("Seasonal cycle", list(SEASON_LENGTH_HOURS), index=6, key="ph_season")]
     phase_history_choice = control_columns[2].selectbox("History shown", list(HISTORY_SHOWN_HOURS), index=2, key="ph_hist")
     phase_method = control_columns[3].selectbox("Forecast method", gf.PHASE_FORECAST_METHODS, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The test below shows which one does better on your data.")
