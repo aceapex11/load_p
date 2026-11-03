@@ -879,19 +879,15 @@ with tab_phase:
   else:
     control_columns = st.columns([1, 1.3, 1, 1.5])
     phase_model_name = "Exponential Smoothing"
-    phase_smoothing = dict(smoothing_level=0.4, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.8)   # tuned on the calm days after the Nov 5 jump (24 h cycle, 14-day window)
     phase_length_choice = control_columns[0].selectbox("Forecast length", list(FORECAST_LENGTH_HOURS), index=6, key="ph_len")
-    phase_training_days = 14
-    phase_season_hours = SEASON_LENGTH_HOURS[control_columns[1].selectbox("Seasonal cycle", list(SEASON_LENGTH_HOURS), index=0, key="ph_season")]
+    phase_training_days = 14                                  # fixed learning window (the dropdown was removed)
+    phase_season_hours = SEASON_LENGTH_HOURS[control_columns[1].selectbox("Seasonal cycle", list(SEASON_LENGTH_HOURS), index=6, key="ph_season")]
     phase_history_choice = control_columns[2].selectbox("History shown", list(HISTORY_SHOWN_HOURS), index=2, key="ph_hist")
-    phase_method = control_columns[3].selectbox("Forecast method", gf.PHASE_FORECAST_METHODS, index=0, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B.")
+    phase_method = control_columns[3].selectbox("Forecast method", gf.PHASE_FORECAST_METHODS, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The test below shows which one does better on your data.")
     max_training_hours = int(phase_training_days) * 24; horizon_hours = FORECAST_LENGTH_HOURS[phase_length_choice]
-
-    @st.cache_data(show_spinner="Training the model on Red, Yellow and Blue ")
-    def forecast_phases_tuned(history_window, steps_ahead, model_name, season_length, method, fixed):
-        return gf.forecast_three_phases(history_window, steps_ahead, model_name, season_length, fixed, method)
     # forecast Red, Yellow and Blue 7 days ahead
-        phase_forecast_array, phase_labels_by_series, phase_fit_ok = forecast_phases_tuned(phase_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_model_name, phase_season_hours, phase_method, phase_smoothing)    forecast_phase_kw = pd.DataFrame(phase_forecast_array[:horizon_hours], index=future_hours[:horizon_hours], columns=PHASE_CODES); forecast_table = analyse_balance(forecast_phase_kw.to_numpy())
+    phase_forecast_array, phase_labels_by_series, phase_fit_ok = forecast_phases_cached(phase_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_model_name, phase_season_hours, phase_method)
+    forecast_phase_kw = pd.DataFrame(phase_forecast_array[:horizon_hours], index=future_hours[:horizon_hours], columns=PHASE_CODES); forecast_table = analyse_balance(forecast_phase_kw.to_numpy())
     if not phase_fit_ok: note_box(f"A model fit failed for {', '.join(p for p in PHASE_CODES if phase_labels_by_series[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
 
     # measured imbalance, cause and move plan from the one-minute data
@@ -992,7 +988,7 @@ with tab_phase:
 
       # ---- B) actual vs predicted on test data: last 7 days hidden, model learns only from the hours before them
     with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from the 28 days before them, then its forecast is compared with what really happened", key="ph_bt"):
-        TEST_HOURS = 72                                                              # all test data = the last 168 hours (7 days)
+        TEST_HOURS = 168                                                              # all test data = the last 168 hours (7 days)
 
         def phase_error_scores(actual, predicted):
             """MAE (kW), MAPE (%), SMAPE (%) on the hours where both values exist."""
@@ -1008,7 +1004,7 @@ with tab_phase:
         else:
             test_index = phase_filled_hourly.index[-TEST_HOURS:]
             training_hours = phase_filled_hourly.iloc[:-TEST_HOURS].iloc[-max_training_hours:]            # only hours BEFORE the test period
-            test_forecast_array, _, _ = forecast_phases_tuned(training_hours, TEST_HOURS, phase_model_name, phase_season_hours, phase_method, phase_smoothing)
+            test_forecast_array, _, _ = forecast_phases_cached(training_hours, TEST_HOURS, phase_model_name, phase_season_hours, phase_method)
             predicted_kw = pd.DataFrame(test_forecast_array[:TEST_HOURS], index=test_index, columns=PHASE_CODES)
             actual_kw_drawn = phase_filled_hourly.reindex(test_index)                                       # drawn (missing hours filled)
             actual_kw_real = phase_measured_hourly.reindex(test_index)                                      # scored (real hours only)
