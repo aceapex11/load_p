@@ -814,7 +814,7 @@ with tab_load:
         peak_hour_max_kw = float(forecast_series[forecast_series.index.hour == peak_hour].max())
         with energy_kpi_columns[2]: kpi_card("Most power used · day", f"{busiest_day:%a %d %b}", f"{day_summary.loc[busiest_day, 'sum']:,.0f} kWh · average {day_summary.loc[busiest_day, 'mean']:,.1f} kW", "", "📅")
         with energy_kpi_columns[3]: kpi_card("Least power used · day", f"{quietest_day:%a %d %b}", f"{day_summary.loc[quietest_day, 'sum']:,.0f} kWh · average {day_summary.loc[quietest_day, 'mean']:,.1f} kW", "info", "🌙")
-        with energy_kpi_columns[4]: kpi_card("Peak hour · average", f"{peak_hour:02d}:00", f"{peak_hour:02d}:00–{(peak_hour + 1) % 24:02d}:00 · {hour_of_day_avg[peak_hour]:,.1f} kW on average · highest {peak_hour_max_kw:,.1f} kW", "", "⏰")
+        with energy_kpi_columns[4]: kpi_card("Peak hour · average", f"{peak_hour:02d}:00", f"{peak_hour:02d}:00–{(peak_hour + 1) % 24:02d}:00 · {hour_of_day_avg[peak_hour]:,.1f} kW on average · overall peak {forecast_peak_kw:,.1f} kW at {forecast_times[int(np.argmax(forecast_values))]:%a %H:%M}", "", "⏰")
         st.write("")
         valid_block_names = [n for n, h in AVERAGE_BLOCK_HOURS.items() if h <= horizon_hours]
         block_select_column, _ = st.columns([1.2, 3])
