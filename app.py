@@ -463,7 +463,7 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
     return f'''<style>
     html, body {{ margin:0 !important; padding:0 !important; background:transparent !important; overflow:hidden; }}
     * {{ box-sizing:border-box; }}
-    .load-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:2px 0 3px; font-family:Inter,Arial,sans-serif; align-items:stretch; }}
+    .load-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:0; font-family:Inter,Arial,sans-serif; align-items:start; }}
     .load-summary-card {{ position:relative; min-width:0; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%); border:1px solid #E2E8F0; border-radius:14px; padding:11px 14px 8px 15px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:loadSummaryEnter .35s ease both; }}
     .load-summary-card::before {{ content:""; position:absolute; inset:0 auto 0 0; width:3px; border-radius:14px 0 0 14px; background:#93C5FD; opacity:.95; transition:width .2s ease; }}
     .load-summary-card:hover,.load-summary-card:focus-within {{ transform:translateY(-3px); border-color:#93C5FD; box-shadow:0 10px 22px -14px rgba(37,99,235,.48),0 3px 8px rgba(15,23,42,.05); }}
@@ -952,19 +952,22 @@ with tab_load:
     load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)                     # only used for the badge and the border colour
     # Render this HTML summary in an isolated iframe so Streamlit never displays
     # the markup as literal code; the card CSS and hover animation remain active.
-    st.components.v1.html(
-        forecast_advice_card_html(
-            forecast_values,
-            forecast_times,
-            previous_energy_kwh,
-            horizon_hours,
-            load_advice["badge"],
-            load_advice["tone"],
-            advice=load_advice,
-        ),
-        height=365,
-        scrolling=False,
+    summary_html = forecast_advice_card_html(
+        forecast_values,
+        forecast_times,
+        previous_energy_kwh,
+        horizon_hours,
+        load_advice["badge"],
+        load_advice["tone"],
+        advice=load_advice,
     )
+    # st.html renders the summary at its natural content height (no fixed iframe
+    # height), removing the unused space before the forecast chart. The fallback
+    # keeps compatibility with older Streamlit versions.
+    if hasattr(st, "html"):
+        st.html(summary_html)
+    else:
+        st.components.v1.html(summary_html, height=310, scrolling=False)
 
     with panel("Forecast ahead", key="ld_next"):
         actual_history = total_measured_hourly.iloc[-HISTORY_SHOWN_HOURS[load_history_choice]:]; fig = go.Figure(); forecast_x = [last_data_time] + list(forecast_times)
