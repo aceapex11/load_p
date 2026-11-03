@@ -718,4 +718,3 @@ with tab_phase:
         with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
             st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
     else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
-      z
