@@ -936,23 +936,42 @@ with tab_phase:
                 st.dataframe(trend_tables[1], width="stretch")
             note_box("<ul>" + "".join(f"<li>{t_}</li>" for t_ in explain_imbalance_change(phase_params_window)) + "</ul>")
 
-      # ---- B) actual vs predicted on past weeks (follows the Forecast length / Seasonal cycle / Forecast method chosen at the top)
-    with panel("Model check · actual vs predicted on past weeks", "each week is hidden, forecast from the hours before it, then compared with what really happened", key="ph_bt"):
-        weeks_tested = st.selectbox("Weeks tested", [1, 2, 3, 4], index=1, key="bt_weeks")
-        # hide each past week, forecast it, compare with what happened
-        backtest_result = backtest_phases_cached(phase_measured_hourly, phase_filled_hourly, phase_model_name, phase_season_hours, max_training_hours, weeks_tested, phase_method, ALARM_LIMIT_PCT, MIN_PHASE_KW)
-        if backtest_result is None: st.caption("Not enough history: the test needs the 28-day learning window plus the weeks tested. Lower either one.")
+      # ---- B) actual vs predicted on test data: last 7 days hidden, model learns only from the hours before them
+    with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from the 28 days before them, then its forecast is compared with what really happened", key="ph_bt"):
+        TEST_HOURS = 168                                                              # all test data = the last 168 hours (7 days)
+
+        def phase_error_scores(actual, predicted):
+            """MAE (kW), MAPE (%), SMAPE (%) on the hours where both values exist."""
+            a, f = np.asarray(actual, float), np.asarray(predicted, float); ok = np.isfinite(a) & np.isfinite(f); a, f = a[ok], f[ok]
+            if len(a) == 0: return dict(MAE=np.nan, MAPE=np.nan, SMAPE=np.nan)
+            err = np.abs(f - a); nonzero = np.abs(a) > 1e-9; den = np.abs(a) + np.abs(f)
+            return dict(MAE=float(err.mean()),
+                        MAPE=float((err[nonzero] / np.abs(a[nonzero])).mean() * 100) if nonzero.any() else np.nan,
+                        SMAPE=float(np.mean(np.where(den > 1e-9, 2 * err / np.where(den > 1e-9, den, 1), 0)) * 100))
+
+        if len(phase_filled_hourly) < TEST_HOURS + 2 * phase_season_hours:
+            st.caption("Not enough history for a 7-day test with this seasonal cycle. Choose a shorter seasonal cycle.")
         else:
-            actual_phase_kw, forecast_phase_kw_test = backtest_result["actual"], backtest_result["pred"]; actual_phase_kw = actual_phase_kw.fillna(phase_filled_hourly.reindex(actual_phase_kw.index))        # missing hours are drawn with the filled values; the error below uses real hours only
-            actual_balance_table, forecast_balance_table = analyse_balance(actual_phase_kw.to_numpy()), analyse_balance(forecast_phase_kw_test.to_numpy()); actual_balance_table.index = actual_phase_kw.index; forecast_balance_table.index = forecast_phase_kw_test.index
+            test_index = phase_filled_hourly.index[-TEST_HOURS:]
+            training_hours = phase_filled_hourly.iloc[:-TEST_HOURS].iloc[-max_training_hours:]            # only hours BEFORE the test period
+            test_forecast_array, _, _ = forecast_phases_cached(training_hours, TEST_HOURS, phase_model_name, phase_season_hours, phase_method)
+            predicted_kw = pd.DataFrame(test_forecast_array[:TEST_HOURS], index=test_index, columns=PHASE_CODES)
+            actual_kw_drawn = phase_filled_hourly.reindex(test_index)                                       # drawn (missing hours filled)
+            actual_kw_real = phase_measured_hourly.reindex(test_index)                                      # scored (real hours only)
+            actual_balance_table, predicted_balance_table = analyse_balance(actual_kw_drawn.to_numpy()), analyse_balance(predicted_kw.to_numpy())
+            actual_balance_table.index = test_index; predicted_balance_table.index = test_index
+
             fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n_} phase (kW)" for n_ in PHASE_LABELS] + ["Imbalance % (calculated from the phase kW)"])
             for j, p in enumerate(PHASE_CODES, 1):
-                fig.add_scatter(x=actual_phase_kw.index, y=actual_phase_kw[p], name="Actual", legendgroup="a", showlegend=j == 1, line=dict(color=TEXT_COLOR, width=2), row=j, col=1)
-                fig.add_scatter(x=forecast_phase_kw_test.index, y=forecast_phase_kw_test[p], name="Predicted", legendgroup="p", showlegend=j == 1, line=dict(color=PHASE_COLORS[PHASE_KW_COLS[j - 1]], width=2.2, dash="dash"), row=j, col=1)
-            fig.add_scatter(x=actual_phase_kw.index, y=actual_balance_table.Imbalance_pct.where(actual_balance_table.Loaded), name="Actual", legendgroup="a", showlegend=False, line=dict(color=TEXT_COLOR, width=2), connectgaps=True, row=4, col=1)
-            fig.add_scatter(x=forecast_phase_kw_test.index, y=forecast_balance_table.Imbalance_pct.where(forecast_balance_table.Loaded), name="Predicted", legendgroup="p", showlegend=False, line=dict(color=ACCENT, width=2.2, dash="dash"), connectgaps=True, row=4, col=1)
+                fig.add_scatter(x=test_index, y=actual_kw_drawn[p], name="Actual", legendgroup="a", showlegend=j == 1, line=dict(color=TEXT_COLOR, width=2), row=j, col=1)
+                fig.add_scatter(x=test_index, y=predicted_kw[p], name="Predicted", legendgroup="p", showlegend=j == 1, line=dict(color=PHASE_COLORS[PHASE_KW_COLS[j - 1]], width=2.2, dash="dash"), row=j, col=1)
+            fig.add_scatter(x=test_index, y=actual_balance_table.Imbalance_pct.where(actual_balance_table.Loaded), name="Actual", legendgroup="a", showlegend=False, line=dict(color=TEXT_COLOR, width=2), connectgaps=True, row=4, col=1)
+            fig.add_scatter(x=test_index, y=predicted_balance_table.Imbalance_pct.where(predicted_balance_table.Loaded), name="Predicted", legendgroup="p", showlegend=False, line=dict(color=ACCENT, width=2.2, dash="dash"), connectgaps=True, row=4, col=1)
             fig.add_hline(y=ALARM_LIMIT_PCT, line_dash="dot", line_color=WARN_COLOR, row=4, col=1)
             style_figure(fig, 780, legend_y=1.0, top=110); fig.update_annotations(font=dict(size=13, color=TEXT_COLOR)); show_figure(fig, key="bt_main")
-            movement_ratio = float(np.nanmean([forecast_phase_kw_test[p].std() / actual_phase_kw[p].std() for p in PHASE_CODES if actual_phase_kw[p].std() > 0])); mean_phase_wape = float(backtest_result["per_phase"]["WAPE"].mean())
-            st.caption(f"{backtest_result['imbalance']['weeks']} week(s) · {phase_method} · {phase_season_hours} h cycle · phase kW error {mean_phase_wape:.1f} % (WAPE, real hours only) · the predicted line moves {movement_ratio * 100:.0f} % as much as the actual line"
-                       + (" - FLAT: the model is not learning the pattern; try the other seasonal cycle or a different seasonal cycle." if movement_ratio < 0.5 else "."))
+
+            error_table = pd.DataFrame({name: phase_error_scores(actual_kw_real[p].to_numpy(), predicted_kw[p].to_numpy()) for name, p in zip(PHASE_LABELS, PHASE_CODES)}).T
+            error_table.columns = ["MAE (kW)", "MAPE (%)", "SMAPE (%)"]
+            error_table.loc["Average"] = error_table.mean()
+            st.dataframe(error_table.round(2), width="stretch")
+            st.caption(f"Test: last {TEST_HOURS} hours · {phase_method} · {phase_season_hours} h cycle · errors use real hours only (missing hours are left out)")
