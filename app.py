@@ -410,32 +410,125 @@ def _machine_text():
 
 
 def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, badge, tone):
-    """ONE card with the two reference sections: POTENTIAL RISK & COST IMPACT, then ENERGY MANAGEMENT RECOMMENDATIONS.
-    The wording is fixed (copied from the reference screenshots); only the numbers come from the forecast: energy, change vs the previous period, peak kW and its time."""
-    values = np.asarray(forecast_values, float); energy_kwh = float(values.sum())
-    day_summary = daily_energy_summary(values, forecast_times); peak_day = day_summary["sum"].idxmax(); peak_day_kwh, peak_day_kw = float(day_summary.loc[peak_day, "sum"]), float(day_summary.loc[peak_day, "mean"]); mean_day_kwh = float(day_summary["sum"].mean())     # the PEAK DAY = the day with the most energy
-    peak_day_text = f"{peak_day:%A, %d %b}"
-    peak_day_vs_mean = "" if len(day_summary) < 2 or mean_day_kwh < 1 else f" That is {abs(peak_day_kwh / mean_day_kwh - 1) * 100:.0f}% {'above' if peak_day_kwh >= mean_day_kwh else 'below'} the daily average of {mean_day_kwh:,.0f} kWh."
-    days = horizon_hours // 24 if horizon_hours % 24 == 0 else None
-    period = (f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"); badge_period = (f"{days}-day" if days else f"{horizon_hours}-hour")
-    change_pct = (energy_kwh - previous_energy_kwh) / previous_energy_kwh * 100 if previous_energy_kwh >= 1 else float("nan")
-    change_sentence = "" if not np.isfinite(change_pct) else ", about the same as the previous period" if abs(change_pct) < 0.5 else f", approximately {abs(change_pct):.0f}% {'higher' if change_pct > 0 else 'lower'} than the previous period"
-    machine_text = _machine_text()
-    risks = [("Higher Electricity Procurement Cost", "If internal generation cannot meet the forecasted demand, additional grid electricity or backup generation may be required, potentially increasing operating costs."),
-             ("Increased Peak Demand", f"Forecasted peak usage is on <b>{peak_day_text}</b>: <b>{peak_day_kwh:,.0f} kWh</b>, average {peak_day_kw:,.1f} kW. Without peak-load management, simultaneous machine operations may increase demand beyond available generation capacity."),
-             ("Missed Energy Storage Opportunity", "If battery storage is available but not charged during surplus-generation periods, stored energy may not be available during peak-demand hours."),
-             ("Increased Operational Risk", "If demand exceeds available power supply, the company may need backup supply or operational adjustments to avoid production disruption."),
-             ("Higher Energy Management Cost", "Without demand and generation coordination, the company may miss opportunities to reduce unnecessary generation, grid imports and avoidable operating expenses.")]
-    actions = [("Optimize Internal Power Generation", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {period}{change_sentence}. Align captive power generation schedules with the expected demand to avoid unnecessary generation."),
-               ("Prepare for Peak Demand", f"Peak usage is expected on <b>{peak_day_text}</b>, when the machine uses about <b>{peak_day_kwh:,.0f} kWh</b> (average {peak_day_kw:,.1f} kW).{peak_day_vs_mean} Keep sufficient generation capacity available on that day to handle the expected peak."),
-               ("Optimize Energy Storage", "If battery storage is available, charge during low-demand periods or when internal generation exceeds consumption. Discharge during forecasted peak-demand periods."),
-               ("Shift Flexible Loads", "Stagger large motor start-ups and move non-critical operations away from peak-demand hours to reduce simultaneous power demand."),
-               ("Monitor Power Availability", "Compare forecasted demand with available internal generation. Plan grid support or backup capacity if a supply shortfall is expected.")]
-    risk_part = _blue_title_row_html("POTENTIAL RISK &amp; COST IMPACT", badge) + f'<div style="color:{MUTED_COLOR};font-size:.78rem;margin:.5rem 0 .6rem">Based on {machine_text} {badge_period} demand forecast</div>' + _blue_item_rows_html(risks)
-    action_part = _blue_title_row_html("ENERGY MANAGEMENT RECOMMENDATIONS", f"{badge_period} forecast") + f'<div style="font-weight:700;color:{TEXT_COLOR};font-size:.95rem;margin:.5rem 0 .6rem">Forecasted peak demand: {peak_day_kwh:,.0f} kWh on {peak_day_text} (average {peak_day_kw:,.1f} kW)</div>' + _blue_item_rows_html(actions)
-    # all 10 sections in ONE block, the two parts side by side
-    return _blue_card_html(risk_part, action_part)
+    # Compact summary cards for the Load forecast tab only.
+    values = np.asarray(forecast_values, dtype=float)
+    energy_kwh = float(np.nansum(values))
+    if values.size == 0:
+        return ""
 
+    day_summary = daily_energy_summary(values, forecast_times)
+    peak_day = day_summary["sum"].idxmax()
+    peak_day_kwh = float(day_summary.loc[peak_day, "sum"])
+    peak_day_kw = float(day_summary.loc[peak_day, "mean"])
+    peak_day_text = f"{peak_day:%A, %d %b}"
+
+    days = horizon_hours // 24 if horizon_hours % 24 == 0 else None
+    period = f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"
+    badge_period = f"{days}-day" if days else f"{horizon_hours}-hour"
+
+    change_pct = ((energy_kwh - previous_energy_kwh) / previous_energy_kwh * 100
+                  if previous_energy_kwh >= 1 else float("nan"))
+    if not np.isfinite(change_pct):
+        change_text = "No comparable previous period is available."
+    elif abs(change_pct) < 0.5:
+        change_text = "About the same as the previous period."
+    else:
+        direction = "higher" if change_pct > 0 else "lower"
+        change_text = f"{abs(change_pct):.0f}% {direction} than the previous {period}."
+
+    lowest_index = int(np.nanargmin(values))
+    lowest_kw = float(values[lowest_index])
+    lowest_time = pd.Timestamp(forecast_times[lowest_index]).strftime("%a, %d %b at %H:%M")
+    tone_class = "bad" if tone == "bad" else "good" if tone == "good" else "amber"
+
+    def item(icon, heading, body):
+        return (
+            f'<div class="load-summary-item">'
+            f'<span class="load-summary-emoji">{icon}</span>'
+            f'<div><div class="load-summary-item-title">{heading}</div>'
+            f'<div class="load-summary-item-copy">{body}</div></div></div>'
+        )
+
+    risk_items = "".join([
+        item("⚡", "Supply & cost", "If internal generation cannot cover demand, grid or backup power may be needed and could increase costs."),
+        item("📈", "Busiest forecast day", f"{peak_day_text}: {peak_day_kwh:,.0f} kWh expected (daily average {peak_day_kw:,.1f} kW). Stagger large starts to limit coincident demand."),
+        item("🔋", "Storage opportunity", "If a battery is available, charge during low-demand or surplus-generation hours and save energy for busier periods."),
+    ])
+
+    action_items = "".join([
+        item("🏭", "Plan generation", f"Match captive generation to the forecast {energy_kwh:,.0f} kWh requirement over the next {period}. {change_text}"),
+        item("🕒", "Shift flexible work", f"The lowest forecast load is {lowest_kw:,.1f} kW around {lowest_time}. Consider moving non-critical tasks to this window."),
+        item("🔌", "Check available capacity", f"Compare hourly demand with available generation and backup capacity, especially on {peak_day_text}."),
+    ])
+
+    return f'''<style>
+    .load-summary-wrap {{
+        display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px;
+        margin:.35rem 0 1rem; font-family:Inter, sans-serif;
+    }}
+    .load-summary-card {{
+        position:relative; min-width:0; overflow:hidden; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%);
+        border:1px solid #E2E8F0; border-radius:15px; padding:13px 16px 8px;
+        box-shadow:0 2px 8px rgba(15,23,42,.045);
+        transition:transform .22s ease, box-shadow .22s ease, border-color .22s ease;
+        animation:loadSummaryEnter .42s ease both;
+    }}
+    .load-summary-card::before {{
+        content:""; position:absolute; inset:0 auto 0 0; width:3px; background:#93C5FD;
+        opacity:.9; transition:width .22s ease, opacity .22s ease;
+    }}
+    .load-summary-card:hover, .load-summary-card:focus-within {{
+        transform:translateY(-4px) scale(1.008); border-color:#93C5FD;
+        box-shadow:0 13px 27px -15px rgba(37,99,235,.42),0 4px 10px rgba(15,23,42,.06);
+    }}
+    .load-summary-card:hover::before, .load-summary-card:focus-within::before {{ width:5px; opacity:1; }}
+    .load-summary-card-head {{ display:flex; justify-content:space-between; align-items:center; gap:10px; }}
+    .load-summary-title {{ color:#0F172A; font-size:.78rem; font-weight:800; letter-spacing:.045em; }}
+    .load-summary-badge {{ flex:0 0 auto; padding:3px 9px; border-radius:99px; font-size:.68rem; font-weight:700; }}
+    .load-summary-badge.bad {{ background:#FFE9ED; color:#BE123C; }}
+    .load-summary-badge.amber {{ background:#FFF4DD; color:#B45309; }}
+    .load-summary-badge.good {{ background:#E8FAF3; color:#047857; }}
+    .load-summary-sub {{ margin:4px 0 8px; color:#64748B; font-size:.72rem; }}
+    .load-summary-feature {{ display:flex; align-items:center; gap:9px; padding:8px 10px; margin-bottom:2px;
+        border-radius:10px; background:#F3F6FF; color:#1E293B; }}
+    .load-summary-feature-icon {{ font-size:1.05rem; }}
+    .load-summary-feature strong {{ display:block; font-size:.88rem; color:#1E293B; }}
+    .load-summary-feature small {{ display:block; margin-top:1px; font-size:.7rem; color:#64748B; }}
+    .load-summary-item {{ display:grid; grid-template-columns:22px minmax(0,1fr); gap:7px;
+        padding:8px 0; border-top:1px solid #EEF2F8; }}
+    .load-summary-emoji {{ font-size:.95rem; line-height:1.35; }}
+    .load-summary-item-title {{ color:#172033; font-size:.78rem; font-weight:700; margin-bottom:1px; }}
+    .load-summary-item-copy {{ color:#526078; font-size:.73rem; line-height:1.45; }}
+    @keyframes loadSummaryEnter {{ from {{ opacity:0; transform:translateY(7px); }} to {{ opacity:1; transform:translateY(0); }} }}
+    @media (max-width:760px) {{ .load-summary-wrap {{ grid-template-columns:1fr; }} }}
+    @media (prefers-reduced-motion:reduce) {{ .load-summary-card {{ animation:none; transition:none; }} .load-summary-card:hover {{ transform:none; }} }}
+    </style>
+    <div class="load-summary-wrap">
+      <section class="load-summary-card" tabindex="0" aria-label="Potential risks and cost impact">
+        <div class="load-summary-card-head">
+          <div class="load-summary-title">⚠️ POTENTIAL RISKS TO WATCH</div>
+          <span class="load-summary-badge {tone_class}">{badge}</span>
+        </div>
+        <div class="load-summary-sub">{badge_period} outlook · Machine demand forecast</div>
+        <div class="load-summary-feature">
+          <span class="load-summary-feature-icon">📊</span>
+          <div><strong>{energy_kwh:,.0f} kWh forecast energy</strong><small>{change_text}</small></div>
+        </div>
+        {risk_items}
+      </section>
+      <section class="load-summary-card" tabindex="0" aria-label="Energy management recommendations">
+        <div class="load-summary-card-head">
+          <div class="load-summary-title">💡 WHAT TO DO NEXT</div>
+          <span class="load-summary-badge good">{badge_period} plan</span>
+        </div>
+        <div class="load-summary-sub">Practical actions based on the forecast</div>
+        <div class="load-summary-feature">
+          <span class="load-summary-feature-icon">📅</span>
+          <div><strong>Highest-use day: {peak_day_text}</strong><small>{peak_day_kwh:,.0f} kWh total · {peak_day_kw:,.1f} kW average</small></div>
+        </div>
+        {action_items}
+      </section>
+    </div>'''
 
 def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh):
     """Short rule-based risks + actions for the forecast TOTAL kW.  Direction = forecast energy vs the previous period of the same length (> LOAD_CHG_PCT).
