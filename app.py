@@ -723,6 +723,34 @@ def average_in_blocks(values, first_time, hours):
     return out
 
 
+def average_by_clock_hour(values, times):
+    """Compare each clock-hour (00:00–01:00 ... 23:00–00:00) across all forecast days.
+
+    Each hourly forecast point is one hour long, so its average kW is also the
+    energy for that hour in kWh. The profile averages matching clock-hours,
+    not consecutive blocks within the 7-day series.
+    """
+    series = pd.Series(np.asarray(values, dtype=float), index=pd.DatetimeIndex(times))
+    rows = []
+    for hour in range(24):
+        points = series[series.index.hour == hour].dropna()
+        if points.empty:
+            continue
+        day_details = "<br>".join(
+            f"{stamp:%a %d %b}: {value:,.1f} kWh"
+            for stamp, value in points.items()
+        )
+        rows.append({
+            "Hour": hour,
+            "Window": f"{hour:02d}:00–{(hour + 1) % 24:02d}:00",
+            "Avg kW": float(points.mean()),
+            "Avg kWh/day": float(points.mean()),  # one-hour window: kW × 1 hour
+            "Days": int(points.count()),
+            "Daily detail": day_details,
+        })
+    return pd.DataFrame(rows)
+
+
 def forecast_interval_sigma(holdout_result, filled_hours, steps=MAX_FORECAST_HOURS):
     """Typical forecast error (kW) for every hour ahead, taken from the 7-day test: RMSE per day ahead, smoothed between the days and never shrinking.
     Without a test result: week-on-week change of the hourly load is used instead."""
@@ -1026,33 +1054,58 @@ with tab_load:
         busiest_vs_mean_pct = (day_summary.loc[busiest_day, "sum"] / mean_day_kwh - 1) * 100 if mean_day_kwh >= 1 else float("nan")
         with energy_kpi_columns[2]: kpi_card("Most power used · day", f"{busiest_day:%a %d %b}", f"{day_summary.loc[busiest_day, 'sum']:,.0f} kWh · average {day_summary.loc[busiest_day, 'mean']:,.1f} kW", "", "📅")
         with energy_kpi_columns[3]: kpi_card("Least power used · day", f"{quietest_day:%a %d %b}", f"{day_summary.loc[quietest_day, 'sum']:,.0f} kWh · average {day_summary.loc[quietest_day, 'mean']:,.1f} kW", "info", "🌙")
-        # AVERAGE 8 H (a shift): energy of every 8-hour block of the forecast; only full 8 h blocks when there are any
-        shift_table = average_in_blocks(forecast_values, forecast_times[0], 8); shift_low_table, shift_high_table = average_in_blocks(interval_low, forecast_times[0], 8), average_in_blocks(interval_high, forecast_times[0], 8)
-        shift_use = (shift_table["Hours"] == 8).to_numpy(); shift_use = shift_use if shift_use.any() else np.ones(len(shift_table), bool)
-        shift_hours = shift_table["Hours"].to_numpy()[shift_use]; shift_kwh = shift_table["Avg kW"].to_numpy()[shift_use] * shift_hours; mean_shift_kwh = float(shift_kwh.mean())
-        shift_low_kwh, shift_high_kwh = float((shift_low_table["Avg kW"].to_numpy()[shift_use] * shift_hours).mean()), float((shift_high_table["Avg kW"].to_numpy()[shift_use] * shift_hours).mean())
-        busiest_shift_vs_mean_pct = (shift_kwh.max() / mean_shift_kwh - 1) * 100 if mean_shift_kwh >= 1 else float("nan")
-        busiest_shift_row = shift_table[shift_use].iloc[int(shift_kwh.argmax())]; busiest_shift_text = f"{busiest_shift_row['Start']:%a %d %b %H:%M} → {busiest_shift_row['End']:%H:%M}"      # the 8 h period with the most energy
-        busiest_shift_html = "" if len(shift_kwh) < 2 else f"<br>busiest 8 h: <b>{busiest_shift_text}</b> · {shift_kwh.max():,.0f} kWh" + ("" if not np.isfinite(busiest_shift_vs_mean_pct) else f" ({busiest_shift_vs_mean_pct:+.0f} % vs this)")
-        with energy_kpi_columns[4]: kpi_card("Average 8 h", f"{mean_shift_kwh:,.0f} kWh", f"average {float(shift_table['Avg kW'].to_numpy()[shift_use].mean()):,.1f} kW" + busiest_shift_html, "", "🕗")
-        st.write("")
-        valid_block_names = [n for n, h in AVERAGE_BLOCK_HOURS.items() if h <= horizon_hours]
-        block_select_column, _ = st.columns([1.2, 3])
-        block_choice = block_select_column.selectbox("Show average power every", valid_block_names, index=valid_block_names.index("8 hours") if "8 hours" in valid_block_names else min(2, len(valid_block_names) - 1), key="ld_avg", help="Splits the forecast into blocks of this length and averages the power in each block.")
-        # split the forecast into blocks and average each block
-        block_table = average_in_blocks(forecast_values, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice]); block_labels = [block_time_label(r) for r in block_table.itertuples()]; has_two_blocks = len(block_table) >= 2
-        trend_direction = classify_trend(float(block_table["Avg kW"].iloc[0]), float(block_table["Avg kW"].iloc[-1])) if has_two_blocks else classify_trend(float(forecast_values[0]), float(forecast_values[-1]))
-        first_block_kw, last_block_kw = (float(block_table["Avg kW"].iloc[0]), float(block_table["Avg kW"].iloc[-1])) if has_two_blocks else (float(forecast_values[0]), float(forecast_values[-1]))
-        # straight-line trend of the block averages, in kW per hour
-        slope = float(np.polyfit(np.arange(len(block_table)) * AVERAGE_BLOCK_HOURS[block_choice], block_table["Avg kW"], 1)[0]) if has_two_blocks else float("nan")
-        block_chart_container = st.container()
-        with block_chart_container:
-            block_low_kw = average_in_blocks(interval_low, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice])["Avg kW"].to_numpy(); block_high_kw = average_in_blocks(interval_high, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice])["Avg kW"].to_numpy(); block_avg_kw = block_table["Avg kW"].to_numpy()
-            fig = go.Figure(go.Bar(x=block_labels, y=block_avg_kw, marker_color=ACCENT, name="Average kW", text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in block_table["Change %"]], textposition="outside", cliponaxis=False,
-                                 customdata=np.c_[block_table["Change kW"].fillna(0), block_table["Hours"], block_low_kw, block_high_kw],
-                                 hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>" + CONFIDENCE_TEXT + " interval %{customdata[2]:,.1f} – %{customdata[3]:,.1f} kW<br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} h<extra></extra>"))
-            fig.update_layout(hovermode="closest", yaxis_title=f"average kW per {block_choice}", title=f"Average power every {block_choice}  ·  hover = {CONFIDENCE_TEXT} interval  ·  label = change vs previous block"); fig.update_xaxes(type="category"); fig.update_yaxes(range=[0, float(np.nanmax(block_avg_kw)) * 1.15])
-            show_figure(style_figure(fig, 300, False, top=60))
+        # Recurring peak hour: compare the SAME clock-hour across all forecast days.
+        hourly_profile = average_by_clock_hour(forecast_values, forecast_times)
+        if hourly_profile.empty:
+            with energy_kpi_columns[4]:
+                kpi_card("Highest recurring hour", "No data", "No hourly forecast values available.", "", "🕒")
+        else:
+            peak_hour_row = hourly_profile.loc[hourly_profile["Avg kW"].idxmax()]
+            peak_hour_window = str(peak_hour_row["Window"])
+            peak_hour_kw = float(peak_hour_row["Avg kW"])
+            peak_hour_days = int(peak_hour_row["Days"])
+            with energy_kpi_columns[4]:
+                kpi_card("Highest recurring hour", f"{peak_hour_kw:,.1f} kW",
+                         f"{peak_hour_window} · {peak_hour_kw:,.1f} kWh/day average · {peak_hour_days} forecast days",
+                         "warn", "⏰")
+
+        st.markdown(
+            '<div class="ph" style="margin:.45rem 0 .2rem"><b>Daily demand by time of day</b></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Each bar compares the same one-hour slot across all forecast days. The highlighted bar is the recurring peak hour.")
+        if not hourly_profile.empty:
+            peak_position = int(hourly_profile["Avg kW"].to_numpy().argmax())
+            bar_colors = [WARN_COLOR if i == peak_position else ACCENT for i in range(len(hourly_profile))]
+            customdata = [
+                [int(row.Days), row["Daily detail"]]
+                for _, row in hourly_profile.iterrows()
+            ]
+            fig = go.Figure(go.Bar(
+                x=hourly_profile["Window"],
+                y=hourly_profile["Avg kW"],
+                marker_color=bar_colors,
+                name="Average hourly demand",
+                text=["PEAK" if i == peak_position else "" for i in range(len(hourly_profile))],
+                textposition="outside",
+                cliponaxis=False,
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>%{x}</b><br>"
+                    "Average power across forecast days: <b>%{y:,.1f} kW</b><br>"
+                    "Average energy for this 1-hour slot: <b>%{y:,.1f} kWh/day</b><br>"
+                    "Forecast days included: %{customdata[0]}<br><br>"
+                    "%{customdata[1]}<extra></extra>"
+                ),
+            ))
+            peak_label = f"{peak_hour_window} ({peak_hour_kw:,.1f} kW average)"
+            fig.update_layout(
+                hovermode="closest",
+                title=f"Recurring hourly demand · highest: {peak_label}",
+            )
+            fig.update_xaxes(type="category", title="Same one-hour slot on each forecast day", tickangle=-45)
+            fig.update_yaxes(title="Average power across forecast days (kW)", rangemode="tozero")
+            show_figure(style_figure(fig, 330, False, top=65))
 
     # ONE suggestions block (fixed wording from the reference images, numbers from the forecast)
     load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)                     # only used for the badge and the border colour
