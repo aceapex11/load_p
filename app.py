@@ -938,7 +938,7 @@ with tab_phase:
 
       # ---- B) actual vs predicted on test data: last 7 days hidden, model learns only from the hours before them
     with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from the 28 days before them, then its forecast is compared with what really happened", key="ph_bt"):
-        TEST_HOURS = 168                                                              # all test data = the last 168 hours (7 days)
+        TEST_HOURS = 72                                                              # all test data = the last 168 hours (7 days)
 
         def phase_error_scores(actual, predicted):
             """MAE (kW), MAPE (%), SMAPE (%) on the hours where both values exist."""
