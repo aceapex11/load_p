@@ -979,7 +979,20 @@ with tab_load:
 
     # ONE suggestions block (fixed wording from the reference images, numbers from the forecast)
     load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)                     # only used for the badge and the border colour
-    st.markdown(forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, load_advice["badge"], load_advice["tone"]), unsafe_allow_html=True)
+    # Render this HTML summary in an isolated iframe so Streamlit never displays
+    # the markup as literal code; the card CSS and hover animation remain active.
+    st.components.v1.html(
+        forecast_advice_card_html(
+            forecast_values,
+            forecast_times,
+            previous_energy_kwh,
+            horizon_hours,
+            load_advice["badge"],
+            load_advice["tone"],
+        ),
+        height=430,
+        scrolling=False,
+    )
 
     with panel("Forecast ahead", key="ld_next"):
         actual_history = total_measured_hourly.iloc[-HISTORY_SHOWN_HOURS[load_history_choice]:]; fig = go.Figure(); forecast_x = [last_data_time] + list(forecast_times)
