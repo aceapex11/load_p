@@ -12,7 +12,7 @@ NOTEBOOK_FIXED = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seaso
 MODELS = ["Exponential Smoothing"]
 
 # ------------------------------------------------------------------ hourly data (same idea as both notebooks)
-def hourly_frame(tl, cols, min_readings=45, max_fill=6):
+def hourly_frame(tl, cols, min_readings=60, max_fill=6):
     """tl = cleaned one-minute rows (column Timestamps + cols).  Hourly mean; an hour with fewer than `min_readings` readings counts as missing.
     Short gaps (<= max_fill hours) are filled by a straight line, the rest repeats the nearest hour - for TRAINING ONLY; accuracy is scored on the real hours.
     Returns dict(real, model, n_gap, n_left) or None when there is no usable hour."""
