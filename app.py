@@ -840,15 +840,20 @@ with tab_phase:
             f.add_scatter(x=hh.index, y=hh[p], name="Measured (hourly)", legendgroup="m", showlegend=j == 1, line=dict(color=INK, width=2), connectgaps=False, row=j, col=1)
             f.add_scatter(x=xt, y=[float(ph_mod[p].iloc[-1])] + list(Pf[p]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines", line=dict(color=col, width=2.6, dash="dash"), row=j, col=1)
         worst_nm, shown = rep.Worst_phase.to_numpy(), False
-        # the forecast is made on phase kW only, so the reason comes from the measured history: which of current / voltage explains the imbalance most
-        if dg: reason = "Current" if dg["share"]["Current"] >= dg["share"]["Voltage"] else "Voltage"
-        else: reason = "Load (not enough data)"
+
+        def reason_txt(name):
+            """Which parameter explains the imbalance, and how far this phase is from the 3-phase average (measured history)."""
+            if not dg: return "Load (not enough data)"
+            param, col = ("Current", "Avg current A") if dg["share"]["Current"] >= dg["share"]["Voltage"] else ("Voltage", "Avg voltage V")
+            v = dg["per"][col]; d = (v[name] / v.mean() - 1) * 100
+            return f"{param} {'▲ up' if d > 0 else '▼ down'} {abs(d):.1f} % vs 3-phase average"
+
         for j, p in enumerate(PH3, 1):
             m_ = rep.Alarm.to_numpy() & (worst_nm == NAMES[j - 1])
             if not m_.any(): continue
             f.add_scatter(x=Pf.index[m_], y=Pf[p].to_numpy()[m_], mode="markers", name="Alarm (forecast)", legendgroup="alarm", showlegend=not shown,
                           marker=dict(symbol="x", size=9, color=WARN),
-                          customdata=np.c_[imb[m_], rep.Direction.to_numpy()[m_], np.full(m_.sum(), reason)],
+                          customdata=np.c_[imb[m_], rep.Direction.to_numpy()[m_], np.full(m_.sum(), reason_txt(NAMES[j - 1]))],
                           hovertemplate="%{y:.1f} kW · imbalance %{customdata[0]:.1f} % (%{customdata[1]})<br>Reason: %{customdata[2]}<extra>Alarm</extra>", row=j, col=1)
             shown = True
         f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
