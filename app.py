@@ -719,7 +719,7 @@ with tab_phase:
 
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
     with panel("Phase load · measured and forecast", f"hourly means · {P_model} · learns from the last {P_days} days · forecast starts after {t_last:%d %b %Y %H:%M} · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
-        hh = ph_mod.iloc[-HIST_H[P_hist]:], xt = [t_last] + list(Pf.index)
+        hh = ph_mod.iloc[-HIST_H[P_hist]:]; xt = [t_last] + list(Pf.index)
         f = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=[f"{n} phase (kW)" for n in NAMES])
         for j, p in enumerate(PH3, 1):
             col = PHASE_COL[KWCOLS[j - 1]]
@@ -784,49 +784,17 @@ with tab_phase:
         st.caption("Every action needs review by a qualified engineer before anything is changed.")
 
     # ---- the evidence behind the advice
-        # ---- A) which parameter moves each phase: load, current, voltage per colour + the imbalance each one creates
-    with panel("Phase parameters · what is rising or falling", "loaded minutes only · load, current and voltage of each colour, and the imbalance each one creates", key="ph_params"):
-        pc = st.columns([1, 1, 3])
-        pp_rule = pc[0].selectbox("Average by", ["Hour", "Day"], key="pp_rule")
-        pp_days = pc[1].selectbox("Window", [7, 14, 28], key="pp_days", format_func=lambda x: f"last {x} days")
-        PP = params_cached(tl, RUN_KW, "1h" if pp_rule == "Hour" else "1D", 10 if pp_rule == "Hour" else 60).iloc[-(pp_days * (24 if pp_rule == "Hour" else 1)):]
-        if PP.dropna().shape[0] < 4: st.caption("Not enough loaded periods in this window.")
-        else:
-            pcol = [PHASE_COL[k_] for k_ in PHASES]
-            g1, g2 = st.columns(2)
-            with g1:
-                f = go.Figure()
-                for (pn_, cols_), col_ in zip(PP_PARAMS.items(), [ACCENT, BLUE, WARN]):
-                f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, annotation_text=f"alarm {ALARM_PCT:g} %", annotation_position="top left")
-                f.update_layout(title="Imbalance % of load, current and voltage", yaxis_title="%"); show(style(f, 300, True, top=70), key="pp_imb")
-            with g2:
-                dv = pp_dev(PP, PP_PARAMS["Load (kW)"]); f = go.Figure()
-                for n_, col_ in zip(NAMES, pcol): 
-                f.add_hline(y=0, line_color=MUTED, line_width=1); f.add_hrect(y0=-ALARM_PCT, y1=ALARM_PCT, fillcolor=tint(GOOD, .08), line_width=0)
-                f.update_layout(title="Which phase is off: load vs the 3-phase average", yaxis_title="% above / below average"); show(style(f, 300, True, top=70), key="pp_dev")
-
-            tt = pp_trend(PP)
-            if tt:
-                st.markdown('<div class="ph"><b>What changed</b><span>first half vs second half of the window · ▲ rising · ▼ falling · ● steady (±2 % load and current, ±0.5 % voltage)</span></div>', unsafe_allow_html=True)
-                st.dataframe(tt[1], width="stretch")
-            note("<ul>" + "".join(f"<li>{t_}</li>" for t_ in pp_explain(PP)) + "</ul>")
-
-      # ---- B) actual vs predicted on past weeks (follows the Forecast length / Learn from / Seasonal cycle / Forecast method chosen at the top)
-    with panel("Model check · actual vs predicted on past weeks", "each week is hidden, forecast from the hours before it, then compared with what really happened", key="ph_bt"):
-        bt_weeks = st.selectbox("Weeks tested", [1, 2, 3, 4], index=1, key="bt_weeks")
-        ref = run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, bt_weeks, P_method, ALARM_PCT, SEVERE_PCT, MIN_KW)
-        if ref is None: st.caption("Not enough history: the test needs the 'Learn from last' window plus the weeks tested. Lower either one.")
-        else:
-            A_, F_ = ref["actual"], ref["pred"]; A_ = A_.fillna(ph_mod.reindex(A_.index))        # missing hours are drawn with the filled values; the error below uses real hours only
-            ra_, rf_ = analyse(A_.to_numpy()), analyse(F_.to_numpy()); ra_.index = A_.index; rf_.index = F_.index
-            f = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n_} phase (kW)" for n_ in NAMES] + ["Imbalance % (calculated from the phase kW)"])
-            for j, p in enumerate(PH3, 1):
-                f.add_scatter(x=A_.index, y=A_[p], name="Actual", legendgroup="a", showlegend=j == 1, line=dict(color=INK, width=2), row=j, col=1)
-                f.add_scatter(x=F_.index, y=F_[p], name="Predicted", legendgroup="p", showlegend=j == 1, line=dict(color=PHASE_COL[KWCOLS[j - 1]], width=2.2, dash="dash"), row=j, col=1)
-            f.add_scatter(x=A_.index, y=ra_.Imbalance_pct.where(ra_.Loaded), name="Actual", legendgroup="a", showlegend=False, line=dict(color=INK, width=2), connectgaps=True, row=4, col=1)
-            f.add_scatter(x=F_.index, y=rf_.Imbalance_pct.where(rf_.Loaded), name="Predicted", legendgroup="p", showlegend=False, line=dict(color=ACCENT, width=2.2, dash="dash"), connectgaps=True, row=4, col=1)
-            f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, row=4, col=1)
-            style(f, 780, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f, key="bt_main")
-            sp_ = float(np.nanmean([F_[p].std() / A_[p].std() for p in PH3 if A_[p].std() > 0])); wp_ = float(ref["per_phase"]["WAPE"].mean())
-            st.caption(f"{ref['imbalance']['weeks']} week(s) · {P_method} · {P_season} h cycle · phase kW error {wp_:.1f} % (WAPE, real hours only) · the predicted line moves {sp_ * 100:.0f} % as much as the actual line"
-                       + (" - FLAT: the model is not learning the pattern; try the other seasonal cycle or a different 'Learn from last'." if sp_ < 0.5 else "."))
+    if dg:
+        c1, c2, c3 = st.columns(3)
+        with c1, panel("What explains it", "share of the worst phase's deviation", key="ph_why"):
+            sh = dg["share"]; f = go.Figure(go.Bar(x=sh.values, y=sh.index, orientation="h", marker_color=[ACCENT, BLUE, WARN], text=[f"{v:.0f} %" for v in sh.values], textposition="outside", cliponaxis=False, hovertemplate="%{y}: %{x:.0f} %<extra></extra>"))
+            f.update_layout(hovermode="closest", xaxis_range=[0, 115]); show(style(f, 250, False, top=20))
+            st.caption(f"kW imbalance follows the current imbalance (correlation {dg['corr_I']:.2f}) vs the voltage imbalance ({dg['corr_V']:.2f}).")
+        with c2, panel("By hour of day", "average measured imbalance % · when it is worst", key="ph_hour"):
+            if real_clock and len(dg["by_hour"]) >= 6:
+                bh = dg["by_hour"]; f = go.Figure(go.Bar(x=[f"{h:02d}:00" for h in bh.index], y=bh.values, marker_color=ACCENT, hovertemplate="%{x}<br>%{y:.1f} %<extra></extra>"))
+                f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN); f.update_layout(hovermode="closest", yaxis_title="imbalance %"); show(style(f, 250, False, top=20))
+            else: st.caption("Needs a real clock in the file.")
+        with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
+            st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
+    else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
