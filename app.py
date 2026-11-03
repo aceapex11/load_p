@@ -68,27 +68,28 @@ TREND_TOLERANCE_PCT = {"Load (kW)": 2.0, "Current (A)": 2.0, "Voltage (V)": 0.5}
 # ------------------------------------------------------------------ COLOUR THEME
 # COLOUR THEME  (one palette everywhere)
 #   neutrals : slate  (INK text / actual values, MUTED secondary, GRID lines)
-#   accent   : indigo (ACCENT = measured load + forecasts + selected buttons; ACCENT_LIGHT = its tint)
-#   status   : green = good, amber = warning, rose = alarm / bad   (status only)
-#   phases   : R rose, Y amber, B blue                              (phase charts only)
+#   accent   : blue   (ACCENT = measured load + forecasts + selected buttons; ACCENT_LIGHT = its tint)
+#   status   : blue = good / info, black = warning / alarm           (no green, amber or red anywhere)
+#   phases   : R rose, Y amber, B blue                              (the phase wires only - the one exception)
 TEXT_COLOR, MUTED_COLOR, GRID_COLOR = "#0F172A", "#64748B", "#EDF0F6"
 
 
-ACCENT, ACCENT_LIGHT = "#6366F1", "#818CF8"
+ACCENT, ACCENT_LIGHT = "#2563EB", "#60A5FA"
 LOAD_COLOR = FORECAST_COLOR = ACCENT
-GOOD_COLOR, WARN_COLOR, BAD_COLOR = "#10B981", "#F59E0B", "#F43F5E"
+CONFIDENCE_Z, CONFIDENCE_TEXT = 1.96, "95 %"                              # width of the forecast interval
+GOOD_COLOR, WARN_COLOR, BAD_COLOR = "#2563EB", "#0F172A", "#0F172A"
 BLUE_COLOR = "#3B82F6"
 IDLE_COLOR, NO_DATA_COLOR, AXIS_COLOR = "#CBD5E1", BAD_COLOR, "#E2E8F0"            # idle share (slate), NO DATA (red), axis lines / empty bars
 
 
 def hex_to_rgba(hex_color, alpha):
-    """'#6366F1', .16  ->  'rgba(99,102,241,.16)'  (transparent fills that follow the theme colours)."""
+    """'#2563EB', .16  ->  'rgba(37,99,235,.16)'  (transparent fills that follow the theme colours)."""
     h = hex_color.lstrip("#"); return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{alpha})"
 
 
 PHASE_COLORS = {"RKW": "#F43F5E", "YKW": "#F59E0B", "BKW": "#3B82F6"}
 
-# ------------------------------------------------------------------ DESIGN SYSTEM (light + indigo accent, forced in CSS - no config file needed)
+# ------------------------------------------------------------------ DESIGN SYSTEM (light + blue accent, forced in CSS - no config file needed)
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
@@ -101,14 +102,14 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 
 /* app bar */
 .appbar { display:flex; align-items:center; gap:.9rem; background:#FFFFFF; border:1px solid #E6EAF2; border-radius:18px; padding:.85rem 1.2rem; margin-bottom:1rem; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 8px 24px -12px rgba(15,23,42,.10); }
-.appbar .logo { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:1.3rem; background:linear-gradient(135deg,#818CF8,#6366F1 55%,#4F46E5); box-shadow:0 6px 16px -6px rgba(99,102,241,.7); }
+.appbar .logo { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:1.3rem; background:linear-gradient(135deg,#60A5FA,#2563EB 55%,#1D4ED8); box-shadow:0 6px 16px -6px rgba(37,99,235,.7); }
 .appbar .t { font-weight:800; font-size:1.2rem; letter-spacing:-.4px; color:#0F172A !important; } .appbar .s { font-size:.78rem; color:#64748B !important; margin-top:-1px; }
 .appbar .sp { flex:1; }
 .chip { display:inline-flex; align-items:center; gap:.35rem; padding:.28rem .7rem; border-radius:999px; font-size:.76rem; font-weight:500; border:1px solid #E6EAF2; background:#F8FAFD; color:#475569 !important; }
 .pill { display:inline-flex; align-items:center; gap:.45rem; padding:.3rem .8rem; border-radius:999px; font-size:.78rem; font-weight:600; }
-.pill.run { background:#E8FAF3; color:#047857 !important; } .pill.idle { background:#F1F4F9; color:#475569 !important; } .pill.warn { background:#FFF4DD; color:#B45309 !important; } .pill.bad { background:#FFE9ED; color:#BE123C !important; }
+.pill.run { background:#E6F0FF; color:#1D4ED8 !important; } .pill.idle { background:#F1F4F9; color:#475569 !important; } .pill.warn { background:#EEF0F4; color:#0F172A !important; } .pill.bad { background:#E5E7EB; color:#0F172A !important; }
 .dot { width:8px; height:8px; border-radius:50%; background:currentColor; } .run .dot { animation:pulse 1.6s infinite; }
-@keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(16,185,129,.55);} 70%{box-shadow:0 0 0 8px rgba(16,185,129,0);} 100%{box-shadow:0 0 0 0 rgba(16,185,129,0);} }
+@keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(37,99,235,.55);} 70%{box-shadow:0 0 0 8px rgba(37,99,235,0);} 100%{box-shadow:0 0 0 0 rgba(37,99,235,0);} }
 
 /* tabs as a segmented pill nav */
 .stTabs [data-baseweb="tab-list"] { gap:.25rem; background:#E9EDF5; padding:.3rem; border-radius:14px; width:fit-content; border:0; }
@@ -121,32 +122,33 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 [data-testid="stVerticalBlockBorderWrapper"], [class*="st-key-panel"] { background:#FFFFFF !important; border:1px solid #E6EAF2 !important; border-radius:18px !important; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 28px -16px rgba(15,23,42,.12); }
 .ph { display:flex; align-items:baseline; gap:.6rem; margin:.1rem 0 .2rem; } .ph b { font-size:1rem; font-weight:700; color:#0F172A !important; letter-spacing:-.2px; } .ph span { font-size:.8rem; color:#64748B !important; }
 .kpi { position:relative; overflow:hidden; background:#FFFFFF; border:1px solid #E6EAF2; border-radius:18px; padding:1rem 1.1rem .9rem; height:100%; min-height:9rem; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 28px -16px rgba(15,23,42,.12); }.kpi .top { display:flex; align-items:center; gap:.55rem; } .kpi .ic { width:30px; height:30px; border-radius:9px; display:grid; place-items:center; font-size:.95rem; background:#F3F5FB; }
+.kpi .ic { filter:grayscale(1); }
 .kpi .l { color:#64748B !important; font-size:.8rem; font-weight:500; }
 .kpi .v { font-family:'JetBrains Mono',monospace; font-size:1.75rem; font-weight:600; letter-spacing:-1px; margin-top:.55rem; color:#0F172A !important; }
 .kpi .s { font-size:.78rem; margin-top:.1rem; color:#64748B !important; }
 .kpi.kb .v { color:#2563EB !important; } .kpi.kk .v { color:#0F172A !important; }
 .kpi .spark { position:absolute; right:0; bottom:0; width:46%; height:38px; opacity:.9; }
-.hero-f { border-radius:18px; padding:1.3rem 1.4rem; height:100%; background:radial-gradient(420px 200px at 100% 0%, rgba(99,102,241,.16), transparent 70%), linear-gradient(180deg,#FFFFFF,#F7F8FF); border:1px solid #E3E6FA; }
-.hero-f .l { font-size:.8rem; font-weight:600; color:#4F46E5 !important; text-transform:uppercase; letter-spacing:.06em; }
+.hero-f { border-radius:18px; padding:1.3rem 1.4rem; height:100%; background:radial-gradient(420px 200px at 100% 0%, rgba(37,99,235,.16), transparent 70%), linear-gradient(180deg,#FFFFFF,#F5F9FF); border:1px solid #DCE6F8; }
+.hero-f .l { font-size:.8rem; font-weight:600; color:#1D4ED8 !important; text-transform:uppercase; letter-spacing:.06em; }
 .hero-f .big { font-family:'JetBrains Mono',monospace; font-size:2.9rem; font-weight:600; letter-spacing:-2px; color:#0F172A !important; line-height:1.1; margin-top:.35rem; } .hero-f .big small { font-size:1.1rem; color:#64748B !important; letter-spacing:0; }
 .hero-f .r { color:#475569 !important; font-size:.86rem; margin-top:.35rem; }
-.badge { display:inline-block; padding:.18rem .55rem; border-radius:8px; font-size:.78rem; font-weight:600; margin-top:.6rem; } .badge.up { background:#E8FAF3; color:#047857 !important; } .badge.down { background:#FFE9ED; color:#BE123C !important; } .badge.flat { background:#F1F4F9; color:#475569 !important; }
-.mini { display:flex; gap:1.3rem; margin-top:1rem; padding-top:.9rem; border-top:1px dashed #DDE2F3; } .mini div b { display:block; font-family:'JetBrains Mono',monospace; font-size:1rem; color:#0F172A !important; } .mini div span { font-size:.74rem; color:#64748B !important; }
-.live { border-radius:18px; padding:1.2rem 1.3rem; background:linear-gradient(180deg,#FFFFFF,#F7F8FF); border:1px solid #E3E6FA; height:100%; }
+.badge { display:inline-block; padding:.18rem .55rem; border-radius:8px; font-size:.78rem; font-weight:600; margin-top:.6rem; } .badge.up { background:#E6F0FF; color:#1D4ED8 !important; } .badge.down { background:#E5E7EB; color:#0F172A !important; } .badge.flat { background:#F1F4F9; color:#475569 !important; }
+.mini { display:flex; gap:1.3rem; margin-top:1rem; padding-top:.9rem; border-top:1px dashed #D6E2F5; } .mini div b { display:block; font-family:'JetBrains Mono',monospace; font-size:1rem; color:#0F172A !important; } .mini div span { font-size:.74rem; color:#64748B !important; }
+.live { border-radius:18px; padding:1.2rem 1.3rem; background:linear-gradient(180deg,#FFFFFF,#F5F9FF); border:1px solid #DCE6F8; height:100%; }
 .live .big { font-family:'JetBrains Mono',monospace; font-size:3.2rem; font-weight:600; letter-spacing:-2px; color:#0F172A !important; line-height:1; margin:.7rem 0 .2rem; } .live .big small { font-size:1.1rem; color:#64748B !important; }
 .bar { margin:.55rem 0; } .bar .row { display:flex; justify-content:space-between; font-size:.8rem; color:#475569 !important; font-weight:500; } .bar .row b { font-family:'JetBrains Mono',monospace; color:#0F172A !important; }
 .bar .trk { height:8px; background:#EEF1F7; border-radius:99px; margin-top:.25rem; overflow:hidden; } .bar .fil { height:100%; border-radius:99px; }
-.note { border-left:3px solid #6366F1; background:#F4F5FF; padding:.7rem 1rem; border-radius:0 12px 12px 0; color:#475569 !important; font-size:.88rem; margin:.5rem 0 .9rem; } .note b, .note i { color:#1E293B !important; }
-.note.amber { border-left-color:#F59E0B; background:#FFF8EB; }
-.note.good { border-left-color:#10B981; background:#E8FAF3; } .note.bad { border-left-color:#F43F5E; background:#FFF1F3; } .note ul { margin:.4rem 0 0 1.1rem; padding:0; } .note li { margin:.15rem 0; }
+.note { border-left:3px solid #2563EB; background:#F1F6FF; padding:.7rem 1rem; border-radius:0 12px 12px 0; color:#475569 !important; font-size:.88rem; margin:.5rem 0 .9rem; } .note b, .note i { color:#1E293B !important; }
+.note.amber { border-left-color:#0F172A; background:#F3F4F6; }
+.note.good { border-left-color:#2563EB; background:#E6F0FF; } .note.bad { border-left-color:#0F172A; background:#F3F4F6; } .note ul { margin:.4rem 0 0 1.1rem; padding:0; } .note li { margin:.15rem 0; }
 
 /* inputs (forced light) */
 [data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="base-input"], input, [data-testid="stNumberInputContainer"] { background:#FFFFFF !important; color:#0F172A !important; border-color:#DDE2EE !important; border-radius:10px !important; }
-[data-baseweb="popover"] *, ul[role="listbox"], li[role="option"] { background:#FFFFFF !important; color:#0F172A !important; } li[role="option"]:hover { background:#F1F3FF !important; }
+[data-baseweb="popover"] *, ul[role="listbox"], li[role="option"] { background:#FFFFFF !important; color:#0F172A !important; } li[role="option"]:hover { background:#EAF2FF !important; }
 [data-testid="stExpander"] { background:#FFFFFF; border:1px solid #E6EAF2 !important; border-radius:14px; } [data-testid="stExpander"] summary, [data-testid="stExpander"] summary p { color:#0F172A !important; font-weight:600; }
 [data-testid="stBaseButton-secondary"] { background:#FFFFFF !important; color:#0F172A !important; border:1px solid #DDE2EE !important; border-radius:10px !important; font-weight:600; }
-input:focus, [data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within { border-color:#6366F1 !important; box-shadow:0 0 0 1px #6366F1 !important; }
-[data-testid="stSlider"] [role="slider"] { background-color:#6366F1 !important; box-shadow:none !important; } [data-testid="stSliderThumbValue"], [data-testid="stSliderThumbValue"] * { color:#4F46E5 !important; }
+input:focus, [data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within { border-color:#2563EB !important; box-shadow:0 0 0 1px #2563EB !important; }
+[data-testid="stSlider"] [role="slider"] { background-color:#2563EB !important; box-shadow:none !important; } [data-testid="stSliderThumbValue"], [data-testid="stSliderThumbValue"] * { color:#1D4ED8 !important; }
 [data-testid="stBaseButton-primary"] { background:#0F172A !important; color:#FFFFFF !important; border:0 !important; border-radius:10px !important; font-weight:600; } [data-testid="stBaseButton-primary"] p { color:#FFFFFF !important; }
 </style>""", unsafe_allow_html=True)
 
@@ -181,7 +183,7 @@ def note_box(text, tone=""):
 @contextmanager
 def panel(title, sub="", key="p"):
     with st.container(border=True, key=f"panel_{key}"):
-        st.markdown(f'<div class="ph"><b>{title}</b><span>{sub}</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="ph"><b>{title}</b></div>', unsafe_allow_html=True)             # the grey description (sub) is intentionally not shown
         yield
 
 
@@ -366,7 +368,7 @@ def percent_change_text(p):
     return "" if pd.isna(p) else f" ({p:+.1f} %)"
 
 
-CARD_TONE_COLORS = {"bad": ("#F43F5E", "#FFE4E8", "#BE123C"), "amber": ("#F59E0B", "#FFEBD5", "#C2410C"), "good": ("#10B981", "#D8F5E9", "#047857"), "info": ("#6366F1", "#E7E8FF", "#4338CA")}
+CARD_TONE_COLORS = {"bad": ("#0F172A", "#E5E7EB", "#0F172A"), "amber": ("#0F172A", "#E5E7EB", "#0F172A"), "good": ("#2563EB", "#DBEAFE", "#1D4ED8"), "info": ("#2563EB", "#DBEAFE", "#1D4ED8")}
 
 
 def _status_badge_html(text, tone):
@@ -485,6 +487,20 @@ def average_in_blocks(values, first_time, hours):
     out = pd.DataFrame(rows, columns=["Start", "End", "Avg kW", "Hours"]); out["Change kW"] = out["Avg kW"].diff(); prev = out["Avg kW"].shift(1)
     out["Change %"] = np.where(prev >= 1, out["Change kW"] / prev * 100, np.nan)
     return out
+
+
+def forecast_interval_sigma(holdout_result, filled_hours, steps=MAX_FORECAST_HOURS):
+    """Typical forecast error (kW) for every hour ahead, taken from the 7-day test: RMSE per day ahead, smoothed between the days and never shrinking.
+    Without a test result: week-on-week change of the hourly load is used instead."""
+    if holdout_result is not None:
+        err = (holdout_result["actual"] - holdout_result["pred"]).to_numpy(float); centres, rmses = [], []
+        for start in range(0, len(err), 24):
+            block = err[start:start + 24]; block = block[np.isfinite(block)]
+            if len(block) >= 6: centres.append(start + min(24, len(err) - start) / 2); rmses.append(float(np.sqrt(np.mean(block ** 2))))
+        if centres: return np.maximum.accumulate(np.interp(np.arange(steps), centres, rmses))
+    weekly_change = (filled_hours - filled_hours.shift(168)).dropna()
+    sigma = float(weekly_change.std() / np.sqrt(2)) if len(weekly_change) >= 24 else float(filled_hours.diff().dropna().std())
+    return np.full(steps, 0.0 if not np.isfinite(sigma) else sigma)
 
 
 def block_time_label(row):
@@ -688,7 +704,7 @@ latest_balance_table = analyse_balance(smoothed_complete_minutes.iloc[-1][PHASE_
 status_pill_html = (f'<span class="pill run"><span class="dot"></span>Running now</span>' if timeline_stats["now_running"] else
           f'<span class="pill idle"><span class="dot"></span>Idle · last ran {timeline_stats["last_run"]:%d %b %H:%M}</span>')
 clock_chip_html = '<span class="chip">clock assumed</span>' if not has_real_clock else ""
-app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase imbalance</div></div><div class="sp"></div>
+app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg></div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase imbalance</div></div><div class="sp"></div>
 {status_pill_html}<span class="chip">{data_file_label}</span><span class="chip">{minute_rows.Timestamps.min():%d %b} → {minute_rows.Timestamps.max():%d %b %Y}</span><span class="chip">{len(minute_rows):,} readings</span>{clock_chip_html}</div>""", unsafe_allow_html=True)
 
 # three pages: overview, load forecast, phase balance
@@ -760,9 +776,16 @@ with tab_load:
         with energy_kpi_columns[0]: kpi_card("Energy needed · forecast", f"{forecast_energy_kwh:,.0f} kWh", f"average {forecast_avg_kw:,.1f} kW over {hours_to_text(horizon_hours)}", "info", "🔌")
         energy_difference_kwh = forecast_energy_kwh - previous_energy_kwh
         with energy_kpi_columns[1]: kpi_card("Energy used · previous period", f"{previous_energy_kwh:,.0f} kWh", (f"forecast is {energy_difference_kwh:+,.0f} kWh ({energy_difference_kwh / previous_energy_kwh * 100:+.0f} %) vs this" if previous_energy_kwh >= 1 else "the machine was idle in that period") + f" · last {hours_to_text(horizon_hours)}", "", "📊")
-        with energy_kpi_columns[2]: kpi_card("Power at first hour", f"{forecast_values[0]:,.1f} kW", f"{forecast_times[0]:%d %b %H:%M}", "", "▶️")
-        with energy_kpi_columns[3]: kpi_card("Power at last hour", f"{forecast_values[-1]:,.1f} kW", f"{forecast_times[-1]:%d %b %H:%M} · {forecast_values[-1] - forecast_values[0]:+,.1f} kW{percent_change_text(percent_change(forecast_values[0], forecast_values[-1]))} vs first", "info", "⏹️")
-        with energy_kpi_columns[4]: kpi_card("Average · peak", f"{forecast_avg_kw:,.1f} kW", f"peak {forecast_peak_kw:,.1f} kW at {forecast_times[int(np.argmax(forecast_values))]:%a %H:%M}", "", "📈")
+        # busiest / quietest forecast day (full days only, when there are any) and the hour of the day with the highest average load
+        forecast_series = pd.Series(forecast_values, index=forecast_times)
+        day_summary = forecast_series.groupby(forecast_series.index.normalize()).agg(["sum", "mean", "count"])
+        day_summary = day_summary[day_summary["count"] == 24] if (day_summary["count"] == 24).any() else day_summary
+        busiest_day, quietest_day = day_summary["sum"].idxmax(), day_summary["sum"].idxmin()
+        hour_of_day_avg = forecast_series.groupby(forecast_series.index.hour).mean(); peak_hour = int(hour_of_day_avg.idxmax())
+        peak_hour_max_kw = float(forecast_series[forecast_series.index.hour == peak_hour].max())
+        with energy_kpi_columns[2]: kpi_card("Most power used · day", f"{busiest_day:%a %d %b}", f"{day_summary.loc[busiest_day, 'sum']:,.0f} kWh · average {day_summary.loc[busiest_day, 'mean']:,.1f} kW", "", "📅")
+        with energy_kpi_columns[3]: kpi_card("Least power used · day", f"{quietest_day:%a %d %b}", f"{day_summary.loc[quietest_day, 'sum']:,.0f} kWh · average {day_summary.loc[quietest_day, 'mean']:,.1f} kW", "info", "🌙")
+        with energy_kpi_columns[4]: kpi_card("Peak hour · average", f"{peak_hour:02d}:00", f"{peak_hour:02d}:00–{(peak_hour + 1) % 24:02d}:00 · {hour_of_day_avg[peak_hour]:,.1f} kW on average · highest {peak_hour_max_kw:,.1f} kW", "", "⏰")
         st.write("")
         valid_block_names = [n for n, h in AVERAGE_BLOCK_HOURS.items() if h <= horizon_hours]
         block_select_column, _ = st.columns([1.2, 3])
@@ -779,8 +802,6 @@ with tab_load:
                                  customdata=np.c_[block_table["Change kW"].fillna(0), block_table["Hours"]], hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} h<extra></extra>"))
             fig.update_layout(hovermode="closest", yaxis_title=f"average kW per {block_choice}", title=f"Average power every {block_choice}  ·  label = change vs previous block"); fig.update_xaxes(type="category")
             show_figure(style_figure(fig, 300, False, top=60))
-            st.caption((f"Average growth: {block_table['Change kW'].mean():+,.1f} kW per block · trend {slope:+,.1f} kW per hour" if has_two_blocks else "Only one block fits in this window - pick a shorter interval or a longer forecast.")
-                       + (f" · last block is partial ({int(block_table['Hours'].iloc[-1])} h)" if block_table["Hours"].iloc[-1] < block_table["Hours"].iloc[0] else ""))
 
     load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
     with panel("Load forecast · risks and recommendations", "", key="ld_sugg"):
@@ -791,26 +812,26 @@ with tab_load:
         with managed_columns[0]: note_box(f"<b>If managed:</b> {load_advice['managed']}", "good")
         with managed_columns[1]: note_box(f"<b>If not managed:</b> {load_advice['ignored']}", load_advice["tone"] if load_advice["tone"] != "good" else "amber")
 
-    with panel("Forecast ahead", f"{load_model_name} · {total_forecast_label} · learns from {load_training_text} · starts after {last_data_time:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
-        left, right = st.columns([1, 2.4])
-        with left:
-            st.markdown(f"""<div class="hero-f"><div class="l">Expected load · {forecast_times[-1]:%d %b %H:%M}</div><div class="big">{end_value_kw:,.1f}<small> kW</small></div>
-<div class="r">average over the period <b>{forecast_values.mean():,.1f} kW</b></div><span class="badge flat">{arrow} {change_text} vs last hour</span>
-<div class="mini"><div><b>{forecast_values.max():,.1f}</b><span>peak kW</span></div><div><b>{horizon_hours}</b><span>hourly points</span></div><div><b>{hours_to_text(horizon_hours)}</b><span>ahead</span></div></div></div>""", unsafe_allow_html=True)
-        with right:
-            actual_history = total_measured_hourly.iloc[-HISTORY_SHOWN_HOURS[load_history_choice]:]; fig = go.Figure()
-            fig.add_shape(type="rect", xref="x", yref="paper", x0=last_data_time, x1=forecast_times[-1], y0=0, y1=1, fillcolor=hex_to_rgba(ACCENT, .06), line_width=0)
-            fig.add_scatter(x=actual_history.index, y=actual_history.values, name="Actual hourly kW", mode="lines", line=dict(color=TEXT_COLOR, width=2.2), connectgaps=False)
-            fig.add_scatter(x=[last_data_time] + list(forecast_times), y=[last_actual_kw] + list(forecast_values), name=f"Forecast ({load_model_name})", mode="lines", line=dict(color=FORECAST_COLOR, width=3))
-            fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
-            fig.add_annotation(x=last_data_time, yref="paper", y=1.0, text="last data point", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED_COLOR))
-            fig.update_yaxes(title="kW"); show_figure(style_figure(fig, 340, True, top=70))
-        st.caption("Exponential Smoothing gives one line, no confidence band. How far to trust it is shown in 'Model check' below.")
+    # 7-day test (cached): its errors give the width of the forecast interval, and the Model check below reuses it
+    holdout_result = run_total_load_holdout(total_measured_hourly, total_filled_hourly, load_model_name, load_season_hours, fixed_smoothing, max_training_hours)
+    interval_sigma = forecast_interval_sigma(holdout_result, total_filled_hourly)[:horizon_hours]
+    interval_low, interval_high = np.maximum(forecast_values - CONFIDENCE_Z * interval_sigma, 0.0), forecast_values + CONFIDENCE_Z * interval_sigma
+    with panel("Forecast ahead", key="ld_next"):
+        actual_history = total_measured_hourly.iloc[-HISTORY_SHOWN_HOURS[load_history_choice]:]; fig = go.Figure(); forecast_x = [last_data_time] + list(forecast_times)
+        fig.add_shape(type="rect", xref="x", yref="paper", x0=last_data_time, x1=forecast_times[-1], y0=0, y1=1, fillcolor=hex_to_rgba(ACCENT, .06), line_width=0)
+        fig.add_scatter(x=actual_history.index, y=actual_history.values, name="Actual hourly kW", mode="lines", line=dict(color=TEXT_COLOR, width=2.2), connectgaps=False)
+        # confidence interval: upper edge first, then the lower edge filled up to it
+        fig.add_scatter(x=forecast_x, y=[last_actual_kw] + list(interval_high), name="Upper", mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip")
+        fig.add_scatter(x=forecast_x, y=[last_actual_kw] + list(interval_low), name=f"{CONFIDENCE_TEXT} interval", mode="lines", line=dict(width=0), fill="tonexty", fillcolor=hex_to_rgba(ACCENT, .18),
+                        customdata=[last_actual_kw] + list(interval_high), hovertemplate=f"{CONFIDENCE_TEXT} interval: %{{y:,.1f}} – %{{customdata:,.1f}} kW<extra></extra>")
+        fig.add_scatter(x=forecast_x, y=[last_actual_kw] + list(forecast_values), name=f"Forecast ({load_model_name})", mode="lines", line=dict(color=FORECAST_COLOR, width=3))
+        fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
+        fig.add_annotation(x=last_data_time, yref="paper", y=1.0, text="last data point", showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=11, color=MUTED_COLOR))
+        fig.update_yaxes(title="kW"); show_figure(style_figure(fig, 340, True, top=70))
 
     # ---- model check on the last 168 hours (the load notebook's test)
-    st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b><span>the last 168 hours are hidden, forecast from the hours before, then compared with what really happened</span></div>', unsafe_allow_html=True)
-    # hide the last 168 h, forecast them, compare with what really happened
-    holdout_result = run_total_load_holdout(total_measured_hourly, total_filled_hourly, load_model_name, load_season_hours, fixed_smoothing, max_training_hours)
+    st.markdown('<div class="ph" style="margin-top:.6rem"><b>Model check on past data</b></div>', unsafe_allow_html=True)
+    # (the 7-day test result `holdout_result` was computed above)
     if holdout_result is None: st.caption("Not enough history for a 7-day test.")
     else:
         holdout_scores = holdout_result["scores"]; mean_actual_kw = float(np.nanmean(holdout_result["actual"].to_numpy()))
@@ -919,7 +940,7 @@ with tab_phase:
             imbalance_chart_column, deviation_chart_column = st.columns(2)
             with imbalance_chart_column:
                 fig = go.Figure()
-                for (parameter_label, parameter_cols), line_color in zip(PHASE_PARAMETER_COLS.items(), [ACCENT, BLUE_COLOR, WARN_COLOR]):
+                for (parameter_label, parameter_cols), line_color in zip(PHASE_PARAMETER_COLS.items(), [ACCENT, TEXT_COLOR, ACCENT_LIGHT]):
                     fig.add_scatter(x=phase_params_window.index, y=imbalance_pct_of(phase_params_window, parameter_cols), name=parameter_label.split(" ")[0], line=dict(color=line_color, width=2), connectgaps=True)
                 fig.add_hline(y=ALARM_LIMIT_PCT, line_dash="dot", line_color=WARN_COLOR, annotation_text=f"alarm {ALARM_LIMIT_PCT:g} %", annotation_position="top left")
                 fig.update_layout(title="Imbalance % of load, current and voltage", yaxis_title="%"); show_figure(style_figure(fig, 300, True, top=70), key="pp_imb")
@@ -932,13 +953,13 @@ with tab_phase:
             # first half vs second half of the window
             trend_tables = half_over_half_change(phase_params_window)
             if trend_tables:
-                st.markdown('<div class="ph"><b>What changed</b><span>first half vs second half of the window · ▲ rising · ▼ falling · ● steady (±2 % load and current, ±0.5 % voltage)</span></div>', unsafe_allow_html=True)
+                st.markdown('<div class="ph"><b>What changed</b></div>', unsafe_allow_html=True)
                 st.dataframe(trend_tables[1], width="stretch")
             note_box("<ul>" + "".join(f"<li>{t_}</li>" for t_ in explain_imbalance_change(phase_params_window)) + "</ul>")
 
       # ---- B) actual vs predicted on test data: last 7 days hidden, model learns only from the hours before them
     with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from the 28 days before them, then its forecast is compared with what really happened", key="ph_bt"):
-        TEST_HOURS = 72                                                              # all test data = the last 168 hours (7 days)
+        TEST_HOURS = 168                                                              # all test data = the last 168 hours (7 days)
 
         def phase_error_scores(actual, predicted):
             """MAE (kW), MAPE (%), SMAPE (%) on the hours where both values exist."""
@@ -974,4 +995,3 @@ with tab_phase:
             error_table.columns = ["MAE (kW)", "MAPE (%)", "SMAPE (%)"]
             error_table.loc["Average"] = error_table.mean()
             st.dataframe(error_table.round(2), width="stretch")
-            st.caption(f"Test: last {TEST_HOURS} hours · {phase_method} · {phase_season_hours} h cycle · errors use real hours only (missing hours are left out)")
