@@ -100,16 +100,14 @@ def holdout_total(y_real, y_model, model, season, fixed, fit_steps, test_hours=1
 def _compare(ra, rf):
     """Score a forecast imbalance table (rf) against the actual one (ra); both are gridsense_rules.analyse tables on the same hours."""
     A_ld, F_ld = ra.Loaded.to_numpy(bool), rf.Loaded.to_numpy(bool); both = A_ld & F_ld
-    nan = dict(hours=0, imb_mae=np.nan, alarm_ok=np.nan, sev_ok=np.nan, culprit_ok=np.nan, culprit_dir_ok=np.nan)
+    nan = dict(hours=0, imb_mae=np.nan, alarm_ok=np.nan, culprit_ok=np.nan, culprit_dir_ok=np.nan)
     if not both.any(): return nan
     a_al, f_al = ra.Alarm.to_numpy(bool), rf.Alarm.to_numpy(bool)
-    a_sv, f_sv = (ra.Status.to_numpy() == "SEVERE"), (rf.Status.to_numpy() == "SEVERE")
     was = both & a_al
     aw, fw = ra.Worst_phase.to_numpy(), rf.Worst_phase.to_numpy(); ad, fd = ra.Direction.to_numpy(), rf.Direction.to_numpy()
     return dict(hours=int(both.sum()),
                 imb_mae=float(np.nanmean(np.abs(ra.Imbalance_pct.to_numpy()[both] - rf.Imbalance_pct.to_numpy()[both]))),
                 alarm_ok=float((a_al[both] == f_al[both]).mean() * 100),                       # alarm / no alarm called right
-                sev_ok=float((a_sv[both] == f_sv[both]).mean() * 100),                         # severe / not severe called right
                 culprit_ok=float((aw[was] == fw[was]).mean() * 100) if was.any() else np.nan,   # right phase, on the hours that really were in alarm
                 culprit_dir_ok=float(((aw[was] == fw[was]) & (ad[was] == fd[was])).mean() * 100) if was.any() else np.nan)
 
@@ -143,22 +141,21 @@ def backtest_phases(load_real, load_model, model, season, fit_steps, horizon, n_
     base["usual_culprit_ok"] = float((ra.Worst_phase.to_numpy()[was] == U.to_numpy()[was]).mean() * 100) if was.any() else np.nan
     base["usual_culprit"] = U.dropna().mode().iloc[0] if U.notna().any() else None
     imb.update(status_ok=imb["alarm_ok"], alarm_hours_actual=int(ra.Alarm.sum()), alarm_hours_forecast=int(rf.Alarm.sum()),
-               severe_hours_actual=int((ra.Status == "SEVERE").sum()), severe_hours_forecast=int((rf.Status == "SEVERE").sum()), weeks=n_weeks)
+               weeks=n_weeks)
     return dict(actual=A, pred=F, per_phase=per, imbalance=imb, baseline=base)
 
 
 def reliability(bt, thr):
     """RELIABLE / DEGRADED / UNRELIABLE / INSUFFICIENT DATA from a backtest result - project rules, not universal ones.
-    thr = the alarm limit in %.  The alarm / severe call is judged by the weaker of the two (a chronic 8 % imbalance would make the alarm call
-    trivially right).  A forecast that beats none of the plain baselines is moved one level down."""
+    thr = the alarm limit in %.  A forecast that beats none of the plain baselines is moved one level down."""
     if bt is None: return None
     im, bs = bt["imbalance"], bt["baseline"]
     if im["hours"] < 48 or not np.isfinite(im["imb_mae"]): return ("INSUFFICIENT DATA", "too few loaded test hours to judge the forecast")
-    wape = float(bt["per_phase"]["WAPE"].mean()); mae = im["imb_mae"]; ok = min(im["alarm_ok"], im["sev_ok"]); cul = im["culprit_ok"]
-    b_ok = min(bs["alarm_ok"], bs["sev_ok"]); b_mae = bs["imb_mae"]; b_cul = bs.get("usual_culprit_ok", np.nan)
+    wape = float(bt["per_phase"]["WAPE"].mean()); mae = im["imb_mae"]; ok = im["alarm_ok"]; cul = im["culprit_ok"]
+    b_ok = bs["alarm_ok"]; b_mae = bs["imb_mae"]; b_cul = bs.get("usual_culprit_ok", np.nan)
     wins = int(mae < b_mae) + int(ok > b_ok + 2) + int(np.isfinite(cul) and np.isfinite(b_cul) and cul > b_cul + 2)
     cul_txt = f", right phase named in {cul:.0f} % of alarm hours (always saying {bs.get('usual_culprit')}: {b_cul:.0f} %)" if np.isfinite(cul) and np.isfinite(b_cul) else ""
-    txt = (f"phase kW error {wape:.0f} % (WAPE), imbalance error {mae:.1f} points (same hour last week: {b_mae:.1f}), alarm / severe call right in {ok:.0f} % "
+    txt = (f"phase kW error {wape:.0f} % (WAPE), imbalance error {mae:.1f} points (same hour last week: {b_mae:.1f}), alarm call right in {ok:.0f} % "
            f"of {im['hours']} test hours (same hour last week: {b_ok:.0f} %){cul_txt}")
     lv = ["UNRELIABLE", "DEGRADED", "RELIABLE"]
     if ok >= 85 and mae <= max(2.0, thr): i = 2
