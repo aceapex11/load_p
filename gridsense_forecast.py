@@ -42,7 +42,8 @@ def forecast_series(y, steps, model="Exponential Smoothing", season=168, fixed=N
     """One series -> (forecast >= 0, model label, ok).  A failed fit repeats the last value (and says so)."""
     y = np.asarray(y, float)
     try:
-        fc, label = _holt_winters(y, steps, season, fixed), ("Holt-Winters" + (" (weekly)" if season == 168 else " (daily)" if season == 24 else f" (season {season} h)") if len(y) >= 2 * season else "Holt-Winters (no season: too little data)")        if not np.all(np.isfinite(fc)): raise ValueError("non-finite forecast")
+        fc, label = _holt_winters(y, steps, season, fixed), ("Holt-Winters" + (" (weekly)" if season == 168 else " (daily)" if season == 24 else f" (season {season} h)") if len(y) >= 2 * season else "Holt-Winters (no season: too little data)")
+        if not np.all(np.isfinite(fc)): raise ValueError("non-finite forecast")
         return np.clip(fc, 0, None), label, True
     except Exception as ex:
         return np.repeat(max(float(y[-1]), 0.0), steps), f"failed ({type(ex).__name__}): last value used", False
