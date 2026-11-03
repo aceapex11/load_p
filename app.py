@@ -964,7 +964,7 @@ with tab_phase:
     st.write("")
 
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
-    with panel("Phase load · measured and forecast", f"hourly means · {phase_model_name} · learns from the last {phase_training_days} days · forecast starts after {last_data_time:%d %b %Y %H:%M} · shaded band = {CONFIDENCE_TEXT} interval", key="ph_main"):
+    with panel("Phase load · measured and forecast", f"hourly means · {phase_model_name} · learns from the last {phase_training_days} days · forecast starts after {last_data_time:%d %b %Y %H:%M} · shaded band = {CONFIDENCE_TEXT} interval · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
         recent_phase_hours = phase_filled_hourly.iloc[-HISTORY_SHOWN_HOURS[phase_history_choice]:]; forecast_line_x = [last_data_time] + list(forecast_phase_kw.index)
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=[f"{n} phase (kW)" for n in PHASE_LABELS])
         for j, p in enumerate(PHASE_CODES, 1):
@@ -975,6 +975,23 @@ with tab_phase:
             fig.add_scatter(x=forecast_line_x, y=[last_phase_kw] + list(phase_low_kw[p]), name=f"{CONFIDENCE_TEXT} interval", legendgroup="ci", showlegend=j == 1, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=hex_to_rgba(col, .20),
                             customdata=[last_phase_kw] + list(phase_high_kw[p]), hovertemplate=f"{CONFIDENCE_TEXT} interval: %{{y:,.1f}} – %{{customdata:,.1f}} kW<extra></extra>", row=j, col=1)
             fig.add_scatter(x=forecast_line_x, y=[last_phase_kw] + list(forecast_phase_kw[p]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines", line=dict(color=col, width=2.6, dash="dash"), row=j, col=1)
+        worst_phase_names, legend_added = forecast_table.Worst_phase.to_numpy(), False
+
+        def reason_txt(name):
+            """Which parameter explains the imbalance, and how far this phase is from the 3-phase average (measured history)."""
+            if not diagnosis: return "Load (not enough data)"
+            param, col = ("Current", "Avg current A") if diagnosis["share"]["Current"] >= diagnosis["share"]["Voltage"] else ("Voltage", "Avg voltage V")
+            v = diagnosis["per"][col]; d = (v[name] / v.mean() - 1) * 100
+            return f"{param} {'▲ up' if d > 0 else '▼ down'} {abs(d):.1f} % vs 3-phase average"
+
+        for j, p in enumerate(PHASE_CODES, 1):
+            phase_alarm_mask = forecast_table.Alarm.to_numpy() & (worst_phase_names == PHASE_LABELS[j - 1])
+            if not phase_alarm_mask.any(): continue
+            fig.add_scatter(x=forecast_phase_kw.index[phase_alarm_mask], y=forecast_phase_kw[p].to_numpy()[phase_alarm_mask], mode="markers", name="Alarm (forecast)", legendgroup="alarm", showlegend=not legend_added,
+                          marker=dict(symbol="x", size=9, color=WARN_COLOR),
+                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask], np.full(phase_alarm_mask.sum(), reason_txt(PHASE_LABELS[j - 1]))],
+                          hovertemplate="%{y:.1f} kW · imbalance %{customdata[0]:.1f} % (%{customdata[1]})<br>Reason: %{customdata[2]}<extra>Alarm</extra>", row=j, col=1)
+            legend_added = True
         fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
         fig.update_yaxes(title_text="kW")
         style_figure(fig, 640, legend_y=1.0, top=110); fig.update_annotations(font=dict(size=13, color=TEXT_COLOR)); show_figure(fig)
