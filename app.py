@@ -876,11 +876,10 @@ with tab_load:
         block_chart_container = st.container()
         with block_chart_container:
             block_low_kw = average_in_blocks(interval_low, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice])["Avg kW"].to_numpy(); block_high_kw = average_in_blocks(interval_high, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice])["Avg kW"].to_numpy(); block_avg_kw = block_table["Avg kW"].to_numpy()
-            fig = go.Figure(go.Bar(x=block_labels, y=block_avg_kw, marker_color=ACCENT, name="Average kW", error_y=dict(type="data", symmetric=False, array=block_high_kw - block_avg_kw, arrayminus=block_avg_kw - block_low_kw, color=TEXT_COLOR, thickness=1.4, width=4),
+            fig = go.Figure(go.Bar(x=block_labels, y=block_avg_kw, marker_color=ACCENT, name="Average kW", text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in block_table["Change %"]], textposition="outside", cliponaxis=False,
                                  customdata=np.c_[block_table["Change kW"].fillna(0), block_table["Hours"], block_low_kw, block_high_kw],
                                  hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>" + CONFIDENCE_TEXT + " interval %{customdata[2]:,.1f} – %{customdata[3]:,.1f} kW<br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} h<extra></extra>"))
-            fig.add_scatter(x=block_labels, y=block_high_kw, mode="text", text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in block_table["Change %"]], textposition="top center", showlegend=False, hoverinfo="skip", cliponaxis=False)    # change label sits above the interval whisker
-            fig.update_layout(hovermode="closest", yaxis_title=f"average kW per {block_choice}", title=f"Average power every {block_choice}  ·  whisker = {CONFIDENCE_TEXT} interval  ·  label = change vs previous block"); fig.update_xaxes(type="category"); fig.update_yaxes(range=[0, float(np.nanmax(block_high_kw)) * 1.15])
+            fig.update_layout(hovermode="closest", yaxis_title=f"average kW per {block_choice}", title=f"Average power every {block_choice}  ·  hover = {CONFIDENCE_TEXT} interval  ·  label = change vs previous block"); fig.update_xaxes(type="category"); fig.update_yaxes(range=[0, float(np.nanmax(block_avg_kw)) * 1.15])
             show_figure(style_figure(fig, 300, False, top=60))
 
     # ONE suggestions block (fixed wording from the reference images, numbers from the forecast)
