@@ -1291,17 +1291,14 @@ with tab_phase:
             predicted_kw = pd.DataFrame(test_forecast_array[:TEST_HOURS], index=test_index, columns=PHASE_CODES)
             actual_kw_drawn = phase_filled_hourly.reindex(test_index)                                       # drawn (missing hours filled)
             actual_kw_real = phase_measured_hourly.reindex(test_index)                                      # scored (real hours only)
-            actual_balance_table, predicted_balance_table = analyse_balance(actual_kw_drawn.to_numpy()), analyse_balance(predicted_kw.to_numpy())
-            actual_balance_table.index = test_index; predicted_balance_table.index = test_index
-
-            fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=.06, subplot_titles=[f"{n_} phase (kW)" for n_ in PHASE_LABELS] + ["Imbalance % (calculated from the phase kW)"])
+            # Show only the three phase-wise actual vs predicted load charts.
+            # The separate imbalance-% subplot has been removed as requested.
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.07,
+                                subplot_titles=[f"{n_} phase (kW)" for n_ in PHASE_LABELS])
             for j, p in enumerate(PHASE_CODES, 1):
                 fig.add_scatter(x=test_index, y=actual_kw_drawn[p], name="Actual", legendgroup="a", showlegend=j == 1, line=dict(color=TEXT_COLOR, width=2), row=j, col=1)
                 fig.add_scatter(x=test_index, y=predicted_kw[p], name="Predicted", legendgroup="p", showlegend=j == 1, line=dict(color=PHASE_COLORS[PHASE_KW_COLS[j - 1]], width=2.2, dash="dash"), row=j, col=1)
-            fig.add_scatter(x=test_index, y=actual_balance_table.Imbalance_pct.where(actual_balance_table.Loaded), name="Actual", legendgroup="a", showlegend=False, line=dict(color=TEXT_COLOR, width=2), connectgaps=True, row=4, col=1)
-            fig.add_scatter(x=test_index, y=predicted_balance_table.Imbalance_pct.where(predicted_balance_table.Loaded), name="Predicted", legendgroup="p", showlegend=False, line=dict(color=ACCENT, width=2.2, dash="dash"), connectgaps=True, row=4, col=1)
-            fig.add_hline(y=ALARM_LIMIT_PCT, line_dash="dot", line_color=WARN_COLOR, row=4, col=1)
-            style_figure(fig, 780, legend_y=1.0, top=110); fig.update_annotations(font=dict(size=13, color=TEXT_COLOR)); show_figure(fig, key="bt_main")
+            style_figure(fig, 600, legend_y=1.0, top=105); fig.update_annotations(font=dict(size=13, color=TEXT_COLOR)); show_figure(fig, key="bt_main")
 
             error_table = pd.DataFrame({name: phase_error_scores(actual_kw_real[p].to_numpy(), predicted_kw[p].to_numpy()) for name, p in zip(PHASE_LABELS, PHASE_CODES)}).T
             error_table.columns = ["MAE (kW)", "MAPE (%)", "SMAPE (%)"]
