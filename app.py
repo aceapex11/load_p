@@ -1204,6 +1204,16 @@ with tab_phase:
     with kpi_columns[4]: kpi_card("Worst phase · forecast", "–" if not np.isfinite(forecast_imbalance_pct).any() else forecast_table.Worst_phase.iloc[worst_hour_position], "" if not np.isfinite(forecast_imbalance_pct).any() else f"{forecast_table.Direction.iloc[worst_hour_position]} · peak {forecast_imbalance_pct[worst_hour_position]:.1f} % at {forecast_phase_kw.index[worst_hour_position]:%a %H:%M}", "info", "🎨")
     st.write("")
 
+    # ---- 3-phase action / impact cards (shown above the phase forecast chart)
+    # best time to move loads = quietest 3-hour window
+    quiet_busy_window = gr.find_quietest_and_busiest_windows(forecast_phase_kw.sum(axis=1).to_numpy(), forecast_phase_kw.index) if n_alarm_hours else None
+    phase_summary_html = phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet_busy_window, phase_low_kw, phase_high_kw)
+    try:
+        st.html(phase_summary_html)
+    except AttributeError:
+        st.markdown(phase_summary_html, unsafe_allow_html=True)
+    st.write("")
+
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
     with panel("Phase load · measured and forecast", f"hourly means · {phase_model_name} · learns from the last {phase_training_days} days · forecast starts after {last_data_time:%d %b %Y %H:%M} · shaded band = {CONFIDENCE_TEXT} interval · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
         recent_phase_hours = phase_filled_hourly.iloc[-HISTORY_SHOWN_HOURS[phase_history_choice]:]; forecast_line_x = [last_data_time] + list(forecast_phase_kw.index)
@@ -1236,15 +1246,6 @@ with tab_phase:
         fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
         fig.update_yaxes(title_text="kW")
         style_figure(fig, 640, legend_y=1.0, top=110); fig.update_annotations(font=dict(size=13, color=TEXT_COLOR)); show_figure(fig)
-
-    # ---- 3-phase load analysis card (rule-based, short)
-    # best time to move loads = quietest 3-hour window
-    quiet_busy_window = gr.find_quietest_and_busiest_windows(forecast_phase_kw.sum(axis=1).to_numpy(), forecast_phase_kw.index) if n_alarm_hours else None
-    phase_summary_html = phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet_busy_window, phase_low_kw, phase_high_kw)
-    try:
-        st.html(phase_summary_html)
-    except AttributeError:
-        st.markdown(phase_summary_html, unsafe_allow_html=True)
 
     # ---- the evidence behind the advice
         # ---- A) which parameter moves each phase: load, current, voltage per colour + the imbalance each one creates
