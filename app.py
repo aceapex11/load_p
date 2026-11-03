@@ -382,6 +382,36 @@ def suggestion_card_html(title, badge, tone, items, headline="", numbered=True, 
     return f'<div style="border:1px solid {tone_colors[0]};border-radius:14px;padding:14px 20px 6px;background:#fff;margin-bottom:.8rem"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-weight:700;color:{TEXT_COLOR};font-size:.8rem;letter-spacing:.03em">{title}</span>{_status_badge_html(badge, tone)}</div>{head}{rows}</div>'
 
 
+def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, badge, tone):
+    """ONE card with the two reference sections: POTENTIAL RISK & COST IMPACT, then ENERGY MANAGEMENT RECOMMENDATIONS.
+    The wording is fixed (copied from the reference screenshots); only the numbers come from the forecast: energy, change vs the previous period, peak kW and its time."""
+    values = np.asarray(forecast_values, float); energy_kwh = float(values.sum()); peak_kw = float(values.max()); peak_time = forecast_times[int(values.argmax())]
+    days = horizon_hours // 24 if horizon_hours % 24 == 0 else None
+    period = (f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"); badge_period = (f"{days}-day" if days else f"{horizon_hours}-hour")
+    change_pct = (energy_kwh - previous_energy_kwh) / previous_energy_kwh * 100 if previous_energy_kwh >= 1 else float("nan")
+    change_sentence = "" if not np.isfinite(change_pct) else ", about the same as the previous period" if abs(change_pct) < 0.5 else f", approximately {abs(change_pct):.0f}% {'higher' if change_pct > 0 else 'lower'} than the previous period"
+    machine_no = next((p for p in Path(DATA_FILE_NAME).stem.split("_") if p.isdigit()), None); machine_text = f"Machine {machine_no}'s" if machine_no else "this machine's"
+    risks = [("Higher Electricity Procurement Cost", "If internal generation cannot meet the forecasted demand, additional grid electricity or backup generation may be required, potentially increasing operating costs."),
+             ("Increased Peak Demand", f"The forecast peak is {peak_kw:,.1f} kW around {peak_time:%H:%M}. Without peak-load management, simultaneous machine operations may increase demand beyond available generation capacity."),
+             ("Missed Energy Storage Opportunity", "If battery storage is available but not charged during surplus-generation periods, stored energy may not be available during peak-demand hours."),
+             ("Increased Operational Risk", "If demand exceeds available power supply, the company may need backup supply or operational adjustments to avoid production disruption."),
+             ("Higher Energy Management Cost", "Without demand and generation coordination, the company may miss opportunities to reduce unnecessary generation, grid imports and avoidable operating expenses.")]
+    actions = [("Optimize Internal Power Generation", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {period}{change_sentence}. Align captive power generation schedules with the expected demand to avoid unnecessary generation."),
+               ("Prepare for Peak Demand", f"Keep sufficient generation capacity available around {peak_time:%H:%M} to handle the expected {peak_kw:,.1f} kW peak."),
+               ("Optimize Energy Storage", "If battery storage is available, charge during low-demand periods or when internal generation exceeds consumption. Discharge during forecasted peak-demand periods."),
+               ("Shift Flexible Loads", "Stagger large motor start-ups and move non-critical operations away from peak-demand hours to reduce simultaneous power demand."),
+               ("Monitor Power Availability", "Compare forecasted demand with available internal generation. Plan grid support or backup capacity if a supply shortfall is expected.")]
+    BLUE, BLUE_DARK, BLUE_TINT = "#2563EB", "#1D4ED8", "#DBEAFE"                                          # the whole block is blue
+    blue_badge = lambda text: f'<span style="background:{BLUE_TINT};color:{BLUE_DARK};border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:600;white-space:nowrap">{text}</span>'
+    title_row = lambda title, badge_text: f'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-weight:700;color:{BLUE_DARK};font-size:.85rem;letter-spacing:.03em">{title}</span>{blue_badge(badge_text)}</div>'
+    item_rows = lambda items, start=1: "".join(f'<div style="padding:.75rem 0;border-top:1px solid {BLUE_TINT}"><div style="font-weight:600;color:{TEXT_COLOR};font-size:.95rem;margin-bottom:.25rem"><span style="color:{BLUE}">{i}.</span> {h}</div><div style="color:#334155;font-size:.9rem;line-height:1.6">{t}</div></div>' for i, (h, t) in enumerate(items, start))
+    risk_part = title_row("POTENTIAL RISK &amp; COST IMPACT", badge) + f'<div style="color:{MUTED_COLOR};font-size:.78rem;margin:.5rem 0 .6rem">Based on {machine_text} {badge_period} demand forecast</div>' + item_rows(risks)
+    action_part = title_row("ENERGY MANAGEMENT RECOMMENDATIONS", f"{badge_period} forecast") + f'<div style="font-weight:700;color:{TEXT_COLOR};font-size:.95rem;margin:.5rem 0 .6rem">Forecasted peak demand: {peak_kw:,.1f} kW around {peak_time:%A, %H:%M}</div>' + item_rows(actions)
+    # all 10 sections in ONE block, the two parts side by side (they stack on a narrow screen)
+    return (f'<div style="border:1.5px solid {BLUE};border-radius:14px;padding:16px 22px 8px;background:#fff;margin-bottom:.8rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:0 2.2rem">'
+            f'<div>{risk_part}</div><div style="border-left:1px solid {BLUE_TINT};padding-left:2.2rem">{action_part}</div></div>')
+
+
 def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh):
     """Short rule-based risks + actions for the forecast TOTAL kW.  Direction = forecast energy vs the previous period of the same length (> LOAD_CHG_PCT).
     Numbers come only from the forecast and the settings at the top of the file; a setting left at 0 is simply not mentioned.
@@ -802,9 +832,9 @@ with tab_load:
             fig.update_layout(hovermode="closest", yaxis_title=f"average kW per {block_choice}", title=f"Average power every {block_choice}  ·  label = change vs previous block"); fig.update_xaxes(type="category")
             show_figure(style_figure(fig, 300, False, top=60))
 
-    # ONE suggestions block, built only from the forecast numbers above (rule-based, no AI)
-    load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
-    st.markdown(suggestion_card_html("ENERGY MANAGEMENT RECOMMENDATIONS", f"{hours_to_text(horizon_hours)} forecast", load_advice["tone"], load_advice["actions"], headline=load_advice["headline"]), unsafe_allow_html=True)
+    # ONE suggestions block (fixed wording from the reference images, numbers from the forecast)
+    load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)                     # only used for the badge and the border colour
+    st.markdown(forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, load_advice["badge"], load_advice["tone"]), unsafe_allow_html=True)
 
     # 7-day test (cached): its errors give the width of the forecast interval, and the Model check below reuses it
     holdout_result = run_total_load_holdout(total_measured_hourly, total_filled_hourly, load_model_name, load_season_hours, fixed_smoothing, max_training_hours)
