@@ -833,7 +833,7 @@ with tab_phase:
         else: kpi("Average imbalance · measured", "–", "too few loaded minutes", "", "📏")
     with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe", "", "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
     with k[3]: kpi("First forecast alarm", "none" if first_alarm is None else f"{first_alarm:%a %H:%M}", "no alarm expected" if first_alarm is None else f"{first_alarm:%d %b} · in {(first_alarm - t_last).total_seconds() / 3600:.0f} h", "good" if first_alarm is None else "warn", "⏰")
-    with k[4]: kpi("Worst colour · forecast", "–" if not np.isfinite(imb).any() else rep.Worst_phase.iloc[worst_k], "" if not np.isfinite(imb).any() else f"{rep.Direction.iloc[worst_k]} · peak {imb[worst_k]:.1f} % at {Pf.index[worst_k]:%a %H:%M}", "info", "🎨")
+    with k[4]: kpi("Worst phase · forecast", "–" if not np.isfinite(imb).any() else rep.Worst_phase.iloc[worst_k], "" if not np.isfinite(imb).any() else f"{rep.Direction.iloc[worst_k]} · peak {imb[worst_k]:.1f} % at {Pf.index[worst_k]:%a %H:%M}", "info", "🎨")
     st.write("")
 
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
