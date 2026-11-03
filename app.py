@@ -648,8 +648,8 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
         neutral_copy = "Unbalanced phase currents can create neutral current in a 3-phase, 4-wire system."
     impacts = [
         ("Uneven load can cause cable heating", "Uneven phase currents can cause some cables to heat up more than others. Check the affected phase current against its cable rating."),
-        ("Higher neutral current and equipment stress", neutral_copy),
-        ("Increased risk of overheating and unwanted trips", "A sustained imbalance can overheat cables and contribute to protective trips; check phase loading against equipment ratings.")
+        ("Higher neutral current", neutral_copy),
+        ("Protective devices may trip", "If a phase current goes above its equipment rating, a breaker or protection device may trip and interrupt operations.")
     ]
 
     def render_rows(items, icons):
@@ -681,8 +681,6 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
     .phase-summary-icon {{ font-size:.9rem; line-height:1.35; }}
     .phase-summary-item-title {{ color:#172033; font-size:.74rem; font-weight:700; margin-bottom:2px; }}
     .phase-summary-item-copy {{ color:#526078; font-size:.69rem; line-height:1.45; }}
-    .phase-summary-impact {{ margin-top:auto; padding:8px 10px; border-radius:9px; background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; font-size:.69rem; line-height:1.45; }}
-    .phase-summary-impact b {{ display:block; margin-bottom:2px; color:#9a3412; font-size:.72rem; }}
     @keyframes phaseSummaryEnter {{ from {{ opacity:0; transform:translateY(6px); }} to {{ opacity:1; transform:translateY(0); }} }}
     @media (max-width:760px) {{ .phase-summary-wrap {{ grid-template-columns:1fr; }} }}
     @media (prefers-reduced-motion:reduce) {{ .phase-summary-card {{ animation:none; transition:none; }} .phase-summary-card:hover {{ transform:none; }} }}
@@ -700,7 +698,6 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
         <div class="phase-summary-sub">What may happen if the phase imbalance continues</div>
         <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>Forecast indicates the phases are not sharing the load evenly.</span></div>
         {render_rows(impacts, ("🔥", "⚡", "🚨"))}
-        <div class="phase-summary-impact"><b>Potential overall impact</b>Uneven loading can increase cable and equipment heating and may contribute to protection trips if it continues.</div>
       </section>
     </div>'''
 
