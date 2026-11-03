@@ -411,97 +411,60 @@ def _machine_text():
 
 
 def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, badge, tone, advice=None):
-    '''Plain-English action and consequence cards for the Load forecast tab.'''
+    '''Render two compact summary cards for the Load forecast tab only.
+
+    The first card lists recommended actions; the second lists potential
+    consequences of not acting. Text comes from the existing rule-based advice.
+    '''
     values = np.asarray(forecast_values, dtype=float)
     if values.size == 0:
         return ""
 
-    esc = lambda value: html_lib.escape(str(value), quote=True)
     energy_kwh = float(np.nansum(values))
-    average_kw = float(np.nanmean(values))
-    peak_pos = int(np.nanargmax(values))
-    low_pos = int(np.nanargmin(values))
-    peak_kw = float(values[peak_pos])
-    low_kw = float(values[low_pos])
-    peak_time = pd.Timestamp(forecast_times[peak_pos])
-    low_time = pd.Timestamp(forecast_times[low_pos])
     days = horizon_hours // 24 if horizon_hours % 24 == 0 else None
-    period = f"{days} days" if days else f"{horizon_hours} hours"
+    period = f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"
+    badge_period = f"{days}-day" if days else f"{horizon_hours}-hour"
     change_pct = ((energy_kwh - previous_energy_kwh) / previous_energy_kwh * 100
                   if previous_energy_kwh >= 1 else float("nan"))
     if not np.isfinite(change_pct):
-        change_text = "There is no previous period to compare with."
-        direction = "stable"
-    elif change_pct > LOAD_CHANGE_PCT:
-        change_text = f"That is {change_pct:.0f}% more than the previous {period}."
-        direction = "up"
-    elif change_pct < -LOAD_CHANGE_PCT:
-        change_text = f"That is {abs(change_pct):.0f}% less than the previous {period}."
-        direction = "down"
+        change_text = "No comparable previous period is available."
+    elif abs(change_pct) < 0.5:
+        change_text = f"About the same as the previous {period}."
     else:
-        change_text = f"This is about the same as the previous {period}."
-        direction = "stable"
+        direction = "higher" if change_pct > 0 else "lower"
+        change_text = f"{abs(change_pct):.0f}% {direction} than the previous {period}."
 
-    peak_time_text = f"{peak_time:%a, %d %b at %H:%M}"
-    low_time_text = f"{low_time:%a, %d %b at %H:%M}"
-    if average_kw < MIN_PHASE_KW:
-        actions = [
-            ("Check whether the machine should be running", f"The forecast average is only {average_kw:,.1f} kW. If the stop is not planned, check the power supply and machine status."),
-            ("Plan the restart", "If this is a planned stop, use the time for maintenance and switch off equipment that is not needed."),
-            ("Check readings before restarting", "Confirm the meter readings and make sure the machine is safe to start.")
-        ]
-        risks = [
-            ("Production may be delayed", "An unexpected stop can interrupt the process until the supply or machine issue is fixed."),
-            ("The cause may go unnoticed", "If the low reading is not checked, a supply, machine or meter problem could remain unresolved."),
-            ("Fixed costs may continue", "Some demand and fixed electricity charges may still apply while the machine is stopped.")
-        ]
-    else:
-        own_generation_note = (f"Your configured own-generation capacity is {OWN_GENERATION_KW:,.1f} kW. Check that it is available at the expected peak." 
-                               if OWN_GENERATION_KW > 0 else "Compare this demand with the power available from your own generation and the grid.")
-        actions = [
-            ("Plan enough power", f"The machine may use {energy_kwh:,.0f} kWh over the next {period}. {change_text} {own_generation_note}"),
-            ("Get ready for the busiest hour", f"Demand may reach {peak_kw:,.1f} kW on {peak_time_text}. Keep enough power available around this time."),
-            ("Move flexible work to quieter hours", f"Demand is lowest at about {low_kw:,.1f} kW on {low_time_text}. Schedule non-urgent work then and avoid starting large motors together at the peak.")
-        ]
-        if direction == "up":
-            risks = [
-                ("The electricity bill may increase", f"The forecast is higher than the previous {period}. More power may need to come from the grid or backup supply."),
-                ("Available power may not cover the peak", f"The highest demand is {peak_kw:,.1f} kW at {peak_time_text}. If supply is not ready, some work may need to be delayed or rescheduled."),
-                ("Busy hours may put pressure on operations", "If several machines run or start at the same time, demand can rise further and affect production schedules.")
-            ]
-        elif direction == "down":
-            risks = [
-                ("Some generation may go unused", f"Demand is lower than the previous {period}. Running more generation than needed can waste fuel or energy."),
-                ("A sudden drop could be missed", "If this decrease is not planned, it may point to a machine, supply or meter issue that needs checking."),
-                ("Operating costs may not fall automatically", "Fixed charges can remain even when the machine uses less electricity.")
-            ]
-        else:
-            risks = [
-                ("The peak still needs preparation", f"Demand may reach {peak_kw:,.1f} kW at {peak_time_text}. Make sure enough power is available then."),
-                ("Unexpected machine starts can raise demand", "Starting several large machines together can create a higher peak than planned."),
-                ("A supply shortfall can interrupt work", "If available power is below demand, operations may need backup supply or rescheduling.")
-            ]
-
-    peak_text = f"Highest forecast: {peak_kw:,.1f} kW · {peak_time_text}"
-    badge_text = (advice or {}).get("badge", badge or "Watch")
+    esc = lambda value: html_lib.escape(str(value), quote=True)
+    advice = advice or {}
+    actions = list(advice.get("actions", []))[:3]
+    risks = list(advice.get("risks", []))[:3]
+    impact_text = advice.get("ignored", "Unmanaged demand may increase operating costs or require operational changes.")
     tone_class = "bad" if tone == "bad" else "good" if tone == "good" else "amber"
-    action_icons = ("🏭", "⚡", "🕒")
-    risk_icons = ("💸", "📈", "⚠️")
+    action_icons = ("🏭", "⚡", "🔋", "🕒", "🔌")
+    risk_icons = ("💸", "📈", "⚠️", "🏭", "🧾")
 
     def rows(items, icons):
-        return "".join(
-            '<div class="load-summary-item">'
-            f'<span class="load-summary-emoji">{icons[i % len(icons)]}</span>'
-            f'<div><div class="load-summary-item-title">{esc(title)}</div>'
-            f'<div class="load-summary-item-copy">{esc(copy)}</div></div></div>'
-            for i, (title, copy) in enumerate(items)
-        )
+        rendered = []
+        for index, (heading, body) in enumerate(items):
+            rendered.append(
+                '<div class="load-summary-item">'
+                f'<span class="load-summary-emoji">{icons[index % len(icons)]}</span>'
+                '<div><div class="load-summary-item-title">'
+                f'{esc(heading)}</div><div class="load-summary-item-copy">{esc(body)}</div></div></div>'
+            )
+        return "".join(rendered) if rendered else '<div class="load-summary-empty">No specific items are flagged for this forecast.</div>'
+
+    peak_value = float(np.nanmax(values))
+    peak_time = pd.Timestamp(forecast_times[int(np.nanargmax(values))])
+    peak_text = f"Peak forecast: {peak_value:,.1f} kW · {peak_time:%a, %d %b at %H:%M}"
+    badge_text = advice.get("badge", badge or "Watch")
+    risk_tone = "bad" if tone_class == "bad" else "amber" if tone_class == "amber" else "good"
 
     return f'''<style>
     html, body {{ margin:0 !important; padding:0 !important; background:transparent !important; overflow:hidden; }}
     * {{ box-sizing:border-box; }}
     .load-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:0; font-family:Inter,Arial,sans-serif; align-items:stretch; }}
-    .load-summary-card {{ position:relative; min-width:0; height:100%; align-self:stretch; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%); border:1px solid #E2E8F0; border-radius:14px; padding:11px 14px 9px 15px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:loadSummaryEnter .35s ease both; }}
+    .load-summary-card {{ position:relative; min-width:0; height:100%; align-self:stretch; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%); border:1px solid #E2E8F0; border-radius:14px; padding:11px 14px 8px 15px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:loadSummaryEnter .35s ease both; }}
     .load-summary-card::before {{ content:""; position:absolute; inset:0 auto 0 0; width:3px; border-radius:14px 0 0 14px; background:#93C5FD; opacity:.95; transition:width .2s ease; }}
     .load-summary-card:hover,.load-summary-card:focus-within {{ transform:translateY(-3px); border-color:#93C5FD; box-shadow:0 10px 22px -14px rgba(37,99,235,.48),0 3px 8px rgba(15,23,42,.05); }}
     .load-summary-card:hover::before,.load-summary-card:focus-within::before {{ width:5px; }}
@@ -515,7 +478,7 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
     .load-summary-feature small {{ display:block; margin-top:1px; font-size:.68rem; line-height:1.35; color:#64748B; }}
     .load-summary-item {{ display:grid; grid-template-columns:19px minmax(0,1fr); gap:6px; padding:6px 0; border-top:1px solid #EEF2F8; }}
     .load-summary-emoji {{ font-size:.88rem; line-height:1.35; }} .load-summary-item-title {{ color:#172033; font-size:.74rem; font-weight:700; margin-bottom:1px; }}
-    .load-summary-item-copy {{ color:#526078; font-size:.69rem; line-height:1.4; }}
+    .load-summary-item-copy {{ color:#526078; font-size:.69rem; line-height:1.4; }} .load-summary-empty {{ padding:8px 0; color:#64748B; font-size:.7rem; }}
     .load-summary-impact {{ margin-top:6px; padding:7px 9px; border-radius:9px; background:#FFF7ED; border:1px solid #FED7AA; color:#9A3412; font-size:.69rem; line-height:1.4; }}
     .load-summary-impact strong {{ display:block; margin-bottom:2px; color:#9A3412; font-size:.72rem; }}
     @keyframes loadSummaryEnter {{ from {{ opacity:0; transform:translateY(6px); }} to {{ opacity:1; transform:translateY(0); }} }}
@@ -523,18 +486,18 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
     @media (prefers-reduced-motion:reduce) {{ .load-summary-card {{ animation:none; transition:none; }} .load-summary-card:hover {{ transform:none; }} }}
     </style>
     <div class="load-summary-wrap">
-      <section class="load-summary-card" tabindex="0" aria-label="Actions to take">
+      <section class="load-summary-card" tabindex="0" aria-label="Recommended actions">
         <div class="load-summary-card-head"><div class="load-summary-title">✅ ACTIONS TO TAKE</div><span class="load-summary-badge good">Recommended plan</span></div>
-        <div class="load-summary-sub">Simple steps to prepare for the forecast</div>
-        <div class="load-summary-feature"><span class="load-summary-feature-icon">📊</span><div><strong>{energy_kwh:,.0f} kWh expected over {esc(period)}</strong><small>{esc(change_text)} Average demand: {average_kw:,.1f} kW.</small></div></div>
+        <div class="load-summary-sub">What to do based on the {esc(badge_period)} load forecast</div>
+        <div class="load-summary-feature"><span class="load-summary-feature-icon">📊</span><div><strong>{energy_kwh:,.0f} kWh forecast energy</strong><small>{esc(change_text)}</small></div></div>
         {rows(actions, action_icons)}
       </section>
-      <section class="load-summary-card" tabindex="0" aria-label="What may happen if no action is taken">
-        <div class="load-summary-card-head"><div class="load-summary-title">⚠️ IF YOU DON'T ACT</div><span class="load-summary-badge {tone_class}">{esc(badge_text)}</span></div>
-        <div class="load-summary-sub">What could happen if demand is not planned for</div>
-        <div class="load-summary-feature"><span class="load-summary-feature-icon">🎯</span><div><strong>{esc(peak_text)}</strong><small>Plan enough power for this time.</small></div></div>
+      <section class="load-summary-card" tabindex="0" aria-label="Consequences if actions are not taken">
+        <div class="load-summary-card-head"><div class="load-summary-title">⚠️ IF YOU DON'T ACT</div><span class="load-summary-badge {risk_tone}">{esc(badge_text)}</span></div>
+        <div class="load-summary-sub">Possible outcomes if the forecast is not managed</div>
+        <div class="load-summary-feature"><span class="load-summary-feature-icon">🎯</span><div><strong>{esc(peak_text)}</strong><small>Plan capacity around the forecast peak.</small></div></div>
         {rows(risks, risk_icons)}
-        <div class="load-summary-impact"><strong>In simple terms</strong>Higher power costs, pressure on available supply and possible delays if demand is greater than the power available.</div>
+        <div class="load-summary-impact"><strong>Potential overall impact</strong>{esc(impact_text)}</div>
       </section>
     </div>'''
 
@@ -613,7 +576,7 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
     high_col, low_col = deviation_pct.idxmax(), deviation_pct.idxmin()
     high_phase, low_phase = labels[high_col], labels[low_col]
     high_dev, low_dev = float(deviation_pct[high_col]), float(deviation_pct[low_col])
-    forecast_line = f"{high_phase} carries {abs(high_dev):.1f}% more load than the 3-phase average; {low_phase} carries {abs(low_dev):.1f}% less."
+    forecast_line = f"{high_phase} is highest ({high_dev:+.1f}% vs average); {low_phase} is lowest ({low_dev:+.1f}%)."
 
     has_diagnosis = bool(diagnosis) and not diagnosis.get("empty", False)
     current_pct = float(diagnosis["mean_I"]) if has_diagnosis else float("nan")
@@ -624,74 +587,74 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
 
     # Explain whether the measurements point more towards phase loading or supply voltage.
     if not has_diagnosis:
-        driver_title = "The meter readings do not show the cause clearly yet"
-        driver_copy = "There is not enough reliable data to tell whether equipment load or the incoming power supply is causing the issue. Ask an electrician to check all three phases before moving equipment."
+        driver_title = "Cause not confirmed from meter readings"
+        driver_copy = "Not enough valid current/voltage history is available to separate a load-side issue from a supply-side issue. Measure all three phases before moving circuits."
     elif current_flagged and voltage_flagged:
-        driver_title = "Both current and voltage readings are above the limit"
-        driver_copy = f"Current differs by {current_pct:.1f}% and voltage by {voltage_pct:.1f}%; both are above the {ALARM_LIMIT_PCT:.0f}% limit. The phase with the largest load difference most often is {measured_worst_phase or high_phase}. Ask an electrician to check both the power supply and the connected equipment."
+        driver_title = "Both current and voltage imbalance exceed the limit"
+        driver_copy = f"Current is {current_pct:.1f}% and voltage is {voltage_pct:.1f}% (limit {ALARM_LIMIT_PCT:.0f}%). Measured load deviation most often involves {measured_worst_phase or high_phase}. Check supply and phase loading together."
     elif current_flagged:
-        driver_title = "One phase is likely carrying more equipment load"
-        driver_copy = f"Current differs by {current_pct:.1f}% (above the {ALARM_LIMIT_PCT:.0f}% limit), but voltage differs by only {voltage_pct:.1f}% (within the limit). This points more to uneven equipment load than to a power-supply problem. The phase with the largest load difference most often is {measured_worst_phase or high_phase}."
+        driver_title = "Current / phase-loading imbalance is the stronger signal"
+        driver_copy = f"Current imbalance is {current_pct:.1f}% (above {ALARM_LIMIT_PCT:.0f}%), while voltage is {voltage_pct:.1f}% (within limit). This points more towards uneven phase loading than a supply-voltage issue. Measured phase most often affected: {measured_worst_phase or high_phase}."
     elif voltage_flagged:
-        driver_title = "The incoming power supply may be uneven"
-        driver_copy = f"Voltage differs by {voltage_pct:.1f}% (above the {ALARM_LIMIT_PCT:.0f}% limit), but current differs by only {current_pct:.1f}% (within the limit). This points more to a power-supply issue. Ask an electrician to check the incoming supply and connections before moving equipment."
+        driver_title = "Voltage imbalance is the stronger signal"
+        driver_copy = f"Voltage imbalance is {voltage_pct:.1f}% (above {ALARM_LIMIT_PCT:.0f}%), while current is {current_pct:.1f}% (within limit). Have a qualified electrician check the incoming supply, transformer/tap and connections before shifting loads."
     else:
-        driver_title = "The forecast shows uneven load, but meter readings are within the limit"
-        driver_copy = f"Current differs by {current_pct:.1f}% and voltage by {voltage_pct:.1f}% (both within the {ALARM_LIMIT_PCT:.0f}% limit). Check the meter readings and equipment connected to {high_phase} before making changes."
+        driver_title = "Forecast load is uneven; measured current and voltage are within the limit"
+        driver_copy = f"Current is {current_pct:.1f}% and voltage is {voltage_pct:.1f}% (both within {ALARM_LIMIT_PCT:.0f}%). Confirm the meter readings and inspect {high_phase} single-phase circuits before making changes."
 
     # Tailor the recommended actions to the measured signal.
     if not is_out_of_balance:
         actions = [
-            ("Share new equipment across all phases", "When adding equipment, avoid putting too much on just Red, Yellow or Blue."),
-            ("Keep checking the readings", f"Check all three phases regularly. Take action if the load, current or voltage difference goes above {ALARM_LIMIT_PCT:.0f}%.")
+            ("Keep new loads balanced", "Distribute new single-phase equipment across Red, Yellow and Blue."),
+            ("Continue monitoring", f"Check phase kW, current and voltage; investigate if any deviation exceeds {ALARM_LIMIT_PCT:.0f}%.")
         ]
     elif voltage_flagged and not current_flagged:
         actions = [
-            ("Ask an electrician to check the power supply", "Have the voltage on all three phases and the supply connections checked."),
-            ("Do not move equipment yet", "Check the power supply first. Moving equipment will not fix a voltage problem."),
-            ("Check the readings after repair", "Measure all three phase voltages and currents again to make sure they are back within the limit.")
+            ("Check the incoming supply", "Have a qualified electrician verify phase-to-phase voltages, transformer tap and supply connections."),
+            ("Do not shift loads yet", "Confirm and correct the voltage issue first; load transfers alone may not resolve a supply imbalance."),
+            ("Verify after correction", "Re-measure all phase voltages and currents, then re-check load distribution.")
         ]
     elif current_flagged and voltage_flagged:
         actions = [
-            ("Check the power supply and all phases", "Ask an electrician to check the incoming voltage, the current on each phase and all connections."),
-            ("Fix the power-supply issue first", "After the voltage is stable, move equipment only if one phase still carries too much current."),
-            ("Check the result", f"Check all three phases again after one working day. Aim to keep the difference within {ALARM_LIMIT_PCT:.0f}%.")
+            ("Inspect supply and phase currents", "Check incoming voltage, phase currents, neutral and connections with a qualified electrician."),
+            ("Correct the supply issue first", "After voltage is stable, redistribute suitable single-phase loads if current imbalance remains."),
+            ("Verify the balance", f"Re-check all phases after one working day and aim to stay within {ALARM_LIMIT_PCT:.0f}%.")
         ]
     elif current_flagged:
         move_plan = diagnosis.get("plan") if has_diagnosis else None
         move_text = ""
         if move_plan is not None and len(move_plan):
-            planned = [f"from {row['From']} to {row['To']} (about {row['Move A']:.0f} A)" for _, row in move_plan.iterrows() if float(row.get("Move A", 0)) >= 1.0]
+            planned = [f"{row['From']} → {row['To']} (about {row['Move A']:.0f} A)" for _, row in move_plan.iterrows() if float(row.get("Move A", 0)) >= 1.0]
             move_text = "; ".join(planned)
         if not move_text:
             move_text = f"from {high_phase} towards {low_phase}"
-        when_text = (f" Best time: {quiet_busy_window['quiet'][0]:%a %d %b %H:%M}–{quiet_busy_window['quiet'][1]:%H:%M}, when demand is lower." if quiet_busy_window else " Choose a time when the machine load is low.")
+        when_text = (f" Suggested low-load window: {quiet_busy_window['quiet'][0]:%a %d %b %H:%M} → {quiet_busy_window['quiet'][1]:%H:%M}." if quiet_busy_window else " Choose a low-load operating window for an approved transfer.")
         actions = [
-            (f"Check equipment on {high_phase}", f"Check which equipment is connected to {high_phase}. Compare the current on Red, Yellow and Blue."),
-            ("Move some suitable equipment", f"With approval, move suitable equipment {move_text}.{when_text}"),
-            ("Check the readings again", f"After one working day, check the load and current on all three phases. Aim to keep the difference within {ALARM_LIMIT_PCT:.0f}%.")
+            ("Inspect the high-load phase", f"Check single-phase circuits on {high_phase} and compare R/Y/B current readings."),
+            ("Redistribute suitable loads", f"Consider moving suitable loads {move_text}.{when_text}"),
+            ("Verify after the change", f"Re-check phase currents and kW after one working day; target deviation within {ALARM_LIMIT_PCT:.0f}%.")
         ]
     else:
         actions = [
-            ("Check all three phases first", f"Ask an electrician to measure current and voltage on Red, Yellow and Blue. Start by checking equipment on {high_phase}."),
-            ("Move equipment only after checking", f"If voltage is normal but current is uneven, move suitable equipment from {high_phase} to {low_phase}."),
-            ("Check the result", f"Check load, current and voltage again after one working day. Aim to keep the difference within {ALARM_LIMIT_PCT:.0f}%.")
+            ("Confirm the phase readings", f"Measure current and voltage on all phases; start by inspecting {high_phase} and its single-phase circuits."),
+            ("Balance only after verification", f"If voltage is stable and current is uneven, move suitable loads from {high_phase} towards {low_phase}."),
+            ("Re-check the result", f"Compare phase kW, current and voltage after one working day; target deviation within {ALARM_LIMIT_PCT:.0f}%.")
         ]
 
     # Impacts are separated into their own card; numeric values are included only
     # where measured diagnosis supports them. Neutral estimate carries assumptions.
     if has_diagnosis:
         extra_heating = max(float(diagnosis.get("loss", 0.0)), 0.0)
-        heating_copy = f"Recent readings suggest about {extra_heating:.1f}% more cable heating than when the phase currents are balanced."
+        heating_copy = f"Measured current pattern estimates about {extra_heating:.1f}% extra I²R heating versus balanced loading."
         neutral_a = float(diagnosis.get("neutral_mean", 0.0))
-        neutral_copy = (f"The neutral wire may carry about {neutral_a:.0f} A (estimate; actual current can vary)." if neutral_a >= 1 else "Uneven phase currents can send extra current through the neutral wire.")
+        neutral_copy = (f"Estimated neutral current is about {neutral_a:.0f} A (4-wire approximation; actual value depends on phase angles and harmonics)." if neutral_a >= 1 else "Unbalanced phase currents can create neutral current in a 3-phase, 4-wire system.")
     else:
-        heating_copy = "Uneven current can waste more power as heat and make the cables run hotter."
-        neutral_copy = "Uneven current can send extra electricity through the neutral wire."
+        heating_copy = "Unequal phase currents can increase I²R losses and conductor heating."
+        neutral_copy = "Unbalanced phase currents can create neutral current in a 3-phase, 4-wire system."
     impacts = [
-        ("More power may be lost as heat", heating_copy),
-        ("The neutral wire may carry extra current", neutral_copy),
-        ("Equipment may get too hot or switch off", "If the imbalance continues, cables and equipment may overheat and safety breakers may trip.")
+        ("Increased cable losses and heating", heating_copy),
+        ("Higher neutral current and equipment stress", neutral_copy),
+        ("Increased risk of overheating and unwanted trips", "A sustained imbalance can overheat cables and contribute to protective trips; check phase loading against equipment ratings.")
     ]
 
     def render_rows(items, icons):
@@ -732,17 +695,17 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
     <div class="phase-summary-wrap">
       <section class="phase-summary-card" tabindex="0" aria-label="Actions to take for phase imbalance">
         <div class="phase-summary-head"><div class="phase-summary-title">✅ ACTIONS TO TAKE</div><span class="phase-summary-badge good">Recommended plan</span></div>
-        <div class="phase-summary-sub">What to do about the {esc(badge_period)} phase forecast</div>
-        <div class="phase-summary-feature"><strong>Forecast for the next {esc(badge_period)}: {esc(forecast_line)}</strong><span>Limit: {ALARM_LIMIT_PCT:.0f}% · {n_alarm_hours} of {n_hours} forecast hours flagged.</span></div>
-        <div class="phase-summary-diagnosis"><b>What the meter readings suggest</b><span>{esc(driver_title)}. {esc(driver_copy)}</span></div>
+        <div class="phase-summary-sub">What to do based on the {esc(badge_period)} phase forecast</div>
+        <div class="phase-summary-feature"><strong>Forecasted imbalance: {esc(forecast_line)}</strong><span>Limit: {ALARM_LIMIT_PCT:.0f}% · {n_alarm_hours} of {n_hours} forecast hours flagged.</span></div>
+        <div class="phase-summary-diagnosis"><b>Likely driver from measured current/voltage readings</b><span>{esc(driver_title)}. {esc(driver_copy)}</span></div>
         {render_rows(actions, ("🔎", "⚖️", "✅"))}
       </section>
       <section class="phase-summary-card" tabindex="0" aria-label="Consequences if phase imbalance is not corrected">
         <div class="phase-summary-head"><div class="phase-summary-title">⚠️ IF YOU DON'T ACT</div><span class="phase-summary-badge {badge_class}">{esc(badge_text)}</span></div>
-        <div class="phase-summary-sub">What could happen if the phase imbalance continues</div>
-        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>The three phases are not sharing the equipment load evenly.</span></div>
+        <div class="phase-summary-sub">What may happen if the phase imbalance continues</div>
+        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>Forecast indicates the phases are not sharing the load evenly.</span></div>
         {render_rows(impacts, ("🔥", "⚡", "🚨"))}
-        <div class="phase-summary-impact"><b>Potential overall impact</b>More power wasted as heat, hot cables and equipment, and unexpected stoppages if the imbalance continues.</div>
+        <div class="phase-summary-impact"><b>Potential overall impact</b>Higher conductor losses, equipment heating and avoidable protection trips if the imbalance is sustained.</div>
       </section>
     </div>'''
 
@@ -758,34 +721,6 @@ def average_in_blocks(values, first_time, hours):
     out = pd.DataFrame(rows, columns=["Start", "End", "Avg kW", "Hours"]); out["Change kW"] = out["Avg kW"].diff(); prev = out["Avg kW"].shift(1)
     out["Change %"] = np.where(prev >= 1, out["Change kW"] / prev * 100, np.nan)
     return out
-
-
-def average_by_clock_hour(values, times):
-    """Compare each clock-hour (00:00–01:00 ... 23:00–00:00) across all forecast days.
-
-    Each hourly forecast point is one hour long, so its average kW is also the
-    energy for that hour in kWh. The profile averages matching clock-hours,
-    not consecutive blocks within the 7-day series.
-    """
-    series = pd.Series(np.asarray(values, dtype=float), index=pd.DatetimeIndex(times))
-    rows = []
-    for hour in range(24):
-        points = series[series.index.hour == hour].dropna()
-        if points.empty:
-            continue
-        day_details = "<br>".join(
-            f"{stamp:%a %d %b}: {value:,.1f} kWh"
-            for stamp, value in points.items()
-        )
-        rows.append({
-            "Hour": hour,
-            "Window": f"{hour:02d}:00–{(hour + 1) % 24:02d}:00",
-            "Avg kW": float(points.mean()),
-            "Avg kWh/day": float(points.mean()),  # one-hour window: kW × 1 hour
-            "Days": int(points.count()),
-            "Daily detail": day_details,
-        })
-    return pd.DataFrame(rows)
 
 
 def forecast_interval_sigma(holdout_result, filled_hours, steps=MAX_FORECAST_HOURS):
@@ -1091,58 +1026,33 @@ with tab_load:
         busiest_vs_mean_pct = (day_summary.loc[busiest_day, "sum"] / mean_day_kwh - 1) * 100 if mean_day_kwh >= 1 else float("nan")
         with energy_kpi_columns[2]: kpi_card("Most power used · day", f"{busiest_day:%a %d %b}", f"{day_summary.loc[busiest_day, 'sum']:,.0f} kWh · average {day_summary.loc[busiest_day, 'mean']:,.1f} kW", "", "📅")
         with energy_kpi_columns[3]: kpi_card("Least power used · day", f"{quietest_day:%a %d %b}", f"{day_summary.loc[quietest_day, 'sum']:,.0f} kWh · average {day_summary.loc[quietest_day, 'mean']:,.1f} kW", "info", "🌙")
-        # Recurring peak hour: compare the SAME clock-hour across all forecast days.
-        hourly_profile = average_by_clock_hour(forecast_values, forecast_times)
-        if hourly_profile.empty:
-            with energy_kpi_columns[4]:
-                kpi_card("Highest recurring hour", "No data", "No hourly forecast values available.", "", "🕒")
-        else:
-            peak_hour_row = hourly_profile.loc[hourly_profile["Avg kW"].idxmax()]
-            peak_hour_window = str(peak_hour_row["Window"])
-            peak_hour_kw = float(peak_hour_row["Avg kW"])
-            peak_hour_days = int(peak_hour_row["Days"])
-            with energy_kpi_columns[4]:
-                kpi_card("Highest recurring hour", f"{peak_hour_kw:,.1f} kW",
-                         f"{peak_hour_window} · {peak_hour_kw:,.1f} kWh/day average · {peak_hour_days} forecast days",
-                         "warn", "⏰")
-
-        st.markdown(
-            '<div class="ph" style="margin:.45rem 0 .2rem"><b>Daily demand by time of day</b></div>',
-            unsafe_allow_html=True,
-        )
-        st.caption("Each bar compares the same one-hour slot across all forecast days. The highlighted bar is the recurring peak hour.")
-        if not hourly_profile.empty:
-            peak_position = int(hourly_profile["Avg kW"].to_numpy().argmax())
-            bar_colors = [WARN_COLOR if i == peak_position else ACCENT for i in range(len(hourly_profile))]
-            customdata = [
-                [int(row.Days), row["Daily detail"]]
-                for _, row in hourly_profile.iterrows()
-            ]
-            fig = go.Figure(go.Bar(
-                x=hourly_profile["Window"],
-                y=hourly_profile["Avg kW"],
-                marker_color=bar_colors,
-                name="Average hourly demand",
-                text=["PEAK" if i == peak_position else "" for i in range(len(hourly_profile))],
-                textposition="outside",
-                cliponaxis=False,
-                customdata=customdata,
-                hovertemplate=(
-                    "<b>%{x}</b><br>"
-                    "Average power across forecast days: <b>%{y:,.1f} kW</b><br>"
-                    "Average energy for this 1-hour slot: <b>%{y:,.1f} kWh/day</b><br>"
-                    "Forecast days included: %{customdata[0]}<br><br>"
-                    "%{customdata[1]}<extra></extra>"
-                ),
-            ))
-            peak_label = f"{peak_hour_window} ({peak_hour_kw:,.1f} kW average)"
-            fig.update_layout(
-                hovermode="closest",
-                title=f"Recurring hourly demand · highest: {peak_label}",
-            )
-            fig.update_xaxes(type="category", title="Same one-hour slot on each forecast day", tickangle=-45)
-            fig.update_yaxes(title="Average power across forecast days (kW)", rangemode="tozero")
-            show_figure(style_figure(fig, 330, False, top=65))
+        # AVERAGE 8 H (a shift): energy of every 8-hour block of the forecast; only full 8 h blocks when there are any
+        shift_table = average_in_blocks(forecast_values, forecast_times[0], 8); shift_low_table, shift_high_table = average_in_blocks(interval_low, forecast_times[0], 8), average_in_blocks(interval_high, forecast_times[0], 8)
+        shift_use = (shift_table["Hours"] == 8).to_numpy(); shift_use = shift_use if shift_use.any() else np.ones(len(shift_table), bool)
+        shift_hours = shift_table["Hours"].to_numpy()[shift_use]; shift_kwh = shift_table["Avg kW"].to_numpy()[shift_use] * shift_hours; mean_shift_kwh = float(shift_kwh.mean())
+        shift_low_kwh, shift_high_kwh = float((shift_low_table["Avg kW"].to_numpy()[shift_use] * shift_hours).mean()), float((shift_high_table["Avg kW"].to_numpy()[shift_use] * shift_hours).mean())
+        busiest_shift_vs_mean_pct = (shift_kwh.max() / mean_shift_kwh - 1) * 100 if mean_shift_kwh >= 1 else float("nan")
+        busiest_shift_row = shift_table[shift_use].iloc[int(shift_kwh.argmax())]; busiest_shift_text = f"{busiest_shift_row['Start']:%a %d %b %H:%M} → {busiest_shift_row['End']:%H:%M}"      # the 8 h period with the most energy
+        busiest_shift_html = "" if len(shift_kwh) < 2 else f"<br>busiest 8 h: <b>{busiest_shift_text}</b> · {shift_kwh.max():,.0f} kWh" + ("" if not np.isfinite(busiest_shift_vs_mean_pct) else f" ({busiest_shift_vs_mean_pct:+.0f} % vs this)")
+        with energy_kpi_columns[4]: kpi_card("Average 8 h", f"{mean_shift_kwh:,.0f} kWh", f"average {float(shift_table['Avg kW'].to_numpy()[shift_use].mean()):,.1f} kW" + busiest_shift_html, "", "🕗")
+        st.write("")
+        valid_block_names = [n for n, h in AVERAGE_BLOCK_HOURS.items() if h <= horizon_hours]
+        block_select_column, _ = st.columns([1.2, 3])
+        block_choice = block_select_column.selectbox("Show average power every", valid_block_names, index=valid_block_names.index("8 hours") if "8 hours" in valid_block_names else min(2, len(valid_block_names) - 1), key="ld_avg", help="Splits the forecast into blocks of this length and averages the power in each block.")
+        # split the forecast into blocks and average each block
+        block_table = average_in_blocks(forecast_values, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice]); block_labels = [block_time_label(r) for r in block_table.itertuples()]; has_two_blocks = len(block_table) >= 2
+        trend_direction = classify_trend(float(block_table["Avg kW"].iloc[0]), float(block_table["Avg kW"].iloc[-1])) if has_two_blocks else classify_trend(float(forecast_values[0]), float(forecast_values[-1]))
+        first_block_kw, last_block_kw = (float(block_table["Avg kW"].iloc[0]), float(block_table["Avg kW"].iloc[-1])) if has_two_blocks else (float(forecast_values[0]), float(forecast_values[-1]))
+        # straight-line trend of the block averages, in kW per hour
+        slope = float(np.polyfit(np.arange(len(block_table)) * AVERAGE_BLOCK_HOURS[block_choice], block_table["Avg kW"], 1)[0]) if has_two_blocks else float("nan")
+        block_chart_container = st.container()
+        with block_chart_container:
+            block_low_kw = average_in_blocks(interval_low, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice])["Avg kW"].to_numpy(); block_high_kw = average_in_blocks(interval_high, forecast_times[0], AVERAGE_BLOCK_HOURS[block_choice])["Avg kW"].to_numpy(); block_avg_kw = block_table["Avg kW"].to_numpy()
+            fig = go.Figure(go.Bar(x=block_labels, y=block_avg_kw, marker_color=ACCENT, name="Average kW", text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in block_table["Change %"]], textposition="outside", cliponaxis=False,
+                                 customdata=np.c_[block_table["Change kW"].fillna(0), block_table["Hours"], block_low_kw, block_high_kw],
+                                 hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>" + CONFIDENCE_TEXT + " interval %{customdata[2]:,.1f} – %{customdata[3]:,.1f} kW<br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} h<extra></extra>"))
+            fig.update_layout(hovermode="closest", yaxis_title=f"average kW per {block_choice}", title=f"Average power every {block_choice}  ·  hover = {CONFIDENCE_TEXT} interval  ·  label = change vs previous block"); fig.update_xaxes(type="category"); fig.update_yaxes(range=[0, float(np.nanmax(block_avg_kw)) * 1.15])
+            show_figure(style_figure(fig, 300, False, top=60))
 
     # ONE suggestions block (fixed wording from the reference images, numbers from the forecast)
     load_advice = build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)                     # only used for the badge and the border colour
@@ -1274,16 +1184,6 @@ with tab_phase:
         fig.update_yaxes(title_text="kW")
         style_figure(fig, 640, legend_y=1.0, top=110); fig.update_annotations(font=dict(size=13, color=TEXT_COLOR)); show_figure(fig)
 
-    with panel("Forecast by day", "hourly calls are noisy - the day-level picture is steadier", key="ph_days"):
-        forecast_with_day = forecast_phase_kw.assign(imb=forecast_table.Imbalance_pct.to_numpy(), worst=forecast_table.Worst_phase.to_numpy(), alarm=forecast_table.Alarm.to_numpy(), day=forecast_phase_kw.index.date)
-        # one summary row per forecast day
-        daily_rows = []
-        for forecast_day, day_rows in forecast_with_day.groupby("day"):
-            alarm_rows_of_day = day_rows[day_rows["alarm"]]
-            daily_rows.append({"Day": f"{forecast_day:%a %d %b}", "Hours": len(day_rows), "Avg imbalance %": round(float(day_rows["imb"].mean()), 1) if day_rows["imb"].notna().any() else np.nan,
-                           "Alarm hours": int(day_rows["alarm"].sum()), "Main phase out of balance": alarm_rows_of_day["worst"].mode().iloc[0] if len(alarm_rows_of_day) else "-"})
-        st.dataframe(pd.DataFrame(daily_rows).set_index("Day"), width="stretch")
-
     # ---- 3-phase load analysis card (rule-based, short)
     # best time to move loads = quietest 3-hour window
     quiet_busy_window = gr.find_quietest_and_busiest_windows(forecast_phase_kw.sum(axis=1).to_numpy(), forecast_phase_kw.index) if n_alarm_hours else None
@@ -1316,12 +1216,6 @@ with tab_phase:
                 fig.add_hline(y=0, line_color=MUTED_COLOR, line_width=1); fig.add_hrect(y0=-ALARM_LIMIT_PCT, y1=ALARM_LIMIT_PCT, fillcolor=hex_to_rgba(GOOD_COLOR, .08), line_width=0)
                 fig.update_layout(title="Which phase is off: load vs the 3-phase average", yaxis_title="% above / below average"); show_figure(style_figure(fig, 300, True, top=70), key="pp_dev")
 
-            # first half vs second half of the window
-            trend_tables = half_over_half_change(phase_params_window)
-            if trend_tables:
-                st.markdown('<div class="ph"><b>What changed</b></div>', unsafe_allow_html=True)
-                st.dataframe(trend_tables[1], width="stretch")
-            note_box("<ul>" + "".join(f"<li>{t_}</li>" for t_ in explain_imbalance_change(phase_params_window)) + "</ul>")
 
       # ---- B) actual vs predicted on test data: last 7 days hidden, model learns only from the hours before them
     with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from the 28 days before them, then its forecast is compared with what really happened", key="ph_bt"):
