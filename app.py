@@ -98,7 +98,7 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 .kpi .l { color:#64748B !important; font-size:.8rem; font-weight:500; }
 .kpi .v { font-family:'JetBrains Mono',monospace; font-size:1.75rem; font-weight:600; letter-spacing:-1px; margin-top:.55rem; color:#0F172A !important; }
 .kpi .s { font-size:.78rem; margin-top:.1rem; color:#64748B !important; }
-.kpi.good .v { color:#059669 !important; } .kpi.warn .v { color:#D97706 !important; } .kpi.bad .v { color:#E11D48 !important; } .kpi.info .v { color:#4F46E5 !important; }
+.kpi.kb .v { color:#2563EB !important; } .kpi.kk .v { color:#0F172A !important; } .kpi .ic { filter:grayscale(1); }
 .kpi .spark { position:absolute; right:0; bottom:0; width:46%; height:38px; opacity:.9; }
 .hero-f { border-radius:18px; padding:1.3rem 1.4rem; height:100%; background:radial-gradient(420px 200px at 100% 0%, rgba(99,102,241,.16), transparent 70%), linear-gradient(180deg,#FFFFFF,#F7F8FF); border:1px solid #E3E6FA; }
 .hero-f .l { font-size:.8rem; font-weight:600; color:#4F46E5 !important; text-transform:uppercase; letter-spacing:.06em; }
@@ -134,9 +134,18 @@ def spark(values, color):
     return f'<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polygon points="0,30 {pts} 100,30" fill="{color}22"/><polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.8" vector-effect="non-scaling-stroke"/></svg>'
 
 
+KPI_N = [0]                                                       # card counter: blue, black, blue, black ... (reset at the start of every row of cards)
+
+
+def kreset():
+    KPI_N[0] = 0
+
+
 def kpi(label, value, sub="", tone="", icon="", trend=None, trend_color=FORECAST):
-    st.markdown(f'<div class="kpi {tone}"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div><div class="v">{value}</div><div class="s">{sub}</div>'
-                f'{spark(trend, trend_color) if trend is not None else ""}</div>', unsafe_allow_html=True)
+    """One card. The value colour only alternates blue / black from card to card; `tone` is accepted but no longer changes any colour."""
+    blue = KPI_N[0] % 2 == 0; KPI_N[0] += 1
+    st.markdown(f'<div class="kpi {"kb" if blue else "kk"}"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div><div class="v">{value}</div><div class="s">{sub}</div>'
+                f'{spark(trend, "#2563EB" if blue else "#0F172A") if trend is not None else ""}</div>', unsafe_allow_html=True)
 
 
 def note(text, tone=""):
@@ -480,7 +489,7 @@ def need_more_data():
 # ================================================================== OVERVIEW
 with tab_overview:
     daily = S["daily"]; total_h = (S["run_min"] + S["idle_min"]) / 60
-    k = st.columns(5)
+    kreset(); k = st.columns(5)
     with k[0]: kpi("Energy used", f"{S['energy'] / 1000:,.1f} MWh", f"{len(daily)} days of data", "", "🔋", daily.kwh.values, LOAD)
     with k[1]: kpi("Machine uptime", f"{S['util']:.1f} %", f"{S['run_min'] / 60:,.0f} h on · {S['idle_min'] / 60:,.0f} h idle", "info", "⏱️", daily.run_h.values, FORECAST)
     with k[2]: kpi("Peak load", f"{S['peak']:,.0f} kW", "highest 1-minute reading", "", "📈")
@@ -534,7 +543,7 @@ with tab_load:
     up_down = "▲" if end_value >= last_actual else "▼"
     energy_f, avg_f, peak_f = float(fv.sum()), float(fv.mean()), float(fv.max()); energy_before = float(y_mod.iloc[-horizon:].sum())
     with panel("Power needed in the selected period", f"{t_f[0]:%d %b %H:%M} → {(t_f[-1] + pd.Timedelta(hours=1)):%d %b %H:%M} · {span_text(horizon)} · energy = sum of hourly kW", key="ld_pw"):
-        pk = st.columns(5)
+        kreset(); pk = st.columns(5)
         with pk[0]: kpi("Energy needed · forecast", f"{energy_f:,.0f} kWh", f"average {avg_f:,.1f} kW over {span_text(horizon)}", "info", "🔌")
         diff_e = energy_f - energy_before
         with pk[1]: kpi("Energy used · previous period", f"{energy_before:,.0f} kWh", (f"forecast is {diff_e:+,.0f} kWh ({diff_e / energy_before * 100:+.0f} %) vs this" if energy_before >= 1 else "the machine was idle in that period") + f" · last {span_text(horizon)}", "", "📊")
@@ -583,7 +592,7 @@ with tab_load:
     if ho is None: st.caption("Not enough history for a 7-day test.")
     else:
         sc = ho["scores"]; mean_a = float(np.nanmean(ho["actual"].to_numpy()))
-        k = st.columns(4)
+        kreset(); k = st.columns(4)
         with k[0]: kpi("MAE", f"{sc['MAE']:.2f} kW", f"{sc['MAE'] / max(mean_a, 1e-9) * 100:.1f} % of the mean test load" if mean_a >= 1 else "test period has ~0 kW load", "info", "📏")
         with k[1]: kpi("RMSE", f"{sc['RMSE']:.2f} kW", f"{sc['n']} hours compared", "", "🎯")
         with k[2]: kpi("WAPE", f"{sc['WAPE']:.1f} %", "total error ÷ total load · smaller is better", "good" if sc["WAPE"] < 10 else "warn" if sc["WAPE"] < 25 else "bad", "✅")
@@ -606,16 +615,8 @@ with tab_phase:
     P_method = c[4].selectbox("Forecast method", gf.PHASE_METHODS, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The test below shows which one does better on your data.")
     fit_steps = int(P_days) * 24; horizon = LD_LENGTHS[P_len]
     fc_arr, lbls, ok_ph = run_phases(ph_mod.iloc[-fit_steps:], MAX_STEPS, P_model, P_season, P_method)
-    BT = run_phase_backtest(ph_real, ph_mod, P_model, P_season, fit_steps, 4, P_method, ALARM_PCT, SEVERE_PCT, MIN_KW)
-    REL = gf.reliability(BT, ALARM_PCT)                                  # None when the history is too short to test
     Pf = pd.DataFrame(fc_arr[:horizon], index=t_fut_all[:horizon], columns=PH3); rep = analyse(Pf.to_numpy())
     if not ok_ph: note(f"A model fit failed for {', '.join(p for p in PH3 if lbls[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
-    if REL is None: note("The history is too short to test this forecast on past weeks, so the forecast alarms below are <b>not verified</b>.", "amber")
-    else:
-        tone_r = {"RELIABLE": "good", "DEGRADED": "amber", "UNRELIABLE": "bad"}.get(REL[0], "amber")
-        advice_r = {"RELIABLE": "The forecast alarms can be used for planning.", "DEGRADED": "Use the forecast alarms as a hint only and check the measured imbalance.",
-                    "UNRELIABLE": "Do not plan from the forecast alarm hours. Use the measured imbalance (the cause and the plan below do not depend on the forecast)."}.get(REL[0], "")
-        note(f"<b>Forecast check on the last {BT['imbalance']['weeks']} weeks: {REL[0]}.</b> {advice_r}<br>{REL[1]}.", tone_r)
 
     DG = diagnose(Dv[NEEDED], ALARM_PCT, MIN_KW, SEVERE_PCT); dg = None if DG["empty"] else DG
     r0 = a_now.iloc[0]
@@ -626,13 +627,12 @@ with tab_phase:
     imb = rep.Imbalance_pct.to_numpy(); n_al, n_sev = int(rep.Alarm.sum()), int((rep.Status == "SEVERE").sum())
     first_alarm = Pf.index[int(np.flatnonzero(rep.Alarm.to_numpy())[0])] if n_al else None
     worst_k = int(np.nanargmax(imb)) if np.isfinite(imb).any() else 0
-    k = st.columns(5)
+    kreset(); k = st.columns(5)
     with k[0]: kpi("Imbalance now", "idle" if not now["loaded"] else f"{now['imb']:.1f} %", "machine idle" if not now["loaded"] else f"{now['worst']} {now['direction']} · limit {ALARM_PCT:g} %", "good" if now["status"] == "OK" else "bad" if now["status"] == "SEVERE" else "warn" if now["status"] == "ALARM" else "info", "⚖️")
     with k[1]:
-        if dg: kpi("Average imbalance · measured", f"{dg['mean_imb']:.1f} %", f"above limit in {dg['pct_above']:.0f} % of minutes · hourly {hr_mean:.1f} %")
+        if dg: kpi("Average imbalance · measured", f"{dg['mean_imb']:.1f} %", f"above the limit in {dg['pct_above']:.0f} % of loaded minutes · hourly means: {hr_mean:.1f} %", "good" if dg["mean_imb"] <= ALARM_PCT else "warn" if dg["mean_imb"] <= SEVERE_PCT else "bad", "📏")
         else: kpi("Average imbalance · measured", "–", "too few loaded minutes", "", "📏")
-    unver = REL is None or REL[0] in ("UNRELIABLE", "INSUFFICIENT DATA")
-    with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe" + (" · not verified" if unver else ""), "info" if unver else ("good" if n_al == 0 else "bad"), "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
+    with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe", "", "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
     with k[3]: kpi("First forecast alarm", "none" if first_alarm is None else f"{first_alarm:%a %H:%M}", "no alarm expected" if first_alarm is None else f"{first_alarm:%d %b} · in {(first_alarm - t_last).total_seconds() / 3600:.0f} h", "good" if first_alarm is None else "warn", "⏰")
     with k[4]: kpi("Worst colour · forecast", "–" if not np.isfinite(imb).any() else rep.Worst_phase.iloc[worst_k], "" if not np.isfinite(imb).any() else f"{rep.Direction.iloc[worst_k]} · peak {imb[worst_k]:.1f} % at {Pf.index[worst_k]:%a %H:%M}", "info", "🎨")
     st.write("")
@@ -666,7 +666,7 @@ with tab_phase:
             rows_d.append({"Day": f"{d_:%a %d %b}", "Hours": len(g_), "Avg imbalance %": round(float(g_["imb"].mean()), 1) if g_["imb"].notna().any() else np.nan,
                            "Alarm hours": int(g_["alarm"].sum()), "Severe hours": int(g_["sev"].sum()), "Main phase out of balance": ga["worst"].mode().iloc[0] if len(ga) else "-"})
         st.dataframe(pd.DataFrame(rows_d).set_index("Day"), width="stretch")
-    if dg and not dg["pf_ok"]: note("The kW columns match voltage × current almost exactly (power factor ≈ 1), so they look like <b>kVA</b>, not kW. The power-factor share is therefore not reliable and is left out of 'What explains it'. Check with the meter owner.", "amber")
+    if dg and not dg["pf_ok"]: note("The kW columns match voltage × current almost exactly (power factor ≈ 1), so they look like <b>kVA</b>, not kW. The power-factor share is therefore left out of 'What explains it'. Check with the meter owner.", "amber")
 
     # ---- short review (rule-based, same numbers as before, five lines)
     rv = []
@@ -718,35 +718,3 @@ with tab_phase:
         with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
             st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
     else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
-
-    with st.expander("Check your own readings"):
-        c = st.columns(4)
-        rr, yy, bb = c[0].number_input("Red kW", 0.0, 5000.0, 170.0, 1.0, key="chk_r"), c[1].number_input("Yellow kW", 0.0, 5000.0, 169.0, 1.0, key="chk_y"), c[2].number_input("Blue kW", 0.0, 5000.0, 160.0, 1.0, key="chk_b")
-        res = analyse([[rr, yy, bb]]).iloc[0]
-        with c[3]:
-            if not res.Loaded: kpi("Result", "No load", f"average below {MIN_KW:g} kW per phase", "", "ℹ️")
-            else: kpi("Imbalance", f"{res.Imbalance_pct:.2f} %", f"{res.Worst_phase} is {abs(res.Worst_dev):.1f} % {'above' if res.Worst_dev > 0 else 'below'} the average · {res.Status}", "good" if res.Status == "OK" else "bad" if res.Status == "SEVERE" else "warn", "🧮")
-
-        st.markdown("**Don't know the kW? Work it out from voltage, current and power factor**")
-        try: dv, di, dpf = [float(x) for x in (tl[VOLT].median().median(), tl[CURR].median().median(), tl["PF"].median())]
-        except Exception: dv, di, dpf = 230.0, 100.0, 0.9
-        dpf = min(max(dpf, 0.05), 1.0) if np.isfinite(dpf) else 0.9
-        mode = st.radio("How was the voltage measured?", ["Per phase (phase-to-neutral volts, one current per phase)", "Whole three-phase load (line-to-line volts, one average current)"], key="calc_mode", horizontal=True)
-        q = st.columns(4)
-        pf_in = q[3].number_input("Power factor", 0.05, 1.0, round(dpf, 2), 0.01, key="calc_pf", help="Start value is the median power factor of your file.")
-        if mode.startswith("Per phase"):
-            vv = [q[i].number_input(f"{n} voltage (V)", 0.0, 1000.0, round(dv, 1), 1.0, key=f"calc_v{i}") for i, n in enumerate(NAMES)]
-            q2 = st.columns(4); ii = [q2[i].number_input(f"{n} current (A)", 0.0, 10000.0, round(di, 1), 1.0, key=f"calc_i{i}") for i, n in enumerate(NAMES)]
-            kw_calc = [v * a * pf_in / 1000 for v, a in zip(vv, ii)]; tot_calc = sum(kw_calc)
-        else:
-            vl = q[0].number_input("Line-to-line voltage (V)", 0.0, 2000.0, round(dv * 3 ** .5, 1), 1.0, key="calc_vl"); il = q[1].number_input("Current (A)", 0.0, 10000.0, round(di, 1), 1.0, key="calc_il")
-            tot_calc = 3 ** .5 * vl * il * pf_in / 1000; kw_calc = [tot_calc / 3] * 3
-        o = st.columns(4)
-        for i, n in enumerate(NAMES): o[i].metric(f"{n} kW", f"{kw_calc[i]:,.2f}")
-        o[3].metric("Total kW", f"{tot_calc:,.2f}")
-        st.caption("kW = voltage × current × power factor ÷ 1000 per phase (three-phase total: √3 × line voltage × current × power factor ÷ 1000). With one average current the three phases come out equal, so the imbalance is 0 %.")
-        if mode.startswith("Per phase"):
-            rc = analyse([kw_calc]).iloc[0]
-            if rc.Loaded: st.caption(f"Imbalance from these three results: **{rc.Imbalance_pct:.2f} %** · {rc.Worst_phase} is {abs(rc.Worst_dev):.1f} % {'above' if rc.Worst_dev > 0 else 'below'} the average · {rc.Status}")
-
-    note(f"<b>Alarm rule:</b> imbalance % = largest deviation of a phase from the average of the three ÷ the average × 100 (170 / 169 / 160 kW → 3.81 %). Alarm above {ALARM_PCT:g} %, severe above {SEVERE_PCT:g} %.")
