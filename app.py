@@ -98,7 +98,7 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 .kpi .l { color:#64748B !important; font-size:.8rem; font-weight:500; }
 .kpi .v { font-family:'JetBrains Mono',monospace; font-size:1.75rem; font-weight:600; letter-spacing:-1px; margin-top:.55rem; color:#0F172A !important; }
 .kpi .s { font-size:.78rem; margin-top:.1rem; color:#64748B !important; }
-.kpi.kb .v { color:#2563EB !important; } .kpi.kk .v { color:#0F172A !important; } .kpi .ic { filter:grayscale(1); }
+.kpi.kb .v { color:#2563EB !important; } .kpi.kk .v { color:#0F172A !important; }
 .kpi .spark { position:absolute; right:0; bottom:0; width:46%; height:38px; opacity:.9; }
 .hero-f { border-radius:18px; padding:1.3rem 1.4rem; height:100%; background:radial-gradient(420px 200px at 100% 0%, rgba(99,102,241,.16), transparent 70%), linear-gradient(180deg,#FFFFFF,#F7F8FF); border:1px solid #E3E6FA; }
 .hero-f .l { font-size:.8rem; font-weight:600; color:#4F46E5 !important; text-transform:uppercase; letter-spacing:.06em; }
@@ -142,10 +142,10 @@ def kreset():
 
 
 def kpi(label, value, sub="", tone="", icon="", trend=None, trend_color=FORECAST):
-    """One card. The value colour only alternates blue / black from card to card; `tone` is accepted but no longer changes any colour."""
+    """One card. Only the number colour alternates blue / black; icon, trend line and everything else keep their original colours."""
     blue = KPI_N[0] % 2 == 0; KPI_N[0] += 1
-    st.markdown(f'<div class="kpi {"kb" if blue else "kk"}"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div><div class="v">{value}</div><div class="s">{sub}</div>'
-                f'{spark(trend, "#2563EB" if blue else "#0F172A") if trend is not None else ""}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="kpi {"kb" if blue else "kk"} {tone}"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div><div class="v">{value}</div><div class="s">{sub}</div>'
+                f'{spark(trend, trend_color) if trend is not None else ""}</div>', unsafe_allow_html=True)
 
 
 def note(text, tone=""):
@@ -718,3 +718,4 @@ with tab_phase:
         with c3, panel("Who carries the load", "average over the loaded minutes", key="ph_carry"):
             st.markdown(phase_bars(list(dg["Km"]), float(dg["Km"].max()) * 1.15), unsafe_allow_html=True)
     else: note("Not enough loaded minutes (above the MIN_KW limit) to measure the cause.", "amber")
+      z
