@@ -341,14 +341,12 @@ def diagnose_phase_imbalance(minute_frame, alarm_limit_pct, min_phase_kw):
     transfer_plan = pd.DataFrame([(f, t, a, a * mean_kw[PHASE_LABELS.index(f)] / mean_current_a[PHASE_LABELS.index(f)]) for f, t, a in plan_transfers(mean_current_a, PHASE_LABELS) if a >= 1.0], columns=["From", "To", "Move A", "Move kW"])
     # neutral current of a 4-wire supply (same PF angle on all phases)
     neutral_current_a = np.sqrt(np.maximum(0, (current_values ** 2).sum(axis=1) - current_values[:, 0] * current_values[:, 1] - current_values[:, 1] * current_values[:, 2] - current_values[:, 2] * current_values[:, 0]))      # neutral current of a 4-wire supply (same PF angle on all phases)
-    # extra I²R heating against a perfectly balanced load
-    extra_heating_pct = ((current_values ** 2).sum(axis=1) / (3 * current_values.mean(axis=1) ** 2) - 1) * 100                                                  # extra I²R heating against a perfectly balanced load
     imbalance_by_hour = pd.Series(kw_imbalance_pct, index=valid_frame.index).groupby(valid_frame.index.hour).mean()
     status_counts = imbalance_table.Status[imbalance_table.Loaded].value_counts().reindex(["OK", "ALARM"]).fillna(0)
     return dict(result, empty=False, mean_imb=float(kw_imbalance_pct.mean()), p95_imb=float(np.percentile(kw_imbalance_pct, 95)), pct_above=float((imbalance_table.Imbalance_pct[imbalance_table.Loaded] > alarm_limit_pct).mean() * 100),
                 mean_I=float(current_imbalance_pct.mean()), mean_V=float(voltage_imbalance_pct.mean()), p95_V=float(np.percentile(voltage_imbalance_pct, 95)), corr_I=safe_correlation(kw_imbalance_pct, current_imbalance_pct), corr_V=safe_correlation(kw_imbalance_pct, voltage_imbalance_pct), share=cause_share_pct,
                 per=per_phase_table, main=main_phase_index, main_name=PHASE_LABELS[main_phase_index], extra_A=float(main_extra_current_a.mean()), extra_kW=float(main_extra_kw.mean()), levels=load_level_table, const=bool(extra_current_is_constant), lvA_const=float(extra_current_by_level.iloc[1:].mean()),
-                ctot=safe_correlation(kw_imbalance_pct, total_kw), plan=transfer_plan, Im=mean_current_a, Km=mean_kw, neutral_mean=float(neutral_current_a.mean()), neutral_p95=float(np.percentile(neutral_current_a, 95)), loss=float(extra_heating_pct.mean()),
+                ctot=safe_correlation(kw_imbalance_pct, total_kw), plan=transfer_plan, Im=mean_current_a, Km=mean_kw, neutral_mean=float(neutral_current_a.mean()), neutral_p95=float(np.percentile(neutral_current_a, 95)),
                 by_hour=imbalance_by_hour, status=status_counts, pf_ok=bool(pf_is_meaningful), pf_phase=float(phase_power_factor.mean()), pf_meter=float(valid_frame["PF"].mean()), high_share=float(per_phase_table.iloc[main_phase_index, 1]))
 
 # ------------------------------------------------------------------ RULE-BASED ADVICE TEXT (no AI)
@@ -641,18 +639,15 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
             ("Re-check the result", f"Compare phase kW, current and voltage after one working day; target deviation within {ALARM_LIMIT_PCT:.0f}%.")
         ]
 
-    # Impacts are separated into their own card; numeric values are included only
-    # where measured diagnosis supports them. Neutral estimate carries assumptions.
+    # Keep cable-heating guidance qualitative; do not calculate or display an
+    # estimated I²R heating percentage. Neutral current remains a separate estimate.
     if has_diagnosis:
-        extra_heating = max(float(diagnosis.get("loss", 0.0)), 0.0)
-        heating_copy = f"Measured current pattern estimates about {extra_heating:.1f}% extra I²R heating versus balanced loading."
         neutral_a = float(diagnosis.get("neutral_mean", 0.0))
         neutral_copy = (f"Estimated neutral current is about {neutral_a:.0f} A (4-wire approximation; actual value depends on phase angles and harmonics)." if neutral_a >= 1 else "Unbalanced phase currents can create neutral current in a 3-phase, 4-wire system.")
     else:
-        heating_copy = "Unequal phase currents can increase I²R losses and conductor heating."
         neutral_copy = "Unbalanced phase currents can create neutral current in a 3-phase, 4-wire system."
     impacts = [
-        ("Increased cable losses and heating", heating_copy),
+        ("Uneven load can cause cable heating", "Uneven phase currents can cause some cables to heat up more than others. Check the affected phase current against its cable rating."),
         ("Higher neutral current and equipment stress", neutral_copy),
         ("Increased risk of overheating and unwanted trips", "A sustained imbalance can overheat cables and contribute to protective trips; check phase loading against equipment ratings.")
     ]
@@ -705,7 +700,7 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
         <div class="phase-summary-sub">What may happen if the phase imbalance continues</div>
         <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>Forecast indicates the phases are not sharing the load evenly.</span></div>
         {render_rows(impacts, ("🔥", "⚡", "🚨"))}
-        <div class="phase-summary-impact"><b>Potential overall impact</b>Higher conductor losses, equipment heating and avoidable protection trips if the imbalance is sustained.</div>
+        <div class="phase-summary-impact"><b>Potential overall impact</b>Uneven loading can increase cable and equipment heating and may contribute to protection trips if it continues.</div>
       </section>
     </div>'''
 
