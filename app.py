@@ -1001,17 +1001,12 @@ with tab_overview:
     st.write("")
     timeline_col, donut_col = st.columns([2.1, 1])
     with timeline_col, panel("Load timeline", "10-minute averages · gaps are missing data", key="timeline"):
-        signal_choice = st.selectbox("Signal", ["Total load (kW)", "Phase load R / Y / B (kW)", "Phase imbalance (%)", "Phase current (A)", "Voltage (V)"], label_visibility="collapsed")
-        cols = {"Total load (kW)": ["KW"], "Phase load R / Y / B (kW)": PHASE_KW_COLS, "Phase imbalance (%)": PHASE_KW_COLS, "Phase current (A)": CURRENT_COLS, "Voltage (V)": VOLTAGE_COLS}[signal_choice]
+        signal_choice = st.selectbox("Signal", ["Total load (kW)", "Phase load R / Y / B (kW)", "Phase current (A)", "Voltage (V)"], label_visibility="collapsed")
+        cols = {"Total load (kW)": ["KW"], "Phase load R / Y / B (kW)": PHASE_KW_COLS, "Phase current (A)": CURRENT_COLS, "Voltage (V)": VOLTAGE_COLS}[signal_choice]
         ten_minute_means = minute_rows.set_index("Timestamps")[cols].resample("10min").mean(); fig = go.Figure()
-        if signal_choice == "Phase imbalance (%)":
-            balance_10min = analyse_balance(ten_minute_means.to_numpy()); imbalance_10min = balance_10min.Imbalance_pct.where(balance_10min.Loaded).to_numpy()
-            fig.add_scatter(x=ten_minute_means.index, y=imbalance_10min, name="Imbalance %", line=dict(color=ACCENT, width=1.4), fill="tozeroy", fillcolor=hex_to_rgba(ACCENT, .14), connectgaps=False)
-            fig.add_hline(y=ALARM_LIMIT_PCT, line_dash="dot", line_color=WARN_COLOR, annotation_text=f"alarm {ALARM_LIMIT_PCT:g} %", annotation_position="top left")
-        else:
-            line_colors = [LOAD_COLOR] if cols == ["KW"] else [PHASE_COLORS["RKW"], PHASE_COLORS["YKW"], PHASE_COLORS["BKW"]]
-            for color_index, (col_name, color) in enumerate(zip(cols, line_colors)):
-                fig.add_scatter(x=ten_minute_means.index, y=ten_minute_means[col_name], name=col_name, line=dict(color=color, width=1.4), fill="tozeroy" if len(cols) == 1 else None, fillcolor=hex_to_rgba(ACCENT, .14), connectgaps=False)
+        line_colors = [LOAD_COLOR] if cols == ["KW"] else [PHASE_COLORS["RKW"], PHASE_COLORS["YKW"], PHASE_COLORS["BKW"]]
+        for color_index, (col_name, color) in enumerate(zip(cols, line_colors)):
+            fig.add_scatter(x=ten_minute_means.index, y=ten_minute_means[col_name], name=col_name, line=dict(color=color, width=1.4), fill="tozeroy" if len(cols) == 1 else None, fillcolor=hex_to_rgba(ACCENT, .14), connectgaps=False)
         fig.update_xaxes(rangeslider_visible=True, rangeslider_thickness=.07); show_figure(style_figure(fig, 400, legend=True, top=40))
     with donut_col, panel("Where the time went", "share of all minutes", key="donut"):
         fig = go.Figure(go.Pie(labels=["Running", "Idle", "No data"], values=[timeline_stats["run_min"], timeline_stats["idle_min"], timeline_stats["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD_COLOR, IDLE_COLOR, NO_DATA_COLOR], line=dict(color="#fff", width=2)),
