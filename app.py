@@ -38,6 +38,13 @@ MIN_KW = 5.0         # average kW per phase below this = machine off
 SMOOTH = 30          # minutes of rolling mean (past minutes only)
 DEMAND = 0.0         # sanctioned demand in kW, 0 = unknown
 RATING = 0.0         # phase breaker / cable in A, 0 = unknown
+LOAD_CHG_PCT = 5.0   # forecast energy must differ more than this % from the previous period to count as an INCREASE / DECREASE
+CAPTIVE_KW = 0.0     # own (captive) generation capacity in kW, 0 = unknown
+HAS_BATTERY = False  # True if a battery storage system is available
+SHIFTABLE_PCT = 10.0 # % of the peak that could be moved to other hours (flexible loads)
+TARIFF = 0.0         # money per kWh, 0 = do not show a cost
+DEMAND_CHARGE = 0.0  # money per kW of peak demand, 0 = do not show a cost
+CURRENCY = ""        # e.g. "INR"
 MINR = 45            # an hour with fewer one-minute readings than this counts as missing (as in the notebooks)
 
 # COLOUR THEME  (one palette everywhere)
@@ -390,6 +397,113 @@ def power_advice(kind, first, last, peak, long_horizon, ctx=None):
 
 
 
+# ------------------------------------------------------------------ rule-based suggestion cards (no AI): LOAD forecast + 3-PHASE analysis
+CARD_TONE = {"bad": ("#F43F5E", "#FFE4E8", "#BE123C"), "amber": ("#F59E0B", "#FFEBD5", "#C2410C"), "good": ("#10B981", "#D8F5E9", "#047857"), "info": ("#6366F1", "#E7E8FF", "#4338CA")}
+
+
+def _badge(text, tone):
+    c = CARD_TONE[tone]; return f'<span style="background:{c[1]};color:{c[2]};border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:600;white-space:nowrap">{text}</span>'
+
+
+def card_html(title, badge, tone, items, headline="", numbered=True, border=None):
+    """One white card: TITLE + badge, optional bold headline, then heading + one short sentence per item (single line of HTML - Streamlit markdown must not see blank lines)."""
+    c = CARD_TONE[border or tone]
+    rows = "".join(f'<p style="margin:0 0 .7rem;color:#334155;font-size:.88rem;line-height:1.55"><b style="color:{INK}">{h}.</b> {t}</p>' for h, t in items)
+    head = f'<div style="font-weight:600;color:{INK};font-size:.9rem;margin:10px 0 8px">{headline}</div>' if headline else '<div style="height:10px"></div>'
+    return f'<div style="border:1px solid {c[0]};border-radius:14px;padding:14px 18px;background:#fff;margin-bottom:.6rem"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-weight:700;color:{INK};font-size:.8rem;letter-spacing:.03em">{title}</span>{_badge(badge, tone)}</div>{head}{rows}</div>'
+
+
+def load_suggestions(fv, t_f, prev_kwh):
+    """Short rule-based risks + actions for the forecast TOTAL kW.  Direction = forecast energy vs the previous period of the same length (> LOAD_CHG_PCT).
+    Numbers come only from the forecast and the settings at the top of the file; a setting left at 0 is simply not mentioned.
+    Returns dict(kind, badge, tone, headline, risks, actions, managed, ignored)."""
+    fv = np.asarray(fv, float); n = len(fv); kwh = float(fv.sum()); avg = float(fv.mean())
+    peak, pk = float(fv.max()), t_f[int(fv.argmax())]; low, lo = float(fv.min()), t_f[int(fv.argmin())]
+    d_kwh = kwh - prev_kwh; d_pct = d_kwh / prev_kwh * 100 if prev_kwh >= 1 else float("nan")
+    kind = "idle" if avg < MIN_KW else "up" if d_pct > LOAD_CHG_PCT else "down" if d_pct < -LOAD_CHG_PCT else "stable"
+    pct = "" if not np.isfinite(d_pct) else f"{abs(d_pct):.0f} % {'above' if d_pct > 0 else 'below'} the previous {span_text(n)}" if abs(d_pct) >= 0.5 else f"same as the previous {span_text(n)}"
+    mny = lambda x: f"{x:,.0f}{(' ' + CURRENCY) if CURRENCY else ''}"
+    short = max(peak - CAPTIVE_KW, 0.0) if CAPTIVE_KW > 0 else 0.0; spare = max(CAPTIVE_KW - peak, 0.0) if CAPTIVE_KW > 0 else 0.0
+    over = max(peak - DEMAND, 0.0) if DEMAND > 0 else 0.0; use = peak / DEMAND * 100 if DEMAND > 0 else float("nan")
+    shave = peak * SHIFTABLE_PCT / 100; extra = max(d_kwh, 0) * TARIFF + over * DEMAND_CHARGE; unused = max(-d_kwh, 0.0)
+    at = lambda ts: f"{ts:%a %H:%M}"; gap = max(short, over)
+    if kind == "idle":
+        risks = [("Machine expected idle", f"Average {avg:,.1f} kW (below {MIN_KW:g} kW). If it should be running, check supply, start-up and process."), ("Idle fixed charges", "Demand and fixed charges are still billed with no output.")]
+        acts = [("Confirm the stop is planned", "If yes, switch off auxiliaries and use the time for maintenance."), ("Look for a fault", "Tripped breaker, supply problem, sensor or data problem.")]
+        gain, lose = "A planned stop saves energy and gives a maintenance window.", "An unplanned stop means lost production and fixed charges with no output."
+    elif kind == "up":
+        risks = [("Higher electricity cost", f"{kwh:,.0f} kWh needed, {pct}. " + (f"Extra grid or backup power may cost about {mny(max(d_kwh, 0) * TARIFF)}." if TARIFF > 0 else "Extra grid or backup power may be needed.")),
+                 ("Increased peak demand", f"Peak {peak:,.1f} kW around {at(pk)}" + (f", {short:,.1f} kW above own generation" if short else "") + (f", {over:,.1f} kW above sanctioned demand (penalty risk)" if over else f", {use:.0f} % of sanctioned demand" if DEMAND > 0 else "") + "."),
+                 ("Missed energy storage" if HAS_BATTERY else "Missed load shifting", f"Battery not charged around {at(lo)} may be empty at the peak." if HAS_BATTERY else f"Flexible work left in the peak wastes the {peak - low:,.1f} kW gap to the lowest hour."),
+                 ("Increased operational risk", f"Peak exceeds available power by {gap:,.1f} kW; backup or reduced operation may be needed." if gap else "If demand exceeds supply, production may stop."),
+                 ("Higher energy management cost", f"Uncoordinated demand may add about {mny(extra)}." if extra > 0 else "Unmanaged peaks and grid imports raise avoidable cost.")]
+        acts = [("Optimize internal generation", f"Plan own generation for {kwh:,.0f} kWh and arrange grid or backup for the rest."),
+                ("Prepare for peak demand", f"Keep {peak:,.1f} kW capacity ready around {at(pk)}" + (f" (shortfall {short:,.1f} kW)." if short else f" (spare {spare:,.1f} kW)." if spare else ".")),
+                ("Optimize energy storage" if HAS_BATTERY else "Use the low-load hours", f"Charge the battery around {at(lo)}; discharge at the peak." if HAS_BATTERY else f"Run flexible work around {at(lo)} ({low:,.1f} kW), not at the peak."),
+                ("Shift flexible loads", f"Stagger motor starts away from {at(pk)}; moving {SHIFTABLE_PCT:g} % cuts the peak by about {shave:,.1f} kW."),
+                ("Monitor power availability", "Compare the forecast with available generation; plan backup if short.")]
+        gain = f"Peak can drop by about {shave:,.1f} kW" + (f", saving about {mny(shave * DEMAND_CHARGE)}" if DEMAND_CHARGE > 0 else "") + "; backup supply and stoppages are avoided."
+        lose = (f"About {mny(extra)} extra cost" if extra > 0 else "Extra grid or backup cost") + (f", peak {gap:,.1f} kW over capacity" if gap else "") + ", and possible production disruption."
+    elif kind == "down":
+        risks = [("Under-utilised generation", f"{kwh:,.0f} kWh needed, {pct}; up to {unused:,.0f} kWh of usual generation may go unused" + (f" (about {mny(unused * TARIFF)})." if TARIFF > 0 else ".")),
+                 ("Wasted fuel", f"Peak {peak:,.1f} kW leaves {spare:,.1f} kW of own generation idle." if spare else f"Generation sized for a higher load runs inefficiently (peak only {peak:,.1f} kW)."),
+                 ("Low-load inefficiency", f"Lowest hour {low:,.1f} kW around {at(lo)}; motors and generators are least efficient at low load."),
+                 ("Possible production slowdown", "Check the drop is planned, not a stoppage, fault or data problem."),
+                 ("Fixed-cost pressure", f"Contract demand {DEMAND:g} kW is billed while the peak uses {use:.0f} %." if DEMAND > 0 else "Fixed and demand charges stay the same, so cost per kWh rises.")]
+        acts = [("Right-size generation", f"Run fewer units or a lower setpoint to match {kwh:,.0f} kWh."),
+                ("Use the surplus", "Charge the battery when generation exceeds demand." if HAS_BATTERY else f"Move flexible work into the low hours around {at(lo)}."),
+                ("Consolidate loads", f"Run machines together; switch off idle equipment around {at(lo)}."),
+                ("Review contract demand", f"Peak is {use:.0f} % of contract demand; ask if it can be lowered." if DEMAND > 0 and use < 80 else "If the peak stays well below contract demand, a lower contract may cut fixed charges."),
+                ("Check why demand fell", "Maintenance, planned shutdown, sensor or hidden machine fault.")]
+        gain = f"Matching generation to demand avoids up to {unused:,.0f} kWh" + (f" (about {mny(unused * TARIFF)})" if TARIFF > 0 else "") + " of unnecessary generation and fuel."
+        lose = f"Up to {unused:,.0f} kWh" + (f" (about {mny(unused * TARIFF)})" if TARIFF > 0 else "") + " wasted, fixed charges on unused capacity, and a hidden fault may go unnoticed."
+    else:
+        risks = [("Demand is steady", f"{kwh:,.0f} kWh needed, {pct or 'no major change'}."), ("Peak to watch", f"{peak:,.1f} kW around {at(pk)}" + (f" ({use:.0f} % of sanctioned demand)." if DEMAND > 0 else ".")), ("Low-load hours", f"Lowest {low:,.1f} kW around {at(lo)}.")]
+        acts = [("Keep the current plan", "Generation and storage settings can stay as they are."), ("Prepare for the peak", f"Keep {peak:,.1f} kW ready around {at(pk)}; stagger motor starts."), ("Keep monitoring", "The forecast updates as new readings arrive.")]
+        gain, lose = "Staggered motor starts keep the peak low and the bill steady.", "A coincident start-up can still create a costly peak."
+    big = kind == "down" and np.isfinite(d_pct) and d_pct < -10
+    tone = "bad" if gap else "amber" if kind in ("up", "down") else "good"
+    return dict(kind=kind, tone=tone, badge="Attention" if gap or big else "Watch" if kind in ("up", "down") else "Normal", risks=risks, actions=acts, managed=gain, ignored=lose, headline=f"Forecasted peak demand: {peak:,.1f} kW around {pk:%A, %H:%M}")
+
+
+def phase_analysis_html(Pf, rep, dg, win=None):
+    """The compact '3-phase load analysis' card: kW per colour vs the average, likely cause, actions, impact if not corrected.  Forecast average per colour + measured causes."""
+    fc = Pf.mean(); m = float(fc.mean()); dev = (fc / m - 1) * 100 if m >= 1 else fc * 0
+    n_al, n_sev = int(rep.Alarm.sum()), int((rep.Status == "SEVERE").sum()); worst = float(dev.abs().max())
+    bad = worst > ALARM_PCT or n_al > 0; tone = "bad" if (n_sev or worst > SEVERE_PCT) else "amber" if bad else "good"
+    badge = "Severe imbalance" if tone == "bad" else "Imbalance detected" if bad else "Balanced"
+    tiles = ""
+    for p, nm_ in zip(Pf.columns, NAMES):
+        d = float(dev[p]); off = abs(d) > ALARM_PCT; lab = "Overloaded" if d > ALARM_PCT else "Underloaded" if d < -ALARM_PCT else "Near average"
+        col = CARD_TONE["bad"][2] if off else INK
+        tiles += (f'<div style="flex:1;min-width:110px"><div style="font-size:.72rem;color:{MUTED};letter-spacing:.04em">{nm_.upper()}</div><div style="font-size:1.55rem;font-weight:700;color:{col}">{fc[p]:,.1f} kW</div>'
+                  f'<div style="font-size:.78rem;color:{col if off else MUTED}">{"↑" if d >= 0 else "↓"} {abs(d):.1f} % · {lab}</div></div>')
+    sec = lambda t: f'<div style="font-weight:700;color:{INK};font-size:.9rem;margin:12px 0 4px">{t}</div>'
+    ul = lambda xs: '<ul style="margin:2px 0 0 1.1rem;padding:0;color:#475569;font-size:.85rem;line-height:1.5">' + "".join(f"<li>{x}</li>" for x in xs) + "</ul>"
+    hi = [nm for p, nm in zip(Pf.columns, NAMES) if dev[p] > ALARM_PCT] or [NAMES[int(np.argmax(fc.to_numpy()))]]; lo = [nm for p, nm in zip(Pf.columns, NAMES) if dev[p] < -ALARM_PCT] or [NAMES[int(np.argmin(fc.to_numpy()))]]
+    cause, top = "", None
+    if dg:
+        top = dg["share"].idxmax(); ci, cv = dg["mean_I"] > ALARM_PCT, dg["mean_V"] > ALARM_PCT
+        row = lambda lab, v, flag: f'<div style="display:flex;justify-content:space-between;padding:3px 0;color:#475569;font-size:.85rem"><span>{lab} ({v:.1f} %)</span>{_badge(("Above " if flag else "Within ") + f"{ALARM_PCT:g} %", "bad" if flag else "good")}</div>'
+        cause = (sec("Likely cause analysis") + row("Current imbalance", dg["mean_I"], ci) + row("Voltage imbalance", dg["mean_V"], cv)
+                 + f'<div style="font-weight:700;color:{INK};font-size:.88rem;margin-top:6px">Possible cause: ' + {"Current": "Uneven load distribution", "Voltage": "Supply voltage unbalance", "Power factor": "Unequal power factor between phases"}[top] + "</div>")
+    if not bad: acts, imp = [f"No action needed - the colours are within {ALARM_PCT:g} %.", "Keep new single-phase loads spread across R, Y and B."], []
+    else:
+        if top == "Voltage": acts = ["Ask the utility to check the supply voltage and transformer tap.", "Do not rewire before the voltage is checked.", "Re-check the phase voltages afterwards."]
+        else:
+            mv = " and ".join(f"{r['To']} (about {r['Move A']:.0f} A)" for _, r in dg["plan"].iterrows()) if dg and len(dg["plan"]) else " / ".join(lo)
+            src = dg["plan"].iloc[0]["From"] if dg and len(dg["plan"]) else " / ".join(hi)
+            acts = [f"Inspect single-phase loads on {' / '.join(hi)}.", f"Move suitable loads from {src} to {mv}" + (f", best done {win['quiet'][0]:%a %d %b %H:%M} → {win['quiet'][1]:%H:%M} (lowest load)." if win else "."), "Verify phase currents after one working day."]
+        loss = dg["loss"] if dg else float(((Pf ** 2).sum(axis=1) / (3 * Pf.mean(axis=1) ** 2).replace(0, np.nan) - 1).mean() * 100)
+        imp = [f"Increased cable losses and heating (about {max(loss, 0):.1f} % extra I²R heat on {hi[0]}).",
+               f"Higher neutral current ({dg['neutral_mean']:.0f} A) and equipment stress." if dg and dg["neutral_mean"] >= 1 else "Higher neutral current and equipment stress.",
+               "Increased risk of overheating and unwanted trips." + (f" {hi[0]} peaks at {dg['per']['Peak A'].max() / RATING * 100:.0f} % of the {RATING:,.0f} A rating." if dg and RATING > 0 else "")]
+    c = CARD_TONE[tone]
+    return (f'<div style="border:1px solid {c[0]};border-radius:14px;padding:14px 18px;background:#fff"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-weight:700;color:{INK};font-size:.8rem;letter-spacing:.03em">3-PHASE LOAD ANALYSIS</span>{_badge(badge, tone)}</div>'
+            + sec("Phase-wise load distribution") + f'<div style="display:flex;gap:12px;flex-wrap:wrap">{tiles}</div>' + cause + sec("Recommended actions") + ul(acts) + (sec("Potential impact if not corrected") + ul(imp) if imp else "")
+            + '</div>')
+
+
 # ------------------------------------------------------------------ hourly helpers for the two forecast tabs
 AVG_BLOCKS_H = {"1 hour": 1, "3 hours": 3, "6 hours": 6, "12 hours": 12, "24 hours": 24}
 LD_LENGTHS = {"24 hours": 24, "3 days": 72, "7 days": 168}
@@ -438,34 +552,6 @@ def run_phases(window, steps, model, season, method=gf.PHASE_METHODS[0]):
 @st.cache_data(show_spinner="Testing the phase forecast on past weeks ")
 def run_phase_backtest(load_real, load_model, model, season, fit_steps, n_weeks, method, alarm, sev, min_kw):
     return gf.backtest_phases(load_real, load_model, model, season, fit_steps, 168, n_weeks, lambda P: analyse(P, alarm, min_kw, sev), None, method)
-
-@st.cache_data(show_spinner=False)
-def hourly_params(tl_, cols, min_readings):
-    """Hourly mean of current / voltage columns; an hour with too few readings is NaN (same rule as the kW series)."""
-    g = tl_.set_index("Timestamps")[list(cols)].resample("1h"); real = g.mean()
-    real.loc[~(g[cols[0]].count() >= min_readings).to_numpy()] = np.nan
-    return real
-
-
-def alarm_drivers(Pf, rep, Ifc, Vfc):
-    """Per forecast hour: how far the worst phase is from the 3-phase average in CURRENT and in VOLTAGE (%), and each one's share of the two added together."""
-    pos = {n: i for i, n in enumerate(NAMES)}
-    w = rep.Worst_phase.map(pos).fillna(0).astype(int).to_numpy(); rows = np.arange(len(w))
-    I, V = Ifc[NAMES].to_numpy(float), Vfc[NAMES].to_numpy(float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        dI = (I[rows, w] / I.mean(axis=1) - 1) * 100; dV = (V[rows, w] / V.mean(axis=1) - 1) * 100
-        tot = np.abs(dI) + np.abs(dV); sI = np.where(tot > 0, np.abs(dI) / tot * 100, np.nan)
-    out = pd.DataFrame(dict(dI=dI, dV=dV, ShareI=sI, ShareV=100 - sI), index=Pf.index)
-    out["Driver"] = np.where(out.ShareI >= 50, "Current", "Voltage")
-    return out
-
-
-def alarm_card(kw, imb, direction, r=None):
-    """Hover text of one alarm hour."""
-    head = f"{kw:.1f} kW · imbalance {imb:.1f} % ({direction})"
-    if r is None or pd.isna(r.ShareI): return head
-    return f"{head}<br>Cause: <b>{r.Driver}</b> ({max(r.ShareI, r.ShareV):.0f} %)"          # only the one parameter that explains the alarm
-
 
 PP_PARAMS = {"Load (kW)": ["RKW", "YKW", "BKW"], "Current (A)": ["I1", "I2", "I3"], "Voltage (V)": ["V1", "V2", "V3"]}
 PP_TOL = {"Load (kW)": 2.0, "Current (A)": 2.0, "Voltage (V)": 0.5}     # % change that counts as rising / falling
@@ -666,7 +752,7 @@ with tab_load:
         kind = trend_kind(float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else trend_kind(float(fv[0]), float(fv[-1]))
         first_v, last_v = (float(blk["Avg kW"].iloc[0]), float(blk["Avg kW"].iloc[-1])) if two else (float(fv[0]), float(fv[-1]))
         slope = float(np.polyfit(np.arange(len(blk)) * AVG_BLOCKS_H[avg_choice], blk["Avg kW"], 1)[0]) if two else float("nan")
-        cl, cr = st.columns([2.2, 1.1])
+        cl = st.container()
         with cl:
             f = go.Figure(go.Bar(x=labels, y=blk["Avg kW"], marker_color=ACCENT, text=[("" if pd.isna(x) else f"{x:+.1f} %") for x in blk["Change %"]], textposition="outside", cliponaxis=False,
                                  customdata=np.c_[blk["Change kW"].fillna(0), blk["Hours"]], hovertemplate="%{x}<br><b>%{y:,.1f} kW average</b><br>change vs previous block %{customdata[0]:+,.1f} kW<br>%{customdata[1]} h<extra></extra>"))
@@ -674,9 +760,15 @@ with tab_load:
             show(style(f, 300, False, top=60))
             st.caption((f"Average growth: {blk['Change kW'].mean():+,.1f} kW per block · trend {slope:+,.1f} kW per hour" if two else "Only one block fits in this window - pick a shorter interval or a longer forecast.")
                        + (f" · last block is partial ({int(blk['Hours'].iloc[-1])} h)" if blk["Hours"].iloc[-1] < blk["Hours"].iloc[0] else ""))
-        with cr:
-            tone_a, head_a, acts_a = power_advice(kind, first_v, last_v, peak_f, horizon > 72, dict(avg=avg_f, slope=slope, pf=PF_AVG, demand=DEMAND, peak_at=t_f[int(np.argmax(fv))]))
-            note(advice_html(head_a, acts_a), tone_a)
+
+    ls_ = load_suggestions(fv, t_f, energy_before)
+    with panel("Load forecast · risks and recommendations", "", key="ld_sugg"):
+        lc_ = st.columns(2)
+        lc_[0].markdown(card_html("POTENTIAL RISK &amp; COST IMPACT", ls_["badge"], ls_["tone"], ls_["risks"]), unsafe_allow_html=True)
+        lc_[1].markdown(card_html("ENERGY MANAGEMENT RECOMMENDATIONS", f"{span_text(horizon)} forecast", "info", ls_["actions"], headline=ls_["headline"]), unsafe_allow_html=True)
+        lc2_ = st.columns(2)
+        with lc2_[0]: note(f"<b>If managed:</b> {ls_['managed']}", "good")
+        with lc2_[1]: note(f"<b>If not managed:</b> {ls_['ignored']}", ls_["tone"] if ls_["tone"] != "good" else "amber")
 
     with panel("Forecast ahead", f"{L_model} · {lbl_tot} · learns from {L_days_txt} · starts after {t_last:%d %b %Y %H:%M} (hourly means)", key="ld_next"):
         left, right = st.columns([1, 2.4])
@@ -730,7 +822,6 @@ with tab_phase:
     r0 = a_now.iloc[0]
     hr_ = analyse(ph_real.dropna().to_numpy()); hr_mean = float(hr_.Imbalance_pct[hr_.Loaded].mean()) if hr_.Loaded.any() else float("nan")      # same hourly basis as the forecast
     now = dict(loaded=bool(r0.Loaded), imb=float(r0.Imbalance_pct) if r0.Loaded else 0.0, worst=r0.Worst_phase, dev=float(r0.Worst_dev) if r0.Loaded else 0.0, direction=r0.Direction, status=r0.Status)
-    pb = gr.playbook(dg, now, dict(P=Pf, rep=rep), ALARM_PCT, SEVERE_PCT, MIN_KW, RATING, DEMAND, None, real_clock)
 
     imb = rep.Imbalance_pct.to_numpy(); n_al, n_sev = int(rep.Alarm.sum()), int((rep.Status == "SEVERE").sum())
     first_alarm = Pf.index[int(np.flatnonzero(rep.Alarm.to_numpy())[0])] if n_al else None
@@ -742,36 +833,26 @@ with tab_phase:
         else: kpi("Average imbalance · measured", "–", "too few loaded minutes", "", "📏")
     with k[2]: kpi("Forecast alarm hours", f"{n_al}", f"of {horizon} hours · {n_sev} severe", "", "🚨", trend=np.nan_to_num(imb), trend_color=ACCENT)
     with k[3]: kpi("First forecast alarm", "none" if first_alarm is None else f"{first_alarm:%a %H:%M}", "no alarm expected" if first_alarm is None else f"{first_alarm:%d %b} · in {(first_alarm - t_last).total_seconds() / 3600:.0f} h", "good" if first_alarm is None else "warn", "⏰")
-    with k[4]: kpi("Worst colour · forecast", "–" if not np.isfinite(imb).any() else rep.Worst_phase.iloc[worst_k], "" if not np.isfinite(imb).any() else f"{rep.Direction.iloc[worst_k]} · peak {imb[worst_k]:.1f} % at {Pf.index[worst_k]:%a %H:%M}", "info", "🎨")
+    with k[4]: kpi("Worst phase · forecast", "–" if not np.isfinite(imb).any() else rep.Worst_phase.iloc[worst_k], "" if not np.isfinite(imb).any() else f"{rep.Direction.iloc[worst_k]} · peak {imb[worst_k]:.1f} % at {Pf.index[worst_k]:%a %H:%M}", "info", "🎨")
     st.write("")
 
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
-    with panel("Phase load · measured and forecast", f"hourly means · {P_model} · learns from the last {P_days} days · forecast starts after {t_last:%d %b %Y %H:%M} · ✕ = alarm hour on the phase that is out of balance (hover: current or voltage, with %)", key="ph_main"):
+    with panel("Phase load · measured and forecast", f"hourly means · {P_model} · learns from the last {P_days} days · forecast starts after {t_last:%d %b %Y %H:%M} · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
         hh = ph_mod.iloc[-HIST_H[P_hist]:]; xt = [t_last] + list(Pf.index)
         f = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=[f"{n} phase (kW)" for n in NAMES])
         for j, p in enumerate(PH3, 1):
             col = PHASE_COL[KWCOLS[j - 1]]
             f.add_scatter(x=hh.index, y=hh[p], name="Measured (hourly)", legendgroup="m", showlegend=j == 1, line=dict(color=INK, width=2), connectgaps=False, row=j, col=1)
             f.add_scatter(x=xt, y=[float(ph_mod[p].iloc[-1])] + list(Pf[p]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines", line=dict(color=col, width=2.6, dash="dash"), row=j, col=1)
-        worst_nm, legend_done = rep.Worst_phase.to_numpy(), False
-        alarm_m = rep.Alarm.to_numpy(bool); kw_ = Pf.to_numpy(float); drv = None
-        try:                                                      # forecast current and voltage of each phase -> which one explains each alarm hour (if this fails, the card still shows kW and imbalance)
-            if alarm_m.any():
-                FIXED_IV = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.95)
-                IVm = fill_hours(hourly_params(tl, CURR + VOLT, MINR).reindex(H_mod.index))
-                fcs = {c_: run_total(IVm[c_].iloc[-fit_steps:], MAX_STEPS, P_model, P_season, FIXED_IV)[0][:horizon] for c_ in CURR + VOLT}
-                Ifc = pd.DataFrame({n_: np.asarray(fcs[c_], float) for n_, c_ in zip(NAMES, CURR)}, index=Pf.index)
-                Vfc = pd.DataFrame({n_: np.asarray(fcs[c_], float) for n_, c_ in zip(NAMES, VOLT)}, index=Pf.index)
-                drv = alarm_drivers(Pf, rep, Ifc, Vfc)
-        except Exception:
-            drv = None
-        card = np.array([alarm_card(kw_[i_, NAMES.index(worst_nm[i_])], imb[i_], rep.Direction.iloc[i_], None if drv is None else drv.iloc[i_]) if alarm_m[i_] else "" for i_ in range(len(Pf))])
-        for j, p in enumerate(PH3, 1):
-            m_ = alarm_m & (worst_nm == NAMES[j - 1])
-            if not m_.any(): continue
-            f.add_scatter(x=Pf.index[m_], y=Pf[p].to_numpy()[m_], mode="markers", name="Alarm (forecast)", legendgroup="ALARM", showlegend=not legend_done,
-                          marker=dict(symbol="x", size=9, color=WARN), customdata=card[m_], hovertemplate="%{customdata}<extra>Alarm</extra>", row=j, col=1)
-            legend_done = True
+        worst_nm, legend_done = rep.Worst_phase.to_numpy(), set()
+        for sev_, col_ in (("ALARM", WARN), ("SEVERE", BAD)):
+            for j, p in enumerate(PH3, 1):
+                m_ = (rep.Status == sev_).to_numpy() & (worst_nm == NAMES[j - 1])
+                if not m_.any(): continue
+                f.add_scatter(x=Pf.index[m_], y=Pf[p].to_numpy()[m_], mode="markers", name=f"{sev_.title()} (forecast)", legendgroup=sev_, showlegend=sev_ not in legend_done,
+                              marker=dict(symbol="x", size=9, color=col_), customdata=np.c_[imb[m_], rep.Direction.to_numpy()[m_]],
+                              hovertemplate="%{y:.1f} kW · imbalance %{customdata[0]:.1f} % (%{customdata[1]})<extra>" + sev_.title() + "</extra>", row=j, col=1)
+                legend_done.add(sev_)
         f.add_shape(type="line", xref="x", yref="paper", x0=t_last, x1=t_last, y0=0, y1=1, line=dict(color=MUTED, width=1.2, dash="dot"))
         f.update_yaxes(title_text="kW")
         style(f, 640, legend_y=1.0, top=110); f.update_annotations(font=dict(size=13, color=INK)); show(f)
@@ -786,40 +867,10 @@ with tab_phase:
         st.dataframe(pd.DataFrame(rows_d).set_index("Day"), width="stretch")
     if dg and not dg["pf_ok"]: note("The kW columns match voltage × current almost exactly (power factor ≈ 1), so they look like <b>kVA</b>, not kW. The power-factor share is therefore left out of 'What explains it'. Check with the meter owner.", "amber")
 
-    # ---- short review (rule-based, same numbers as before, five lines)
-    rv = []
-    if dg:
-        nm_, sh_ = dg["main_name"], dg["share"]; top_ = sh_.idxmax()
-        rv.append(("What is wrong", f"<b>{nm_}</b> carries {'too much' if dg['high_share'] >= 50 else 'too little'} load: average imbalance <b>{dg['mean_imb']:.1f} %</b> (limit {ALARM_PCT:g} %), above the limit in {dg['pct_above']:.0f} % of loaded minutes, {dg['extra_A']:+.0f} A ({dg['extra_kW']:+.1f} kW) against the other two."))
-        if top_ == "Current": why_ = f"the load, not the supply: current explains {sh_['Current']:.0f} % of the deviation, voltage unbalance is only {dg['mean_V']:.1f} %." + (f" It looks like fixed single-phase loads on {nm_} (about {dg['lvA_const']:.0f} A extra at any load)." if dg["const"] else " Single-phase loads are not shared equally.")
-        elif top_ == "Voltage": why_ = f"the supply voltage ({sh_['Voltage']:.0f} % of the deviation, unbalance {dg['mean_V']:.1f} %). Ask the utility and check the transformer tap."
-        else: why_ = f"different power factors on the phases ({sh_['Power factor']:.0f} % of the deviation). Check capacitor banks and single-phase loads."
-        rv.append(("Why", why_))
-        if len(dg["plan"]):
-            first_ = dg["plan"].iloc[0]["From"]; mv_ = " and ".join(f"<b>{r['To']}</b> (about {r['Move A']:.0f} A)" for _, r in dg["plan"].iterrows())
-            do_ = (f"move single-phase load from <b>{first_}</b> to {mv_}. Choose whole loads (lighting, heaters, small motors), check with a clamp meter, and re-check after one working day."
-                   + (" Do not rewire first - the voltage is the main cause." if top_ == "Voltage" else ""))
-        else: do_ = "the phase currents are already level - nothing to move."
-        rv.append(("What to do", do_ + " Only a qualified electrician should change connections, with the circuit isolated and locked out."))
-        risk_ = [f"{nm_} runs hotter (about {dg['loss']:.1f} % extra I²R heat)"]
-        if dg["neutral_mean"] >= 1: risk_.append(f"the neutral carries about {dg['neutral_mean']:.0f} A")
-        if RATING > 0:
-            u_ = dg["per"]["Peak A"] / RATING * 100; risk_.append(f"{u_.idxmax()} peaks at {u_.max():.0f} % of the {RATING:,.0f} A rating")
-        rv.append(("If nothing is done", "; ".join(risk_) + (". The effect is permanent, so cables age and trips build up silently." if dg["pct_above"] > 50 else ".")))
-    else:
-        rv.append(("What is wrong", "Not enough loaded minutes to measure the cause."))
-    if n_al:
-        cul_ = rep.Worst_phase[rep.Alarm].value_counts(); cn_ = cul_.idxmax(); cd_ = rep.Direction[rep.Alarm & (rep.Worst_phase == cn_)].mode().iloc[0]
-        fc_ = f"<b>{n_al}</b> of {len(Pf)} hours in alarm" + (f" ({n_sev} severe)" if n_sev else "") + f", first at <b>{first_alarm:%a %d %b %H:%M}</b>, mostly on <b>{cn_}</b> ({'too high' if cd_ == 'HIGH' else 'too low'})"
-        if dg and cn_ != dg["main_name"]: fc_ += f" - different from the whole-file picture ({dg['main_name']}), because the forecast follows the most recent week"
-        win_ = gr.best_windows(Pf.sum(axis=1).to_numpy(), Pf.index)
-        if win_: fc_ += f". Best time to rewire: {win_['quiet'][0]:%a %d %b %H:%M} → {win_['quiet'][1]:%H:%M} (lowest load)"
-        rv.append(("Forecast", fc_ + "."))
-    else: rv.append(("Forecast", f"no alarm hour expected in the next {len(Pf)} hours."))
-    with panel("Review", "short rule-based summary from the measured numbers and the forecast · no AI is used", key="ph_plan"):
-        note(f"<b>{pb['head']}</b>", pb["level"])
-        note("<ul>" + "".join(f"<li><b>{t_}:</b> {x_}</li>" for t_, x_ in rv) + "</ul>")
-        st.caption("Every action needs review by a qualified engineer before anything is changed.")
+    # ---- 3-phase load analysis card (rule-based, short)
+    with panel("3-phase load analysis", "", key="ph_plan"):
+        win_ = gr.best_windows(Pf.sum(axis=1).to_numpy(), Pf.index) if n_al else None
+        st.markdown(phase_analysis_html(Pf, rep, dg, win_), unsafe_allow_html=True)
 
     # ---- the evidence behind the advice
         # ---- A) which parameter moves each phase: load, current, voltage per colour + the imbalance each one creates
