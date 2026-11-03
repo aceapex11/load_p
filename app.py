@@ -797,11 +797,12 @@ with tab_phase:
             with g1:
                 f = go.Figure()
                 for (pn_, cols_), col_ in zip(PP_PARAMS.items(), [ACCENT, BLUE, WARN]):
+                    f.add_scatter(x=PP.index, y=pp_imb(PP, cols_), name=pn_.split(" ")[0], line=dict(color=col_, width=2), connectgaps=True):
                 f.add_hline(y=ALARM_PCT, line_dash="dot", line_color=WARN, annotation_text=f"alarm {ALARM_PCT:g} %", annotation_position="top left")
                 f.update_layout(title="Imbalance % of load, current and voltage", yaxis_title="%"); show(style(f, 300, True, top=70), key="pp_imb")
             with g2:
                 dv = pp_dev(PP, PP_PARAMS["Load (kW)"]); f = go.Figure()
-                for n_, col_ in zip(NAMES, pcol): 
+                for n_, col_ in zip(NAMES, pcol): f.add_scatter(x=dv.index, y=dv[n_], name=n_, line=dict(color=col_, width=2), connectgaps=True)
                 f.add_hline(y=0, line_color=MUTED, line_width=1); f.add_hrect(y0=-ALARM_PCT, y1=ALARM_PCT, fillcolor=tint(GOOD, .08), line_width=0)
                 f.update_layout(title="Which phase is off: load vs the 3-phase average", yaxis_title="% above / below average"); show(style(f, 300, True, top=70), key="pp_dev")
 
