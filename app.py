@@ -10,6 +10,7 @@ Layout of this file : page setup -> settings -> colours + CSS -> UI helpers -> d
 """
 import datetime as dt
 import io
+import html as html_lib
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -409,124 +410,94 @@ def _machine_text():
     return f"Machine {machine_no}'s" if machine_no else "this machine's"
 
 
-def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, badge, tone):
-    # Compact summary cards for the Load forecast tab only.
+def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, badge, tone, advice=None):
+    '''Render two compact summary cards for the Load forecast tab only.
+
+    The first card lists recommended actions; the second lists potential
+    consequences of not acting. Text comes from the existing rule-based advice.
+    '''
     values = np.asarray(forecast_values, dtype=float)
-    energy_kwh = float(np.nansum(values))
     if values.size == 0:
         return ""
 
-    day_summary = daily_energy_summary(values, forecast_times)
-    peak_day = day_summary["sum"].idxmax()
-    peak_day_kwh = float(day_summary.loc[peak_day, "sum"])
-    peak_day_kw = float(day_summary.loc[peak_day, "mean"])
-    peak_day_text = f"{peak_day:%A, %d %b}"
-
+    energy_kwh = float(np.nansum(values))
     days = horizon_hours // 24 if horizon_hours % 24 == 0 else None
     period = f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"
     badge_period = f"{days}-day" if days else f"{horizon_hours}-hour"
-
     change_pct = ((energy_kwh - previous_energy_kwh) / previous_energy_kwh * 100
                   if previous_energy_kwh >= 1 else float("nan"))
     if not np.isfinite(change_pct):
         change_text = "No comparable previous period is available."
     elif abs(change_pct) < 0.5:
-        change_text = "About the same as the previous period."
+        change_text = f"About the same as the previous {period}."
     else:
         direction = "higher" if change_pct > 0 else "lower"
         change_text = f"{abs(change_pct):.0f}% {direction} than the previous {period}."
 
-    lowest_index = int(np.nanargmin(values))
-    lowest_kw = float(values[lowest_index])
-    lowest_time = pd.Timestamp(forecast_times[lowest_index]).strftime("%a, %d %b at %H:%M")
+    esc = lambda value: html_lib.escape(str(value), quote=True)
+    advice = advice or {}
+    actions = list(advice.get("actions", []))[:3]
+    risks = list(advice.get("risks", []))[:3]
+    impact_text = advice.get("ignored", "Unmanaged demand may increase operating costs or require operational changes.")
     tone_class = "bad" if tone == "bad" else "good" if tone == "good" else "amber"
+    action_icons = ("🏭", "⚡", "🔋", "🕒", "🔌")
+    risk_icons = ("💸", "📈", "⚠️", "🏭", "🧾")
 
-    def item(icon, heading, body):
-        return (
-            f'<div class="load-summary-item">'
-            f'<span class="load-summary-emoji">{icon}</span>'
-            f'<div><div class="load-summary-item-title">{heading}</div>'
-            f'<div class="load-summary-item-copy">{body}</div></div></div>'
-        )
+    def rows(items, icons):
+        rendered = []
+        for index, (heading, body) in enumerate(items):
+            rendered.append(
+                '<div class="load-summary-item">'
+                f'<span class="load-summary-emoji">{icons[index % len(icons)]}</span>'
+                '<div><div class="load-summary-item-title">'
+                f'{esc(heading)}</div><div class="load-summary-item-copy">{esc(body)}</div></div></div>'
+            )
+        return "".join(rendered) if rendered else '<div class="load-summary-empty">No specific items are flagged for this forecast.</div>'
 
-    risk_items = "".join([
-        item("⚡", "Supply & cost", "If internal generation cannot cover demand, grid or backup power may be needed and could increase costs."),
-        item("📈", "Busiest forecast day", f"{peak_day_text}: {peak_day_kwh:,.0f} kWh expected (daily average {peak_day_kw:,.1f} kW). Stagger large starts to limit coincident demand."),
-        item("🔋", "Storage opportunity", "If a battery is available, charge during low-demand or surplus-generation hours and save energy for busier periods."),
-    ])
-
-    action_items = "".join([
-        item("🏭", "Plan generation", f"Match captive generation to the forecast {energy_kwh:,.0f} kWh requirement over the next {period}. {change_text}"),
-        item("🕒", "Shift flexible work", f"The lowest forecast load is {lowest_kw:,.1f} kW around {lowest_time}. Consider moving non-critical tasks to this window."),
-        item("🔌", "Check available capacity", f"Compare hourly demand with available generation and backup capacity, especially on {peak_day_text}."),
-    ])
+    peak_value = float(np.nanmax(values))
+    peak_time = pd.Timestamp(forecast_times[int(np.nanargmax(values))])
+    peak_text = f"Peak forecast: {peak_value:,.1f} kW · {peak_time:%a, %d %b at %H:%M}"
+    badge_text = advice.get("badge", badge or "Watch")
+    risk_tone = "bad" if tone_class == "bad" else "amber" if tone_class == "amber" else "good"
 
     return f'''<style>
-    .load-summary-wrap {{
-        display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px;
-        margin:.35rem 0 1rem; font-family:Inter, sans-serif;
-    }}
-    .load-summary-card {{
-        position:relative; min-width:0; overflow:hidden; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%);
-        border:1px solid #E2E8F0; border-radius:15px; padding:13px 16px 8px;
-        box-shadow:0 2px 8px rgba(15,23,42,.045);
-        transition:transform .22s ease, box-shadow .22s ease, border-color .22s ease;
-        animation:loadSummaryEnter .42s ease both;
-    }}
-    .load-summary-card::before {{
-        content:""; position:absolute; inset:0 auto 0 0; width:3px; background:#93C5FD;
-        opacity:.9; transition:width .22s ease, opacity .22s ease;
-    }}
-    .load-summary-card:hover, .load-summary-card:focus-within {{
-        transform:translateY(-4px) scale(1.008); border-color:#93C5FD;
-        box-shadow:0 13px 27px -15px rgba(37,99,235,.42),0 4px 10px rgba(15,23,42,.06);
-    }}
-    .load-summary-card:hover::before, .load-summary-card:focus-within::before {{ width:5px; opacity:1; }}
-    .load-summary-card-head {{ display:flex; justify-content:space-between; align-items:center; gap:10px; }}
-    .load-summary-title {{ color:#0F172A; font-size:.78rem; font-weight:800; letter-spacing:.045em; }}
-    .load-summary-badge {{ flex:0 0 auto; padding:3px 9px; border-radius:99px; font-size:.68rem; font-weight:700; }}
-    .load-summary-badge.bad {{ background:#FFE9ED; color:#BE123C; }}
-    .load-summary-badge.amber {{ background:#FFF4DD; color:#B45309; }}
-    .load-summary-badge.good {{ background:#E8FAF3; color:#047857; }}
-    .load-summary-sub {{ margin:4px 0 8px; color:#64748B; font-size:.72rem; }}
-    .load-summary-feature {{ display:flex; align-items:center; gap:9px; padding:8px 10px; margin-bottom:2px;
-        border-radius:10px; background:#F3F6FF; color:#1E293B; }}
-    .load-summary-feature-icon {{ font-size:1.05rem; }}
-    .load-summary-feature strong {{ display:block; font-size:.88rem; color:#1E293B; }}
-    .load-summary-feature small {{ display:block; margin-top:1px; font-size:.7rem; color:#64748B; }}
-    .load-summary-item {{ display:grid; grid-template-columns:22px minmax(0,1fr); gap:7px;
-        padding:8px 0; border-top:1px solid #EEF2F8; }}
-    .load-summary-emoji {{ font-size:.95rem; line-height:1.35; }}
-    .load-summary-item-title {{ color:#172033; font-size:.78rem; font-weight:700; margin-bottom:1px; }}
-    .load-summary-item-copy {{ color:#526078; font-size:.73rem; line-height:1.45; }}
-    @keyframes loadSummaryEnter {{ from {{ opacity:0; transform:translateY(7px); }} to {{ opacity:1; transform:translateY(0); }} }}
+    html, body {{ margin:0 !important; padding:0 !important; background:transparent !important; overflow:hidden; }}
+    * {{ box-sizing:border-box; }}
+    .load-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:2px 0 3px; font-family:Inter,Arial,sans-serif; align-items:stretch; }}
+    .load-summary-card {{ position:relative; min-width:0; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%); border:1px solid #E2E8F0; border-radius:14px; padding:11px 14px 8px 15px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:loadSummaryEnter .35s ease both; }}
+    .load-summary-card::before {{ content:""; position:absolute; inset:0 auto 0 0; width:3px; border-radius:14px 0 0 14px; background:#93C5FD; opacity:.95; transition:width .2s ease; }}
+    .load-summary-card:hover,.load-summary-card:focus-within {{ transform:translateY(-3px); border-color:#93C5FD; box-shadow:0 10px 22px -14px rgba(37,99,235,.48),0 3px 8px rgba(15,23,42,.05); }}
+    .load-summary-card:hover::before,.load-summary-card:focus-within::before {{ width:5px; }}
+    .load-summary-card-head {{ display:flex; justify-content:space-between; align-items:center; gap:8px; }}
+    .load-summary-title {{ color:#0F172A; font-size:.76rem; font-weight:800; letter-spacing:.035em; }}
+    .load-summary-badge {{ flex:0 0 auto; padding:3px 8px; border-radius:99px; font-size:.66rem; font-weight:700; }}
+    .load-summary-badge.bad {{ background:#FFE9ED; color:#BE123C; }} .load-summary-badge.amber {{ background:#FFF4DD; color:#B45309; }} .load-summary-badge.good {{ background:#E8FAF3; color:#047857; }}
+    .load-summary-sub {{ margin:3px 0 7px; color:#64748B; font-size:.69rem; }}
+    .load-summary-feature {{ display:flex; align-items:flex-start; gap:8px; padding:7px 9px; margin-bottom:2px; border-radius:9px; background:#F3F6FF; color:#1E293B; }}
+    .load-summary-feature-icon {{ font-size:1rem; line-height:1.25; }} .load-summary-feature strong {{ display:block; font-size:.79rem; line-height:1.3; color:#1E293B; }}
+    .load-summary-feature small {{ display:block; margin-top:1px; font-size:.68rem; line-height:1.35; color:#64748B; }}
+    .load-summary-item {{ display:grid; grid-template-columns:19px minmax(0,1fr); gap:6px; padding:6px 0; border-top:1px solid #EEF2F8; }}
+    .load-summary-emoji {{ font-size:.88rem; line-height:1.35; }} .load-summary-item-title {{ color:#172033; font-size:.74rem; font-weight:700; margin-bottom:1px; }}
+    .load-summary-item-copy {{ color:#526078; font-size:.69rem; line-height:1.4; }} .load-summary-empty {{ padding:8px 0; color:#64748B; font-size:.7rem; }}
+    .load-summary-impact {{ margin-top:6px; padding:7px 9px; border-radius:9px; background:#FFF7ED; border:1px solid #FED7AA; color:#9A3412; font-size:.69rem; line-height:1.4; }}
+    .load-summary-impact strong {{ display:block; margin-bottom:2px; color:#9A3412; font-size:.72rem; }}
+    @keyframes loadSummaryEnter {{ from {{ opacity:0; transform:translateY(6px); }} to {{ opacity:1; transform:translateY(0); }} }}
     @media (max-width:760px) {{ .load-summary-wrap {{ grid-template-columns:1fr; }} }}
     @media (prefers-reduced-motion:reduce) {{ .load-summary-card {{ animation:none; transition:none; }} .load-summary-card:hover {{ transform:none; }} }}
     </style>
     <div class="load-summary-wrap">
-      <section class="load-summary-card" tabindex="0" aria-label="Potential risks and cost impact">
-        <div class="load-summary-card-head">
-          <div class="load-summary-title">⚠️ POTENTIAL RISKS TO WATCH</div>
-          <span class="load-summary-badge {tone_class}">{badge}</span>
-        </div>
-        <div class="load-summary-sub">{badge_period} outlook · Machine demand forecast</div>
-        <div class="load-summary-feature">
-          <span class="load-summary-feature-icon">📊</span>
-          <div><strong>{energy_kwh:,.0f} kWh forecast energy</strong><small>{change_text}</small></div>
-        </div>
-        {risk_items}
+      <section class="load-summary-card" tabindex="0" aria-label="Recommended actions">
+        <div class="load-summary-card-head"><div class="load-summary-title">✅ ACTIONS TO TAKE</div><span class="load-summary-badge good">Recommended plan</span></div>
+        <div class="load-summary-sub">What to do based on the {esc(badge_period)} load forecast</div>
+        <div class="load-summary-feature"><span class="load-summary-feature-icon">📊</span><div><strong>{energy_kwh:,.0f} kWh forecast energy</strong><small>{esc(change_text)}</small></div></div>
+        {rows(actions, action_icons)}
       </section>
-      <section class="load-summary-card" tabindex="0" aria-label="Energy management recommendations">
-        <div class="load-summary-card-head">
-          <div class="load-summary-title">💡 WHAT TO DO NEXT</div>
-          <span class="load-summary-badge good">{badge_period} plan</span>
-        </div>
-        <div class="load-summary-sub">Practical actions based on the forecast</div>
-        <div class="load-summary-feature">
-          <span class="load-summary-feature-icon">📅</span>
-          <div><strong>Highest-use day: {peak_day_text}</strong><small>{peak_day_kwh:,.0f} kWh total · {peak_day_kw:,.1f} kW average</small></div>
-        </div>
-        {action_items}
+      <section class="load-summary-card" tabindex="0" aria-label="Consequences if actions are not taken">
+        <div class="load-summary-card-head"><div class="load-summary-title">⚠️ IF YOU DON'T ACT</div><span class="load-summary-badge {risk_tone}">{esc(badge_text)}</span></div>
+        <div class="load-summary-sub">Possible outcomes if the forecast is not managed</div>
+        <div class="load-summary-feature"><span class="load-summary-feature-icon">🎯</span><div><strong>{esc(peak_text)}</strong><small>Plan capacity around the forecast peak.</small></div></div>
+        {rows(risks, risk_icons)}
+        <div class="load-summary-impact"><strong>Potential overall impact</strong>{esc(impact_text)}</div>
       </section>
     </div>'''
 
@@ -989,8 +960,9 @@ with tab_load:
             horizon_hours,
             load_advice["badge"],
             load_advice["tone"],
+            advice=load_advice,
         ),
-        height=430,
+        height=365,
         scrolling=False,
     )
 
