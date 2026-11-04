@@ -632,7 +632,7 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
         <div class="phase-summary-head"><div class="phase-summary-title">✅ ACTIONS TO TAKE</div><span class="phase-summary-badge good">Recommended plan</span></div>
         <div class="phase-summary-sub">What to do based on the {esc(badge_period)} phase forecast</div>
         <div class="phase-summary-feature"><strong>Forecasted imbalance: {esc(forecast_line)}</strong><span>Limit: {ALARM_LIMIT_PCT:.0f}% · {n_alarm_hours} of {n_hours} forecast hours flagged.</span></div>
-        <div class="phase-summary-diagnosis"><b>Likely driver from measured current/voltage readings</b><span>{esc(driver_title)}. {esc(driver_copy)}</span></div>
+        <div class="phase-summary-diagnosis"><b>Likely cause from measured current/voltage readings</b><span>{esc(driver_title)}. {esc(driver_copy)}</span></div>
         {render_rows(actions, ("🔎", "⚖️", "✅"))}
       </section>
       <section class="phase-summary-card" tabindex="0" aria-label="Consequences if phase imbalance is not corrected">
