@@ -18,7 +18,7 @@ PHASE_CODES = ["R", "Y", "B"]                                            # colum
 PHASE_FULL_NAME = {"R": "Red", "Y": "Yellow", "B": "Blue"}
 NOTEBOOK_SMOOTHING_PARAMS = dict(smoothing_level=0.7, smoothing_trend=0.05, smoothing_seasonal=0.1, damping_trend=0.95)   # alpha / beta / gamma / phi of the load notebook
 AVAILABLE_MODELS = ["Exponential Smoothing"]
-PHASE_FORECAST_METHODS = ["Each phase separately", "Total × phase shares"]
+PHASE_FORECAST_METHODS = ["Each phase separately"]
 
 
 # ================================================================== 1. HOURLY DATA (same idea as both notebooks)
@@ -71,27 +71,9 @@ def forecast_one_series(values, steps_ahead, model_name="Exponential Smoothing",
         return np.repeat(max(float(values[-1]), 0.0), steps_ahead), f"failed ({type(error).__name__}): last value used", False
 
 
-# ================================================================== 3. FORECASTING THE THREE PHASES
-def _forecast_via_total_and_shares(history, steps_ahead, model_name, season_length, fixed_smoothing):
-    """The imbalance % only depends on each phase's SHARE of the total, not on the total itself.  So forecast the total kW and the three shares
-    separately, then rebuild R / Y / B = total x share.  Errors in the total no longer leak into the imbalance."""
-    phase_kw = history[PHASE_CODES].to_numpy(float); total_kw = phase_kw.sum(axis=1); has_load = total_kw > 0
-    phase_share = np.where(has_load[:, None], phase_kw / np.where(has_load, total_kw, 1.0)[:, None], 1 / 3)      # a zero-load hour counts as perfectly balanced
-    total_forecast, total_label, all_ok = forecast_one_series(total_kw, steps_ahead, model_name, season_length, fixed_smoothing)
-    share_forecast, labels = np.zeros((steps_ahead, 3)), {}
-    for i, phase in enumerate(PHASE_CODES):
-        share_forecast[:, i], label, fit_ok = forecast_one_series(phase_share[:, i], steps_ahead, model_name, season_length, fixed_smoothing)
-        all_ok &= fit_ok; labels[phase] = "share: " + label
-    share_sum = share_forecast.sum(axis=1, keepdims=True)
-    share_forecast = np.where(share_sum > 1e-9, share_forecast / np.where(share_sum > 1e-9, share_sum, 1.0), 1 / 3)      # forecast shares must add up to 1
-    labels["total"] = total_label
-    return total_forecast[:, None] * share_forecast, labels, all_ok
-
-
 def forecast_three_phases(history, steps_ahead, model_name="Exponential Smoothing", season_length=HOURS_PER_WEEK, fixed_smoothing=None, method=PHASE_FORECAST_METHODS[0]):
     """history = DataFrame with columns R, Y, B (gap-free hours).  Returns (steps_ahead x 3 array, {phase: label}, all_ok).
-    method "Each phase separately" = the notebook; "Total × phase shares" = forecast the total and the shares, then rebuild the phases."""
-    if method == PHASE_FORECAST_METHODS[1]: return _forecast_via_total_and_shares(history, steps_ahead, model_name, season_length, fixed_smoothing)
+    Each phase is forecast separately (the notebook method)."""
     forecast, labels, all_ok = np.zeros((steps_ahead, 3)), {}, True
     for i, phase in enumerate(PHASE_CODES):
         forecast[:, i], labels[phase], fit_ok = forecast_one_series(history[phase].to_numpy(float), steps_ahead, model_name, season_length, fixed_smoothing); all_ok &= fit_ok
