@@ -1244,11 +1244,10 @@ with tab_phase:
                 fig.add_hline(y=ALARM_LIMIT_PCT, line_dash="dot", line_color=WARN_COLOR, annotation_text=f"alarm {ALARM_LIMIT_PCT:g} %", annotation_position="top left")
                 fig.update_layout(title="Imbalance % of load, current and voltage", yaxis_title="%"); show_figure(style_figure(fig, 300, True, top=70), key="pp_imb")
             with deviation_chart_column:
-                load_deviation_table = deviation_from_average_pct(phase_params_window, PHASE_PARAMETER_COLS["Load (kW)"]); fig = go.Figure()
-                for n_, line_color in zip(PHASE_LABELS, phase_color_list): fig.add_scatter(x=load_deviation_table.index, y=load_deviation_table[n_], name=n_, line=dict(color=line_color, width=2), connectgaps=True)
+                forecast_deviation_table = deviation_from_average_pct(forecast_phase_kw, PHASE_CODES); fig = go.Figure()
+                for n_, line_color in zip(PHASE_LABELS, phase_color_list): fig.add_scatter(x=forecast_deviation_table.index, y=forecast_deviation_table[n_], name=n_, line=dict(color=line_color, width=2), connectgaps=True)
                 fig.add_hline(y=0, line_color=MUTED_COLOR, line_width=1); fig.add_hrect(y0=-ALARM_LIMIT_PCT, y1=ALARM_LIMIT_PCT, fillcolor=hex_to_rgba(GOOD_COLOR, .08), line_width=0)
-                fig.update_layout(title="Which phase is off: load vs the 3-phase average", yaxis_title="% above / below average"); show_figure(style_figure(fig, 300, True, top=70), key="pp_dev")
-
+                fig.update_layout(title="Forecast · which phase is off: load vs the 3-phase average", yaxis_title="% above / below average"); show_figure(style_figure(fig, 300, True, top=70), key="pp_dev")
 
       # ---- B) actual vs predicted on test data: last 7 days hidden, model learns only from the hours before them
     with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from the 28 days before them, then its forecast is compared with what really happened", key="ph_bt"):
