@@ -496,8 +496,8 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
     return dict(kind=trend_direction, tone=tone, badge="Attention" if capacity_gap_kw or big_drop else "Watch" if trend_direction in ("up", "down") else "Normal", risks=risks, actions=actions, managed=if_managed_text, ignored=if_ignored_text, headline=f"Forecasted peak demand: {peak:,.1f} kW around {peak_time:%A, %H:%M}")
 
 
-def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
-    """Build a kW-only phase balancing plan from the worst forecast hour."""
+def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosis=None, previous_period_load_kwh=None):
+    # Build a kW-only phase plan and add load-trend / measured diagnostic context.
     esc = lambda value: html_lib.escape(str(value), quote=True)
     labels = dict(zip(PHASE_CODES, PHASE_LABELS))
     phase_values = forecast_phase_kw[PHASE_CODES].astype(float)
@@ -521,11 +521,50 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
         candidates = np.flatnonzero(loaded)
         worst_pos = int(candidates[np.nanargmax(hourly_imbalance[candidates])])
 
+    # Compare equal-length windows: selected future forecast vs immediately preceding measured/fill-completed period.
+    forecast_energy_kwh = float(np.nansum(matrix.sum(axis=1)))
+    if previous_period_load_kwh is not None and np.isfinite(previous_period_load_kwh) and previous_period_load_kwh > 0:
+        load_change_pct = (forecast_energy_kwh / float(previous_period_load_kwh) - 1.0) * 100.0
+        if load_change_pct > 1.0:
+            load_trend_text = f"Total load forecast is {load_change_pct:.1f}% higher than the previous {badge_period} ({forecast_energy_kwh:,.0f} vs {previous_period_load_kwh:,.0f} kWh)."
+        elif load_change_pct < -1.0:
+            load_trend_text = f"Total load forecast is {abs(load_change_pct):.1f}% lower than the previous {badge_period} ({forecast_energy_kwh:,.0f} vs {previous_period_load_kwh:,.0f} kWh)."
+        else:
+            load_trend_text = f"Total load forecast is broadly unchanged vs the previous {badge_period} ({forecast_energy_kwh:,.0f} vs {previous_period_load_kwh:,.0f} kWh)."
+    else:
+        load_trend_text = "Total-load increase/decrease comparison is unavailable because a complete preceding comparison period is not available."
+
+    # These are measured-data diagnostics over valid historical meter rows, not future current/voltage forecasts.
+    if diagnosis and not diagnosis.get("empty", False):
+        current_pct = float(diagnosis.get("mean_I", float("nan")))
+        voltage_pct = float(diagnosis.get("mean_V", float("nan")))
+        current_valid, voltage_valid = np.isfinite(current_pct), np.isfinite(voltage_pct)
+        current_over = current_valid and current_pct > ALARM_LIMIT_PCT
+        voltage_over = voltage_valid and voltage_pct > ALARM_LIMIT_PCT
+        current_text = f"measured phase-current imbalance {current_pct:.1f}%" if current_valid else "measured phase-current imbalance unavailable"
+        voltage_text = f"measured voltage imbalance {voltage_pct:.1f}%" if voltage_valid else "measured voltage imbalance unavailable"
+        if current_over and not voltage_over:
+            diagnostic_text = (f"{current_text} is above the {ALARM_LIMIT_PCT:.0f}% limit, while {voltage_text} is within it. "
+                               "The recorded pattern points more toward uneven phase loading/current imbalance than a voltage imbalance; it does not prove that a recent current rise caused the forecast condition.")
+        elif voltage_over and not current_over:
+            diagnostic_text = (f"{voltage_text} is above the {ALARM_LIMIT_PCT:.0f}% limit, while {current_text} is within it. "
+                               "Check the incoming supply and connections before considering load redistribution.")
+        elif current_over and voltage_over:
+            diagnostic_text = (f"Both {current_text} and {voltage_text} exceed the {ALARM_LIMIT_PCT:.0f}% limit. "
+                               "The recorded data does not isolate one cause; check supply voltage and phase loading together.")
+        elif current_valid and voltage_valid:
+            diagnostic_text = (f"Both {current_text} and {voltage_text} are within the {ALARM_LIMIT_PCT:.0f}% limit. "
+                               "The phase imbalance shown above is a forecast signal, not a confirmed present-day current or voltage fault.")
+        else:
+            diagnostic_text = "Current/voltage diagnostic is incomplete; verify all three phase measurements on site."
+    else:
+        diagnostic_text = "Not enough valid measured current/voltage readings are available to assess whether phase current or supply voltage is more imbalanced."
+
     impacts = [
         ("Less headroom on the heavily loaded phase",
          "The forecast identifies a phase carrying more kW than the others. Confirm the real operating load and available electrical capacity before changing circuits."),
         ("Uneven loading needs an on-site check",
-         "kW shows predicted phase loading, but actual current and conductor heating also depend on voltage, power factor and harmonics. Verify with a meter."),
+         "A kW forecast indicates phase loading; actual current and conductor heating also depend on voltage, power factor and harmonics. Verify with a meter."),
         ("Protective devices may trip",
          "A trip is possible only if actual electrical conditions exceed equipment ratings. This kW forecast is a planning aid, not a protection study.")
     ]
@@ -536,8 +575,8 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
         badge_text, badge_class = "No loaded forecast", "good"
         actions = [
             ("No kW shift suggested", "The selected horizon has no valid loaded three-phase forecast hour to compare."),
-            ("Check the meter data", "Confirm that all three phase kW readings are present and that the machine is expected to run."),
-            ("Recheck after the forecast updates", "Review the phase kW pattern again when valid forecast values are available.")
+            ("Review total-load trend", load_trend_text),
+            ("Check meter diagnosis", diagnostic_text)
         ]
     else:
         stamp = phase_values.index[worst_pos]
@@ -557,7 +596,7 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
         forecast_line = (
             f"Worst forecast hour: {stamp:%a %d %b %H:%M} · {high_phase} {high_kw:,.1f} kW "
             f"({high_dev:+.1f}%) · {low_phase} {low_kw:,.1f} kW ({low_dev:+.1f}%)."
-            if worst_imbalance > ALARM_LIMIT_PCT else
+            if is_out_of_balance else
             f"Forecast phase loading at {stamp:%a %d %b %H:%M} is within the {ALARM_LIMIT_PCT:.0f}% review limit."
         )
         load_detail = f"{phase_load_detail} · 3-phase average {avg_kw:,.1f} kW."
@@ -600,19 +639,19 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
                  f"At {stamp:%a %d %b %H:%M}, {high_phase} is highest and {low_phase} is lowest. {load_detail}"),
                 ("Redistribute suitable loads (kW)",
                  f"Indicative forecast balance: {transfer_text}. This is the phase-level kW gap at that forecast hour, not a circuit-level transfer instruction. Verify actual current, voltage, power factor and cable/breaker ratings with a qualified electrician."),
-                ("Choose a practical review window", review_text)
+                ("Review load trend and meter signals", f"{load_trend_text} {diagnostic_text}")
             ]
         elif is_out_of_balance:
             actions = [
                 ("Review the forecast overload", forecast_line),
                 ("Check the phase circuits", "The phase-level forecast does not identify which individual circuits can be moved. Have a qualified electrician inspect the actual loads and ratings."),
-                ("Verify after any approved change", "Recheck all three phase kW values, currents and voltages after an approved circuit change.")
+                ("Review load trend and meter signals", f"{load_trend_text} {diagnostic_text}")
             ]
         else:
             actions = [
                 ("No kW redistribution indicated", f"The worst loaded forecast hour is {stamp:%a %d %b %H:%M} with {worst_imbalance:.1f}% phase deviation, within the {ALARM_LIMIT_PCT:.0f}% review limit."),
-                ("Keep new loads balanced", "Distribute new single-phase equipment across Red, Yellow and Blue rather than adding it to the highest-loaded phase."),
-                ("Continue monitoring", "Review the forecast again when new meter readings update the model.")
+                ("Review total-load trend", load_trend_text),
+                ("Review measured current and voltage", diagnostic_text)
             ]
 
     def render_rows(items, icons):
@@ -638,6 +677,9 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
     .phase-summary-feature {{ padding:8px 10px; border-radius:9px; background:#f3f6ff; margin-bottom:6px; }}
     .phase-summary-feature strong {{ display:block; font-size:.79rem; color:#172033; line-height:1.35; }}
     .phase-summary-feature span {{ display:block; margin-top:2px; font-size:.7rem; line-height:1.45; color:#526078; }}
+    .phase-summary-context {{ padding:8px 10px; border-radius:9px; background:#f8fafc; border:1px solid #e8edf5; margin:0 0 5px; }}
+    .phase-summary-context strong {{ display:block; color:#172033; font-size:.72rem; line-height:1.35; }}
+    .phase-summary-context span {{ display:block; color:#526078; font-size:.68rem; line-height:1.42; margin-top:2px; }}
     .phase-summary-item {{ display:grid; grid-template-columns:20px minmax(0,1fr); gap:6px; padding:7px 0; border-top:1px solid #edf1f7; }}
     .phase-summary-icon {{ font-size:.9rem; line-height:1.35; }}
     .phase-summary-item-title {{ color:#172033; font-size:.74rem; font-weight:700; margin-bottom:2px; }}
@@ -651,6 +693,8 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
         <div class="phase-summary-head"><div class="phase-summary-title">✅ ACTIONS TO TAKE</div><span class="phase-summary-badge {badge_class}">kW forecast plan</span></div>
         <div class="phase-summary-sub">{esc(summary_sub)}</div>
         <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>{esc(load_detail)} · kW alarm hours: {n_alarm_hours} of {n_hours}.</span></div>
+        <div class="phase-summary-context"><strong>📊 Overall load trend</strong><span>{esc(load_trend_text)}</span></div>
+        <div class="phase-summary-context"><strong>🔎 Meter diagnostic (recorded readings)</strong><span>{esc(diagnostic_text)}</span></div>
         {render_rows(actions, ("🔎", "⚖️", "✅"))}
       </section>
       <section class="phase-summary-card" tabindex="0" aria-label="Possible impacts if forecast phase imbalance is not addressed">
@@ -1035,9 +1079,12 @@ with tab_phase:
     # ---- 3-phase action / impact cards (shown above the phase forecast chart)
     # best time to move loads = quietest 3-hour window
     quiet_busy_window = gr.find_quietest_and_busiest_windows(forecast_phase_kw.sum(axis=1).to_numpy(), forecast_phase_kw.index)
+    previous_phase_period_kwh = float(phase_filled_hourly.iloc[-horizon_hours:].sum(axis=1).sum()) if len(phase_filled_hourly) >= horizon_hours else None
     phase_summary_html = phase_analysis_card_html(
         forecast_phase_kw,
         quiet_busy_window=quiet_busy_window,
+        diagnosis=diagnosis,
+        previous_period_load_kwh=previous_phase_period_kwh,
     )
     try:
         st.html(phase_summary_html)
