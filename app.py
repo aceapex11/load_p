@@ -1178,7 +1178,7 @@ with tab_phase:
     reset_kpi_counter(); kpi_columns = st.columns(4)
     with kpi_columns[0]: kpi_card("Imbalance now", "idle" if not latest_status["loaded"] else f"{latest_status['imb']:.1f} %", "machine idle" if not latest_status["loaded"] else f"{latest_status['worst']} {latest_status['direction']} · limit {ALARM_LIMIT_PCT:g} %", "good" if latest_status["status"] == "OK" else "warn" if latest_status["status"] == "ALARM" else "info", "⚖️")
     with kpi_columns[1]:
-        if diagnosis: kpi_card("Average imbalance · measured", f"{diagnosis['mean_imb']:.1f} %", f"above the limit in {diagnosis['pct_above']:.0f} % of loaded minutes · hourly means: {hourly_mean_imbalance_pct:.1f} %", "good" if diagnosis["mean_imb"] <= ALARM_LIMIT_PCT else "warn", "📏")
+        if diagnosis: kpi_card("Average imbalance · measured", f"{diagnosis['mean_imb']:.1f} %", "good" if diagnosis["mean_imb"] <= ALARM_LIMIT_PCT else "warn", "📏")
         else: kpi_card("Average imbalance · measured", "–", "too few loaded minutes", "", "📏")
     with kpi_columns[2]: kpi_card("Forecast alarm hours", f"{n_alarm_hours}", f"of {horizon_hours} hours", "", "🚨", trend=np.nan_to_num(forecast_imbalance_pct), trend_color=ACCENT)
     with kpi_columns[3]: kpi_card("First forecast alarm", "none" if first_alarm is None else f"{first_alarm:%a %H:%M}", "no alarm expected" if first_alarm is None else f"{first_alarm:%d %b} · in {(first_alarm - last_data_time).total_seconds() / 3600:.0f} h", "good" if first_alarm is None else "warn", "⏰")
