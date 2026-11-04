@@ -974,10 +974,10 @@ with tab_phase:
     control_columns = st.columns([1, 1.3, 1])
     phase_model_name = "Exponential Smoothing"
     phase_length_choice = control_columns[0].selectbox("Forecast length", list(FORECAST_LENGTH_HOURS), index=6, key="ph_len")
-    phase_training_days = 63                                # fixed learning window (the dropdown was removed)
+    phase_training_days = None                                # fixed learning window (the dropdown was removed)
     phase_season_hours = SEASON_LENGTH_HOURS[control_columns[1].selectbox("Seasonal cycle", list(SEASON_LENGTH_HOURS), index=6, key="ph_season")]
     phase_history_choice = control_columns[2].selectbox("History shown", list(HISTORY_SHOWN_HOURS), index=2, key="ph_hist")
-    max_training_hours = int(phase_training_days) * 24; horizon_hours = FORECAST_LENGTH_HOURS[phase_length_choice]
+    max_training_hours = len(phase_filled_hourly); horizon_hours = FORECAST_LENGTH_HOURS[phase_length_choice]
     # forecast Red, Yellow and Blue 7 days ahead
     phase_forecast_array, phase_labels_by_series, phase_fit_ok = forecast_phases_cached(phase_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_season_hours)
     forecast_phase_kw = pd.DataFrame(phase_forecast_array[:horizon_hours], index=future_hours[:horizon_hours], columns=PHASE_CODES); forecast_table = analyse_balance(forecast_phase_kw.to_numpy())
@@ -1023,7 +1023,7 @@ with tab_phase:
     st.write("")
 
     # ---- one chart: measured hours + forecast per phase; an X marks the hours when THAT phase is the one out of balance
-    with panel("Phase load · measured and forecast", f"hourly means · {phase_model_name} · learns from the last {phase_training_days} days · forecast starts after {last_data_time:%d %b %Y %H:%M} · shaded band = {CONFIDENCE_TEXT} interval · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
+    with panel("Phase load · measured and forecast", f"hourly means · {phase_model_name} · learns from all available history · forecast starts after {last_data_time:%d %b %Y %H:%M} · shaded band = {CONFIDENCE_TEXT} interval · ✕ = alarm hour on the phase that is out of balance", key="ph_main"):
         recent_phase_hours = phase_filled_hourly.iloc[-HISTORY_SHOWN_HOURS[phase_history_choice]:]; forecast_line_x = [last_data_time] + list(forecast_phase_kw.index)
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.08, subplot_titles=[f"{n} phase (kW)" for n in PHASE_LABELS])
         for j, p in enumerate(PHASE_CODES, 1):
@@ -1078,7 +1078,7 @@ with tab_phase:
                 fig.update_layout(title="Forecast · which phase is off: load vs the 3-phase average", yaxis_title="% above / below average"); show_figure(style_figure(fig, 300, True, top=70), key="pp_dev")
 
       # ---- B) actual vs predicted on test data: last 7 days hidden, model learns only from the hours before them
-    with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from the 28 days before them, then its forecast is compared with what really happened", key="ph_bt"):
+    with panel("Model check · actual vs predicted on test data", "the last 7 days are hidden, the model learns from all the history before them, then its forecast is compared with what really happened", key="ph_bt"):
 
         def phase_error_scores(actual, predicted):
             """MAE (kW), MAPE (%), SMAPE (%) on the hours where both values exist."""
