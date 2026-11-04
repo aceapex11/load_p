@@ -351,21 +351,17 @@ CARD_BLUE, CARD_BLUE_DARK, CARD_BLUE_TINT = "#2563EB", "#1D4ED8", "#DBEAFE"     
 
 
 def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_kwh, horizon_hours, badge, tone, advice=None):
-    '''Render two compact summary cards for the Load forecast tab only.
-
-    The first card lists recommended actions; the second lists potential
-    consequences of not acting. Text comes from the existing rule-based advice.
-    '''
+    'Render benefit-versus-loss cards for the Load forecast tab.'
     values = np.asarray(forecast_values, dtype=float)
     if values.size == 0:
         return ""
 
     energy_kwh = float(np.nansum(values))
     days = horizon_hours // 24 if horizon_hours % 24 == 0 else None
-    period = f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"
     badge_period = f"{days}-day" if days else f"{horizon_hours}-hour"
     change_pct = ((energy_kwh - previous_energy_kwh) / previous_energy_kwh * 100
                   if previous_energy_kwh >= 1 else float("nan"))
+    period = f"{days} day{'s' if days != 1 else ''}" if days else f"{horizon_hours} hours"
     if not np.isfinite(change_pct):
         change_text = "No comparable previous period is available."
     elif abs(change_pct) < 0.5:
@@ -378,7 +374,9 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
     advice = advice or {}
     actions = list(advice.get("actions", []))[:3]
     risks = list(advice.get("risks", []))[:3]
-    impact_text = advice.get("ignored", "Unmanaged demand may increase operating costs or require operational changes.")
+    benefit_text = advice.get("managed", "Following the plan can help the site match its power use to the forecast.")
+    loss_text = advice.get("ignored", "Unmanaged demand may increase operating pressure or interrupt work.")
+    why_text = advice.get("why", "The recommendation is based on the selected forecast and its comparison with the previous period.")
     tone_class = "bad" if tone == "bad" else "good" if tone == "good" else "amber"
     action_icons = ("🏭", "⚡", "🔋", "🕒", "🔌")
     risk_icons = ("💸", "📈", "⚠️", "🏭", "🧾")
@@ -404,7 +402,7 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
     html, body {{ margin:0 !important; padding:0 !important; background:transparent !important; overflow:hidden; }}
     * {{ box-sizing:border-box; }}
     .load-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:0; font-family:Inter,Arial,sans-serif; align-items:stretch; }}
-    .load-summary-card {{ position:relative; min-width:0; height:100%; align-self:stretch; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%); border:1px solid #E2E8F0; border-radius:14px; padding:11px 14px 8px 15px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:loadSummaryEnter .35s ease both; }}
+    .load-summary-card {{ position:relative; min-width:0; height:100%; align-self:stretch; background:linear-gradient(155deg,#FFFFFF 0%,#FBFCFF 100%); border:1px solid #E2E8F0; border-radius:14px; padding:11px 14px 9px 15px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:loadSummaryEnter .35s ease both; }}
     .load-summary-card::before {{ content:""; position:absolute; inset:0 auto 0 0; width:3px; border-radius:14px 0 0 14px; background:#93C5FD; opacity:.95; transition:width .2s ease; }}
     .load-summary-card:hover,.load-summary-card:focus-within {{ transform:translateY(-3px); border-color:#93C5FD; box-shadow:0 10px 22px -14px rgba(37,99,235,.48),0 3px 8px rgba(15,23,42,.05); }}
     .load-summary-card:hover::before,.load-summary-card:focus-within::before {{ width:5px; }}
@@ -413,34 +411,37 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
     .load-summary-badge {{ flex:0 0 auto; padding:3px 8px; border-radius:99px; font-size:.66rem; font-weight:700; }}
     .load-summary-badge.bad {{ background:#FFE9ED; color:#BE123C; }} .load-summary-badge.amber {{ background:#FFF4DD; color:#B45309; }} .load-summary-badge.good {{ background:#E8FAF3; color:#047857; }}
     .load-summary-sub {{ margin:3px 0 7px; color:#64748B; font-size:.69rem; }}
-    .load-summary-feature {{ display:flex; align-items:flex-start; gap:8px; padding:7px 9px; margin-bottom:2px; border-radius:9px; background:#F3F6FF; color:#1E293B; }}
+    .load-summary-feature {{ display:flex; align-items:flex-start; gap:8px; padding:7px 9px; margin-bottom:5px; border-radius:9px; background:#F3F6FF; color:#1E293B; }}
     .load-summary-feature-icon {{ font-size:1rem; line-height:1.25; }} .load-summary-feature strong {{ display:block; font-size:.79rem; line-height:1.3; color:#1E293B; }}
     .load-summary-feature small {{ display:block; margin-top:1px; font-size:.68rem; line-height:1.35; color:#64748B; }}
     .load-summary-item {{ display:grid; grid-template-columns:19px minmax(0,1fr); gap:6px; padding:6px 0; border-top:1px solid #EEF2F8; }}
     .load-summary-emoji {{ font-size:.88rem; line-height:1.35; }} .load-summary-item-title {{ color:#172033; font-size:.74rem; font-weight:700; margin-bottom:1px; }}
     .load-summary-item-copy {{ color:#526078; font-size:.69rem; line-height:1.4; }} .load-summary-empty {{ padding:8px 0; color:#64748B; font-size:.7rem; }}
-    .load-summary-impact {{ margin-top:6px; padding:7px 9px; border-radius:9px; background:#FFF7ED; border:1px solid #FED7AA; color:#9A3412; font-size:.69rem; line-height:1.4; }}
-    .load-summary-impact strong {{ display:block; margin-bottom:2px; color:#9A3412; font-size:.72rem; }}
+    .load-summary-outcome {{ margin-top:7px; padding:8px 10px; border-radius:9px; font-size:.69rem; line-height:1.42; }}
+    .load-summary-outcome.benefit {{ background:#ECFDF5; border:1px solid #A7F3D0; color:#065F46; }}
+    .load-summary-outcome.loss {{ background:#FFF7ED; border:1px solid #FED7AA; color:#9A3412; }}
+    .load-summary-outcome strong {{ display:block; margin-bottom:2px; font-size:.73rem; }}
+    .load-summary-reason {{ margin-top:4px; color:#526078; font-size:.67rem; line-height:1.4; }}
     @keyframes loadSummaryEnter {{ from {{ opacity:0; transform:translateY(6px); }} to {{ opacity:1; transform:translateY(0); }} }}
     @media (max-width:760px) {{ .load-summary-wrap {{ grid-template-columns:1fr; }} }}
     @media (prefers-reduced-motion:reduce) {{ .load-summary-card {{ animation:none; transition:none; }} .load-summary-card:hover {{ transform:none; }} }}
     </style>
     <div class="load-summary-wrap">
-      <section class="load-summary-card" tabindex="0" aria-label="Recommended actions">
+      <section class="load-summary-card" tabindex="0" aria-label="Actions and company benefits">
         <div class="load-summary-card-head"><div class="load-summary-title">✅ ACTIONS TO TAKE</div><span class="load-summary-badge good">Recommended plan</span></div>
-        <div class="load-summary-sub">What to do based on the {esc(badge_period)} load forecast</div>
+        <div class="load-summary-sub">Based on the selected {esc(badge_period)} load forecast</div>
         <div class="load-summary-feature"><span class="load-summary-feature-icon">📊</span><div><strong>{energy_kwh:,.0f} kWh forecast energy</strong><small>{esc(change_text)}</small></div></div>
         {rows(actions, action_icons)}
+        <div class="load-summary-outcome benefit"><strong>Company benefit if you follow the plan</strong>{esc(benefit_text)}<div class="load-summary-reason"><b>Why?</b> {esc(why_text)}</div></div>
       </section>
-      <section class="load-summary-card" tabindex="0" aria-label="Consequences if actions are not taken">
+      <section class="load-summary-card" tabindex="0" aria-label="Possible company losses if no action is taken">
         <div class="load-summary-card-head"><div class="load-summary-title">⚠️ IF YOU DON'T ACT</div><span class="load-summary-badge {risk_tone}">{esc(badge_text)}</span></div>
-        <div class="load-summary-sub">Possible outcomes if the forecast is not managed</div>
-        <div class="load-summary-feature"><span class="load-summary-feature-icon">🎯</span><div><strong>{esc(peak_text)}</strong><small>Plan capacity around the forecast peak.</small></div></div>
+        <div class="load-summary-sub">Possible effects of not following the forecast plan</div>
+        <div class="load-summary-feature"><span class="load-summary-feature-icon">🎯</span><div><strong>{esc(peak_text)}</strong><small>Prepare for this forecast peak.</small></div></div>
         {rows(risks, risk_icons)}
-        <div class="load-summary-impact"><strong>Potential overall impact</strong>{esc(impact_text)}</div>
+        <div class="load-summary-outcome loss"><strong>Possible company loss if no action is taken</strong>{esc(loss_text)}<div class="load-summary-reason"><b>Why?</b> {esc(why_text)}</div></div>
       </section>
     </div>'''
-
 def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh):
     """Short rule-based risks + actions for the forecast TOTAL kW.  Direction = forecast energy vs the previous period of the same length (> LOAD_CHG_PCT).
     Numbers come only from the forecast and the settings at the top of the file; a setting left at 0 is simply not mentioned.
@@ -459,7 +460,11 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
     if trend_direction == "idle":
         risks = [("Machine expected idle", f"Average {average_kw:,.1f} kW (below {MIN_PHASE_KW:g} kW). If it should be running, check supply, start-up and process."), ("Idle fixed charges", "Demand and fixed charges are still billed with no output.")]
         actions = [("Confirm the stop is planned", "If yes, switch off auxiliaries and use the time for maintenance."), ("Look for a fault", "Tripped breaker, supply problem, sensor or data problem.")]
-        if_managed_text, if_ignored_text = "A planned stop saves energy and gives a maintenance window.", "An unplanned stop means lost production and fixed charges with no output."
+        if_managed_text, if_ignored_text = (
+            "Confirming a planned stop and switching off unused equipment can avoid unnecessary energy use and create time for maintenance.",
+            "If the stop is not planned, a fault may go unnoticed and production may remain stopped."
+        )
+        why_text = f"The forecast average is {average_kw:,.1f} kW, below the {MIN_PHASE_KW:g} kW running level. Confirm whether this is a planned stop before changing equipment."
     elif trend_direction == "up":
         risks = [("Higher electricity cost", f"{energy_kwh:,.0f} kWh needed, {change_text}. " + (f"Extra grid or backup power may cost about {format_money(max(energy_change_kwh, 0) * TARIFF_PER_KWH)}." if TARIFF_PER_KWH > 0 else "Extra grid or backup power may be needed.")),
                  ("Increased peak demand", f"Peak {peak:,.1f} kW around {format_time(peak_time)}" + (f", {shortfall_kw:,.1f} kW above own generation" if shortfall_kw else "") + (f", {over_demand_kw:,.1f} kW above sanctioned demand (penalty risk)" if over_demand_kw else f", {demand_use_pct:.0f} % of sanctioned demand" if SANCTIONED_DEMAND_KW > 0 else "") + "."),
@@ -471,8 +476,9 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
                 ("Optimize energy storage" if HAS_BATTERY else "Use the low-load hours", f"Charge the battery around {format_time(lowest_time)}; discharge at the peak." if HAS_BATTERY else f"Run flexible work around {format_time(lowest_time)} ({lowest_kw:,.1f} kW), not at the peak."),
                 ("Shift flexible loads", f"Stagger motor starts away from {format_time(peak_time)}; moving {SHIFTABLE_LOAD_PCT:g} % cuts the peak by about {peak_cut_kw:,.1f} kW."),
                 ("Monitor power availability", "Compare the forecast with available generation; plan backup if short.")]
-        if_managed_text = f"Peak can drop by about {peak_cut_kw:,.1f} kW" + (f", saving about {format_money(peak_cut_kw * DEMAND_CHARGE_PER_KW)}" if DEMAND_CHARGE_PER_KW > 0 else "") + "; backup supply and stoppages are avoided."
-        if_ignored_text = (f"About {format_money(extra_cost)} extra cost" if extra_cost > 0 else "Extra grid or backup cost") + (f", peak {capacity_gap_kw:,.1f} kW over capacity" if capacity_gap_kw else "") + ", and possible production disruption."
+        if_managed_text = "Preparing generation or backup and moving flexible work away from the peak can reduce supply pressure and lower the risk of production stops."
+        if_ignored_text = (f"Extra cost may be about {format_money(extra_cost)}" if extra_cost > 0 else "More grid or backup power may be needed") + (f"; the forecast peak is {capacity_gap_kw:,.1f} kW above the configured capacity or demand limit" if capacity_gap_kw else "") + ". Production may be affected if supply is not enough."
+        why_text = f"Forecast energy is {change_text or 'close to the previous period'}, and the highest load is {peak:,.1f} kW around {format_time(peak_time)}. Planning before this peak gives the site time to prepare supply and move flexible work."
     elif trend_direction == "down":
         risks = [("Under-utilised generation", f"{energy_kwh:,.0f} kWh needed, {change_text}; up to {unused_kwh:,.0f} kWh of usual generation may go unused" + (f" (about {format_money(unused_kwh * TARIFF_PER_KWH)})." if TARIFF_PER_KWH > 0 else ".")),
                  ("Wasted fuel", f"Peak {peak:,.1f} kW leaves {spare_kw:,.1f} kW of own generation idle." if spare_kw else f"Generation sized for a higher load runs inefficiently (peak only {peak:,.1f} kW)."),
@@ -484,20 +490,25 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
                 ("Consolidate loads", f"Run machines together; switch off idle equipment around {format_time(lowest_time)}."),
                 ("Review contract demand", f"Peak is {demand_use_pct:.0f} % of contract demand; ask if it can be lowered." if SANCTIONED_DEMAND_KW > 0 and demand_use_pct < 80 else "If the peak stays well below contract demand, a lower contract may cut fixed charges."),
                 ("Check why demand fell", "Maintenance, planned shutdown, sensor or hidden machine fault.")]
-        if_managed_text = f"Matching generation to demand avoids up to {unused_kwh:,.0f} kWh" + (f" (about {format_money(unused_kwh * TARIFF_PER_KWH)})" if TARIFF_PER_KWH > 0 else "") + " of unnecessary generation and fuel."
-        if_ignored_text = f"Up to {unused_kwh:,.0f} kWh" + (f" (about {format_money(unused_kwh * TARIFF_PER_KWH)})" if TARIFF_PER_KWH > 0 else "") + " wasted, fixed charges on unused capacity, and a hidden fault may go unnoticed."
+        if_managed_text = "Matching generation and equipment use to the lower forecast can reduce unnecessary fuel use and avoid running units at a poor load level."
+        if_ignored_text = "Generation may remain higher than needed, which can waste fuel. A sudden drop caused by a fault or production issue may also go unnoticed."
+        why_text = f"Forecast energy is {change_text or 'close to the previous period'}, and the forecast peak is {peak:,.1f} kW. First confirm that the lower demand is planned, then match generation and operation to it."
     else:
         risks = [("Demand is steady", f"{energy_kwh:,.0f} kWh needed, {change_text or 'no major change'}."), ("Peak to watch", f"{peak:,.1f} kW around {format_time(peak_time)}" + (f" ({demand_use_pct:.0f} % of sanctioned demand)." if SANCTIONED_DEMAND_KW > 0 else ".")), ("Low-load hours", f"Lowest {lowest_kw:,.1f} kW around {format_time(lowest_time)}.")]
         actions = [("Keep the current plan", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {hours_to_text(n_hours)}, {change_text or 'no major change'}. Generation and storage settings can stay as they are."), ("Prepare for the peak", f"Keep {peak:,.1f} kW ready around {format_time(peak_time)}; stagger motor starts."), ("Keep monitoring", "The forecast updates as new readings arrive.")]
-        if_managed_text, if_ignored_text = "Staggered motor starts keep the peak low and the bill steady.", "A coincident start-up can still create a costly peak."
+        if_managed_text, if_ignored_text = (
+            "Keeping the current plan and starting large motors at different times can help the site run steadily and avoid sudden peaks.",
+            "Several machines starting together can still create a short peak and put extra pressure on the supply."
+        )
+        why_text = f"Forecast energy is {change_text or 'close to the previous period'} and the peak is {peak:,.1f} kW around {format_time(peak_time)}. The current plan can continue, but the peak still needs attention."
     # a drop of more than 10 % needs attention
     big_drop = trend_direction == "down" and np.isfinite(energy_change_pct) and energy_change_pct < -10
     tone = "bad" if capacity_gap_kw else "amber" if trend_direction in ("up", "down") else "good"
-    return dict(kind=trend_direction, tone=tone, badge="Attention" if capacity_gap_kw or big_drop else "Watch" if trend_direction in ("up", "down") else "Normal", risks=risks, actions=actions, managed=if_managed_text, ignored=if_ignored_text, headline=f"Forecasted peak demand: {peak:,.1f} kW around {peak_time:%A, %H:%M}")
+    return dict(kind=trend_direction, tone=tone, badge="Attention" if capacity_gap_kw or big_drop else "Watch" if trend_direction in ("up", "down") else "Normal", risks=risks, actions=actions, managed=if_managed_text, ignored=if_ignored_text, why=why_text, headline=f"Forecasted peak demand: {peak:,.1f} kW around {peak_time:%A, %H:%M}")
 
 
 def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosis=None):
-    # The card compares the selected forecast with the recorded meter history.
+    'Show the suggested kW phase shift, its possible company benefit, and the risk of doing nothing.'
     esc = lambda value: html_lib.escape(str(value), quote=True)
     labels = dict(zip(PHASE_CODES, PHASE_LABELS))
     phase_values = forecast_phase_kw[PHASE_CODES].astype(float)
@@ -518,74 +529,55 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
     candidates = np.flatnonzero(loaded)
     worst_pos = int(candidates[np.nanargmax(hourly_imbalance[candidates])]) if len(candidates) else None
 
-    # This summary uses the recorded meter history only. It is not a forecast.
+    # Past readings explain the likely reason. They are not used to calculate the future kW transfer.
     if diagnosis and not diagnosis.get("empty", False):
         current_pct = float(diagnosis.get("mean_I", float("nan")))
         voltage_pct = float(diagnosis.get("mean_V", float("nan")))
         current_above = float(diagnosis.get("pct_current_above", float("nan")))
         voltage_above = float(diagnosis.get("pct_voltage_above", float("nan")))
         max_voltage = float(diagnosis.get("max_voltage_imb", float("nan")))
-        start_date = diagnosis.get("history_start")
-        end_date = diagnosis.get("history_end")
-        date_range = (
-            f"{pd.Timestamp(start_date):%d %b %Y} to {pd.Timestamp(end_date):%d %b %Y}"
-            if start_date is not None and end_date is not None else "the available history"
-        )
+        start_date, end_date = diagnosis.get("history_start"), diagnosis.get("history_end")
+        date_range = (f"{pd.Timestamp(start_date):%d %b %Y} to {pd.Timestamp(end_date):%d %b %Y}"
+                      if start_date is not None and end_date is not None else "the available history")
         if np.isfinite(current_pct) and np.isfinite(voltage_pct):
             if current_pct > ALARM_LIMIT_PCT and voltage_pct <= ALARM_LIMIT_PCT:
-                current_share = (
-                    f" It was above the {ALARM_LIMIT_PCT:.0f}% limit in {current_above:.1f}% of valid records."
-                    if np.isfinite(current_above) else " It was often above the set limit."
-                )
-                voltage_share = (
-                    f" Voltage imbalance averaged {voltage_pct:.1f}% and stayed below {ALARM_LIMIT_PCT:.0f}% in all valid records"
-                    f" (highest {max_voltage:.1f}%)."
-                    if np.isfinite(voltage_above) and voltage_above == 0 and np.isfinite(max_voltage)
-                    else f" Voltage imbalance averaged {voltage_pct:.1f}% and stayed within the set limit."
-                )
-                diagnostic_text = (
-                    f"Past meter data ({date_range}): current imbalance averaged {current_pct:.1f}%.{current_share}"
-                    f"{voltage_share} Current imbalance closely follows the phase kW imbalance in the recorded data. This points to uneven phase loading as the main issue, not voltage variation."
-                )
+                current_share = (f"It was above the {ALARM_LIMIT_PCT:.0f}% limit in {current_above:.1f}% of valid records. "
+                                 if np.isfinite(current_above) else "It often crossed the set limit. ")
+                if np.isfinite(voltage_above) and voltage_above == 0 and np.isfinite(max_voltage):
+                    voltage_share = f"Voltage averaged {voltage_pct:.1f}% and stayed below the limit in all valid records (highest {max_voltage:.1f}%). "
+                else:
+                    voltage_share = f"Voltage averaged {voltage_pct:.1f}% and stayed within the set limit. "
+                diagnostic_text = (f"From {date_range}, current imbalance averaged {current_pct:.1f}%. "
+                                   f"{current_share}{voltage_share}Current imbalance closely followed the phase kW imbalance. "
+                                   "This points to uneven phase loading as the main issue, not voltage variation.")
             elif voltage_pct > ALARM_LIMIT_PCT and current_pct <= ALARM_LIMIT_PCT:
-                diagnostic_text = (
-                    f"Past meter data ({date_range}): voltage imbalance averaged {voltage_pct:.1f}% and was above "
-                    f"the {ALARM_LIMIT_PCT:.0f}% limit. Current imbalance averaged {current_pct:.1f}%. "
-                    "The supply voltage needs to be checked before any load shift."
-                )
+                diagnostic_text = (f"From {date_range}, voltage imbalance averaged {voltage_pct:.1f}% and crossed the "
+                                   f"{ALARM_LIMIT_PCT:.0f}% limit. Current imbalance averaged {current_pct:.1f}%. "
+                                   "Check the incoming supply before shifting loads.")
             elif current_pct > ALARM_LIMIT_PCT and voltage_pct > ALARM_LIMIT_PCT:
-                diagnostic_text = (
-                    f"Past meter data ({date_range}): current imbalance averaged {current_pct:.1f}% and voltage "
-                    f"imbalance averaged {voltage_pct:.1f}%. Both were above the {ALARM_LIMIT_PCT:.0f}% limit. "
-                    "Check the supply and phase loads together."
-                )
+                diagnostic_text = (f"From {date_range}, current imbalance averaged {current_pct:.1f}% and voltage "
+                                   f"imbalance averaged {voltage_pct:.1f}%. Both crossed the {ALARM_LIMIT_PCT:.0f}% limit. "
+                                   "Check the supply and phase loads together.")
             else:
-                diagnostic_text = (
-                    f"Past meter data ({date_range}): current imbalance averaged {current_pct:.1f}% and voltage "
-                    f"imbalance averaged {voltage_pct:.1f}%. Both stayed within the {ALARM_LIMIT_PCT:.0f}% limit."
-                )
+                diagnostic_text = (f"From {date_range}, current imbalance averaged {current_pct:.1f}% and voltage "
+                                   f"imbalance averaged {voltage_pct:.1f}%. Both stayed within the {ALARM_LIMIT_PCT:.0f}% limit.")
         else:
             diagnostic_text = "Past current and voltage readings are not complete enough to compare the three phases."
     else:
         diagnostic_text = "There are not enough valid past current and voltage readings to check the phase balance."
 
-    impacts = [
-        ("More load on one phase",
-         "One phase is expected to carry more kW than the others. Check its real load and available capacity."),
-        ("Cables may get hotter",
-         "A higher phase load can increase current and cable heat. Check the real current and cable rating before moving a load."),
-        ("Breakers may trip",
-         "A breaker may trip if the real current goes above its rating. This forecast cannot confirm breaker safety.")
-    ]
-
+    impacts = []
     if worst_pos is None:
         forecast_line = "No loaded three-phase forecast hour is available."
         load_detail = "No phase kW values are available for a shift estimate."
         badge_text, badge_class = "No loaded forecast", "good"
         actions = [
-            ("No kW shift suggested", "The selected forecast has no loaded hour to compare across the three phases."),
+            ("No kW shift suggested", "The forecast has no loaded hour to compare across the three phases."),
             ("Keep checking the phases", "Review the Red, Yellow and Blue kW values when new meter data arrives.")
         ]
+        benefit_text = "There is no clear kW shift to recommend from this forecast. Keeping new loads balanced can help prevent a future imbalance."
+        loss_text = "There is not enough loaded forecast data to identify a phase risk. Missing data may hide a problem, so check the meter readings."
+        reason_text = "A shift can only be estimated when all three phase forecasts have valid values and the site is expected to be running."
     else:
         stamp = phase_values.index[worst_pos]
         values = matrix[worst_pos]
@@ -597,10 +589,7 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
         high_dev, low_dev = float(dev[high_idx]), float(dev[low_idx])
         worst_imbalance = float(hourly_imbalance[worst_pos])
         is_out_of_balance = worst_imbalance > ALARM_LIMIT_PCT
-        phase_load_detail = " · ".join(
-            f"{labels[code]} {float(values[i]):,.1f} kW"
-            for i, code in enumerate(PHASE_CODES)
-        )
+        phase_load_detail = " · ".join(f"{labels[code]} {float(values[i]):,.1f} kW" for i, code in enumerate(PHASE_CODES))
         forecast_line = (
             f"Worst forecast hour: {stamp:%a %d %b %H:%M}. {high_phase} is highest "
             f"({high_kw:,.1f} kW, {high_dev:+.1f}%). {low_phase} is lowest "
@@ -611,7 +600,7 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
         load_detail = phase_load_detail + "."
         badge_text, badge_class = ("Review phase loading", "amber") if is_out_of_balance else ("Within limit", "good")
 
-        # Estimate kW that would bring the three forecast phase values closer to their mean.
+        # Estimate a kW shift that would bring the forecast phase values closer to their average.
         transfers = []
         if is_out_of_balance:
             donors = [[i, max(float(values[i]) - avg_kw, 0.0)] for i in range(3)]
@@ -632,27 +621,50 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
                 if receivers[ri][1] <= 1e-8:
                     ri += 1
 
+        reason_text = (f"At {stamp:%a %d %b %H:%M}, {high_phase} is {high_kw:,.1f} kW and {low_phase} is "
+                       f"{low_kw:,.1f} kW. The suggested shift is based on the difference between each phase "
+                       "and the three-phase average.")
         if is_out_of_balance and transfers:
-            transfer_text = "; ".join(
-                f"{donor} → {receiver}: about {amount:.1f} kW"
-                for donor, receiver, amount in transfers
-            )
+            transfer_text = "; ".join(f"{donor} → {receiver}: about {amount:.1f} kW" for donor, receiver, amount in transfers)
             actions = [
-                ("Check the highest phase", f"At {stamp:%a %d %b %H:%M}, {high_phase} has the highest forecast load and {low_phase} has the lowest. {load_detail}"),
-                ("Review a kW load shift", f"Forecast balance estimate: {transfer_text}. This is a phase estimate, not a circuit instruction. Ask a qualified electrician to check the real loads and ratings before making a change."),
-                ("Check after any change", "Measure all three phase currents and voltages again after an approved change.")
+                ("Review the high phase", f"{high_phase} has the highest forecast load at {stamp:%a %d %b %H:%M}. {load_detail}"),
+                ("Check a possible kW shift", f"Estimated phase balance: {transfer_text}. Check the real circuits and ratings before making any change."),
+                ("Measure after the change", "After an approved change, check all three phase loads, currents and voltages again.")
+            ]
+            total_shift = sum(item[2] for item in transfers)
+            benefit_text = (f"A suitable shift of about {total_shift:.1f} kW may bring the three forecast phase loads closer together at this hour. "
+                            "This can reduce uneven phase loading. It does not reduce total energy use by itself.")
+            loss_text = (f"If no suitable load is moved, {high_phase} is still forecast to carry more kW than the other phases. "
+                         "If the real current is also high, cables may heat up or protection may trip when equipment limits are exceeded.")
+            impacts = [
+                ("Uneven phase load", f"{high_phase} is forecast at {high_kw:,.1f} kW, above the three-phase average of {avg_kw:,.1f} kW."),
+                ("Cable heating risk", "Higher real phase current can heat cables. The forecast is not a live current reading."),
+                ("Breaker trip risk", "A breaker may trip if real current goes above its rating. Check the actual circuit before any change.")
             ]
         elif is_out_of_balance:
             actions = [
-                ("Check the forecast phase loads", forecast_line),
+                ("Review the forecast phase loads", forecast_line),
                 ("Check the real circuits", "The forecast cannot show which circuit can be moved. Ask a qualified electrician to check the loads and ratings."),
-                ("Check after any change", "Measure all three phase currents and voltages again after an approved change.")
+                ("Measure after any change", "Check all three phase loads, currents and voltages after an approved change.")
+            ]
+            benefit_text = "Checking the phase loads and suitable circuits may help reduce the imbalance. No safe transfer amount can be confirmed from this forecast alone."
+            loss_text = f"The predicted difference between {high_phase} and {low_phase} may remain. If the real current is above equipment limits, cables may heat up or protection may trip."
+            impacts = [
+                ("Uneven phase load", forecast_line),
+                ("Cable heating risk", "Check actual current and cable ratings before changing loads."),
+                ("Breaker trip risk", "Protection may trip if actual current exceeds the breaker rating.")
             ]
         else:
             actions = [
-                ("No kW shift suggested", f"The largest phase difference is {worst_imbalance:.1f}%, within the {ALARM_LIMIT_PCT:.0f}% limit."),
-                ("Keep new loads balanced", "Share new single-phase loads across Red, Yellow and Blue."),
+                ("No kW shift needed now", f"The largest forecast phase difference is {worst_imbalance:.1f}%, within the {ALARM_LIMIT_PCT:.0f}% limit."),
+                ("Balance new loads", "Share new single-phase loads across Red, Yellow and Blue."),
                 ("Keep checking the phases", "Review the phase kW values when new meter data arrives.")
+            ]
+            benefit_text = "No phase transfer is needed under the selected forecast. Keeping new loads balanced can help the phases stay within the limit."
+            loss_text = "There is no major phase imbalance forecast now. If new loads are added to one phase only, an imbalance may develop later."
+            impacts = [
+                ("No large difference forecast", f"The highest phase difference is {worst_imbalance:.1f}%, within the {ALARM_LIMIT_PCT:.0f}% limit."),
+                ("Watch new connections", "Adding several loads to one phase can make it higher than the others."),
             ]
 
     def render_rows(items, icons):
@@ -665,7 +677,7 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
         )
 
     summary_sub = f"Selected {badge_period} forecast · phase load in kW"
-    impact_sub = f"Possible effects of the selected {badge_period} phase forecast"
+    impact_sub = f"What may happen if the phase load is not balanced"
     return f'''<style>
     .phase-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:stretch; margin:2px 0 8px; font-family:Inter,Arial,sans-serif; }}
     .phase-summary-card {{ min-width:0; height:100%; display:flex; flex-direction:column; background:linear-gradient(155deg,#fff 0%,#fbfcff 100%); border:1px solid #dfe7f3; border-left:3px solid #93c5fd; border-radius:14px; padding:12px 14px 10px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:phaseSummaryEnter .35s ease both; }}
@@ -685,26 +697,32 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
     .phase-summary-icon {{ font-size:.9rem; line-height:1.35; }}
     .phase-summary-item-title {{ color:#172033; font-size:.74rem; font-weight:700; margin-bottom:2px; }}
     .phase-summary-item-copy {{ color:#526078; font-size:.69rem; line-height:1.45; }}
+    .phase-summary-outcome {{ padding:8px 10px; margin-top:7px; border-radius:9px; font-size:.69rem; line-height:1.45; }}
+    .phase-summary-outcome.benefit {{ background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; }}
+    .phase-summary-outcome.loss {{ background:#fff7ed; border:1px solid #fed7aa; color:#9a3412; }}
+    .phase-summary-outcome strong {{ display:block; margin-bottom:2px; font-size:.73rem; }}
+    .phase-summary-reason {{ margin-top:4px; color:#526078; font-size:.67rem; line-height:1.42; }}
     @keyframes phaseSummaryEnter {{ from {{ opacity:0; transform:translateY(6px); }} to {{ opacity:1; transform:translateY(0); }} }}
     @media (max-width:760px) {{ .phase-summary-wrap {{ grid-template-columns:1fr; }} }}
     @media (prefers-reduced-motion:reduce) {{ .phase-summary-card {{ animation:none; transition:none; }} .phase-summary-card:hover {{ transform:none; }} }}
     </style>
     <div class="phase-summary-wrap">
-      <section class="phase-summary-card" tabindex="0" aria-label="Forecast based kW phase balancing actions">
+      <section class="phase-summary-card" tabindex="0" aria-label="Actions and company benefits from phase balancing">
         <div class="phase-summary-head"><div class="phase-summary-title">✅ ACTIONS TO TAKE</div><span class="phase-summary-badge {badge_class}">kW forecast plan</span></div>
         <div class="phase-summary-sub">{esc(summary_sub)}</div>
         <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>{esc(load_detail)} Hours above the {ALARM_LIMIT_PCT:.0f}% limit: {n_alarm_hours} of {n_hours}.</span></div>
-        <div class="phase-summary-context"><strong>🔎 What past readings show</strong><span>{esc(diagnostic_text)}</span></div>
+        <div class="phase-summary-context"><strong>🔎 Why this recommendation?</strong><span>{esc(diagnostic_text)} {esc(reason_text)}</span></div>
         {render_rows(actions, ("🔎", "⚖️", "✅"))}
+        <div class="phase-summary-outcome benefit"><strong>Company benefit if you follow the plan</strong>{esc(benefit_text)}</div>
       </section>
-      <section class="phase-summary-card" tabindex="0" aria-label="Possible effects if forecast phase imbalance is not addressed">
+      <section class="phase-summary-card" tabindex="0" aria-label="Possible company losses if phase imbalance is not addressed">
         <div class="phase-summary-head"><div class="phase-summary-title">⚠️ IF YOU DON'T ACT</div><span class="phase-summary-badge {badge_class}">{esc(badge_text)}</span></div>
         <div class="phase-summary-sub">{esc(impact_sub)}</div>
-        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>{esc(load_detail)} The forecast is not a live reading. Check the real circuits before making a change.</span></div>
+        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>{esc(load_detail)} This is a forecast, not a live meter reading.</span></div>
         {render_rows(impacts, ("📉", "⚡", "🚨"))}
+        <div class="phase-summary-outcome loss"><strong>Possible company loss if no action is taken</strong>{esc(loss_text)}<div class="phase-summary-reason"><b>Why?</b> {esc(reason_text)}</div></div>
       </section>
     </div>'''
-
 # ------------------------------------------------------------------ FORECAST HELPERS (cached wrappers around gridsense_forecast.py)
 def hours_to_text(hours):
     hours = int(hours); return f"{hours} h" if hours < 48 else f"{hours / 24:.0f} days"
