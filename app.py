@@ -496,154 +496,124 @@ def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh)
     return dict(kind=trend_direction, tone=tone, badge="Attention" if capacity_gap_kw or big_drop else "Watch" if trend_direction in ("up", "down") else "Normal", risks=risks, actions=actions, managed=if_managed_text, ignored=if_ignored_text, headline=f"Forecasted peak demand: {peak:,.1f} kW around {peak_time:%A, %H:%M}")
 
 
-def phase_analysis_card_html(forecast_phase_kw, forecast_table,
-                             forecast_phase_current_a=None,
-                             forecast_phase_voltage_v=None,
-                             quiet_busy_window=None):
-    '''Render phase actions and impacts using ONLY the selected future forecast horizon.
-
-    Forecasted phase currents drive the neutral-current estimate and amp transfer
-    estimates. Historical meter data is used upstream only to train the forecasts;
-    historical diagnostic averages are deliberately not displayed or used here.
-    '''
+def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None):
+    """Build a kW-only phase balancing plan from the worst forecast hour."""
     esc = lambda value: html_lib.escape(str(value), quote=True)
-    n_hours = len(forecast_phase_kw)
+    labels = dict(zip(PHASE_CODES, PHASE_LABELS))
+    phase_values = forecast_phase_kw[PHASE_CODES].astype(float)
+    matrix = phase_values.to_numpy(dtype=float)
+    valid = np.isfinite(matrix).all(axis=1)
+    hourly_avg = np.full(len(matrix), np.nan, dtype=float)
+    hourly_avg[valid] = matrix[valid].mean(axis=1)
+    loaded = valid & (hourly_avg >= MIN_PHASE_KW)
+    deviations = np.full_like(matrix, np.nan, dtype=float)
+    deviations[loaded] = (matrix[loaded] / hourly_avg[loaded, None] - 1.0) * 100.0
+    hourly_imbalance = np.full(len(matrix), np.nan, dtype=float)
+    hourly_imbalance[loaded] = np.max(np.abs(deviations[loaded]), axis=1)
+
+    n_hours = len(phase_values)
+    n_loaded_hours = int(loaded.sum())
+    n_alarm_hours = int(np.sum(loaded & (hourly_imbalance > ALARM_LIMIT_PCT)))
     n_days = n_hours // 24 if n_hours % 24 == 0 else None
     badge_period = f"{n_days}-day" if n_days else f"{n_hours}-hour"
-    labels = dict(zip(PHASE_CODES, PHASE_LABELS))
-
-    # Overall phase loading for the chosen 1–7 day forecast slice.
-    forecast_avg_kw = forecast_phase_kw[PHASE_CODES].mean()
-    overall_avg_kw = float(forecast_avg_kw.mean())
-    kw_deviation_pct = (forecast_avg_kw / overall_avg_kw - 1) * 100 if overall_avg_kw >= 1 else forecast_avg_kw * 0
-    high_kw_col, low_kw_col = kw_deviation_pct.idxmax(), kw_deviation_pct.idxmin()
-    high_phase, low_phase = labels[high_kw_col], labels[low_kw_col]
-    high_kw_dev, low_kw_dev = float(kw_deviation_pct[high_kw_col]), float(kw_deviation_pct[low_kw_col])
-    forecast_line = (f"{high_phase} is above average ({high_kw_dev:+.1f}%); "
-                     f"{low_phase} is below average ({low_kw_dev:+.1f}%).")
-    n_alarm_hours = int(forecast_table.Alarm.sum()) if "Alarm" in forecast_table else 0
-    kw_flagged = float(kw_deviation_pct.abs().max()) > ALARM_LIMIT_PCT or n_alarm_hours > 0
-
-    def phase_forecast_stats(frame):
-        if frame is None or frame.empty or not set(PHASE_CODES).issubset(frame.columns):
-            return None
-        means = frame[PHASE_CODES].mean().astype(float)
-        if not np.isfinite(means.to_numpy()).all() or float(means.mean()) <= 0:
-            return None
-        deviations = (means / float(means.mean()) - 1) * 100
-        return means, deviations, float(deviations.abs().max())
-
-    current_stats = phase_forecast_stats(forecast_phase_current_a)
-    voltage_stats = phase_forecast_stats(forecast_phase_voltage_v)
-    current_flagged = bool(current_stats and current_stats[2] > ALARM_LIMIT_PCT)
-    voltage_flagged = bool(voltage_stats and voltage_stats[2] > ALARM_LIMIT_PCT)
-    is_out_of_balance = kw_flagged or current_flagged or voltage_flagged
-
-    # Estimate phase-current balancing amounts from the CURRENT FORECAST average
-    # across the selected horizon. These are planning estimates, not circuit-level
-    # transfer instructions.
-    transfer_rows = []
-    if current_stats:
-        current_means, current_deviation, current_imbalance_pct = current_stats
-        current_high_col, current_low_col = current_deviation.idxmax(), current_deviation.idxmin()
-        current_high_phase, current_low_phase = labels[current_high_col], labels[current_low_col]
-        current_average = float(current_means.mean())
-        donors = [[col, max(float(current_means[col]) - current_average, 0.0)] for col in PHASE_CODES]
-        receivers = [[col, max(current_average - float(current_means[col]), 0.0)] for col in PHASE_CODES]
-        for donor in donors:
-            for receiver in receivers:
-                if donor[1] <= 0 or receiver[1] <= 0:
-                    continue
-                amount_a = min(donor[1], receiver[1])
-                if amount_a >= 1.0:
-                    transfer_rows.append((labels[donor[0]], labels[receiver[0]], amount_a))
-                    donor[1] -= amount_a
-                    receiver[1] -= amount_a
-
-    # Forecast neutral current hour by hour from the three forecast phase currents.
-    # This is the same simplified equal-phase-angle 4-wire approximation used by
-    # the previous estimate, but now every input is a future forecast value.
-    neutral_mean_a = neutral_p95_a = float('nan')
-    if forecast_phase_current_a is not None and not forecast_phase_current_a.empty:
-        current_matrix = forecast_phase_current_a[PHASE_CODES].to_numpy(dtype=float)
-        valid = np.isfinite(current_matrix).all(axis=1)
-        current_matrix = current_matrix[valid]
-        if len(current_matrix):
-            neutral_hourly = np.sqrt(np.maximum(
-                0.0,
-                np.square(current_matrix).sum(axis=1)
-                - current_matrix[:, 0] * current_matrix[:, 1]
-                - current_matrix[:, 1] * current_matrix[:, 2]
-                - current_matrix[:, 2] * current_matrix[:, 0]
-            ))
-            neutral_mean_a = float(np.mean(neutral_hourly))
-            neutral_p95_a = float(np.percentile(neutral_hourly, 95))
-
-    if voltage_flagged:
-        voltage_means, voltage_deviations, voltage_imbalance_pct = voltage_stats
-        voltage_high = labels[voltage_deviations.idxmax()]
-        voltage_low = labels[voltage_deviations.idxmin()]
-        actions = [
-            ("Review the forecast voltage pattern",
-             f"The selected-horizon voltage forecast has {voltage_imbalance_pct:.1f}% phase deviation ({voltage_high} high, {voltage_low} low)."),
-            ("Do not move loads on this estimate alone",
-             "Have a qualified electrician verify actual supply voltage and connections before considering any circuit transfer."),
-            ("Confirm current before balancing",
-             "Compare live phase currents and circuit ratings; the forecast is a planning signal, not permission to switch circuits.")
-        ]
-    elif current_flagged:
-        moves = "; ".join(
-            f"{donor} → {receiver} (about {amount:.0f} A)"
-            for donor, receiver, amount in transfer_rows
-        )
-        if not moves:
-            moves = f"from {current_high_phase} towards {current_low_phase}"
-        when_text = (
-            f" Forecast low-load window: {quiet_busy_window['quiet'][0]:%a %d %b %H:%M} → {quiet_busy_window['quiet'][1]:%H:%M}."
-            if quiet_busy_window and quiet_busy_window.get('quiet') else
-            " Choose a low-load window after checking actual site conditions."
-        )
-        actions = [
-            ("Inspect the forecast high-current phase",
-             f"The selected-horizon current forecast shows {current_high_phase} above average and {current_low_phase} below average ({current_imbalance_pct:.1f}% maximum deviation)."),
-            ("Redistribute suitable loads",
-             f"Forecast-based balancing estimate: {moves}.{when_text} Confirm each circuit's live current, cable and breaker ratings with a qualified electrician before any transfer."),
-            ("Verify after any approved change",
-             "Measure all three phase currents and voltages again; compare the result with the forecast and equipment limits.")
-        ]
-    elif kw_flagged:
-        actions = [
-            ("Review the forecast phase loading",
-             f"The selected-horizon kW forecast shows {high_phase} above average and {low_phase} below average."),
-            ("Check circuits before moving loads",
-             "Use the forecast as an early warning. Confirm live phase current, voltage and circuit ratings before deciding whether any single-phase load can move."),
-            ("Keep monitoring the forecast",
-             f"Investigate phase deviations above {ALARM_LIMIT_PCT:.0f}% and verify any approved change with new meter readings.")
-        ]
-    else:
-        actions = [
-            ("Keep new loads balanced",
-             "Spread new single-phase equipment across Red, Yellow and Blue; use the selected-horizon forecast when planning additions."),
-            ("Continue monitoring",
-             f"The selected-horizon phase forecast is within the {ALARM_LIMIT_PCT:.0f}% review limit. Recheck when the forecast updates.")
-        ]
-
-    if np.isfinite(neutral_mean_a):
-        neutral_copy = (
-            f"Forecast average neutral current: about {neutral_mean_a:.0f} A over this {badge_period} horizon "
-            f"(95th percentile about {neutral_p95_a:.0f} A). Simplified 4-wire estimate; actual neutral current "
-            "depends on phase angles and harmonics and should be measured directly."
-        )
-    else:
-        neutral_copy = "A neutral-current forecast is unavailable because a complete three-phase current forecast could not be built."
+    worst_pos = None
+    if n_loaded_hours:
+        candidates = np.flatnonzero(loaded)
+        worst_pos = int(candidates[np.nanargmax(hourly_imbalance[candidates])])
 
     impacts = [
-        ("Uneven load can cause cable heating",
-         "A forecast rise in phase current can increase conductor heating. Check actual current against cable ratings before changing loads."),
-        ("Higher neutral current", neutral_copy),
+        ("Less headroom on the heavily loaded phase",
+         "The forecast identifies a phase carrying more kW than the others. Confirm the real operating load and available electrical capacity before changing circuits."),
+        ("Uneven loading needs an on-site check",
+         "kW shows predicted phase loading, but actual current and conductor heating also depend on voltage, power factor and harmonics. Verify with a meter."),
         ("Protective devices may trip",
-         "If actual phase current exceeds a cable or protective-device rating, overheating or a trip may interrupt operations. The forecast is not a protection study.")
+         "A trip is possible only if actual electrical conditions exceed equipment ratings. This kW forecast is a planning aid, not a protection study.")
     ]
+
+    if worst_pos is None:
+        forecast_line = "No loaded three-phase forecast hour is available."
+        load_detail = "No kW redistribution estimate is shown."
+        badge_text, badge_class = "No loaded forecast", "good"
+        actions = [
+            ("No kW shift suggested", "The selected horizon has no valid loaded three-phase forecast hour to compare."),
+            ("Check the meter data", "Confirm that all three phase kW readings are present and that the machine is expected to run."),
+            ("Recheck after the forecast updates", "Review the phase kW pattern again when valid forecast values are available.")
+        ]
+    else:
+        stamp = phase_values.index[worst_pos]
+        values = matrix[worst_pos]
+        dev = deviations[worst_pos]
+        avg_kw = float(hourly_avg[worst_pos])
+        high_idx, low_idx = int(np.argmax(dev)), int(np.argmin(dev))
+        high_phase, low_phase = labels[PHASE_CODES[high_idx]], labels[PHASE_CODES[low_idx]]
+        high_kw, low_kw = float(values[high_idx]), float(values[low_idx])
+        high_dev, low_dev = float(dev[high_idx]), float(dev[low_idx])
+        worst_imbalance = float(hourly_imbalance[worst_pos])
+        is_out_of_balance = worst_imbalance > ALARM_LIMIT_PCT
+        phase_load_detail = " · ".join(
+            f"{labels[code]} {float(values[i]):,.1f} kW"
+            for i, code in enumerate(PHASE_CODES)
+        )
+        forecast_line = (
+            f"Worst forecast hour: {stamp:%a %d %b %H:%M} · {high_phase} {high_kw:,.1f} kW "
+            f"({high_dev:+.1f}%) · {low_phase} {low_kw:,.1f} kW ({low_dev:+.1f}%)."
+            if worst_imbalance > ALARM_LIMIT_PCT else
+            f"Forecast phase loading at {stamp:%a %d %b %H:%M} is within the {ALARM_LIMIT_PCT:.0f}% review limit."
+        )
+        load_detail = f"{phase_load_detail} · 3-phase average {avg_kw:,.1f} kW."
+        badge_text, badge_class = ("Review phase loading", "amber") if is_out_of_balance else ("Within limit", "good")
+
+        # Pair forecast surplus above the mean with forecast deficit below it.
+        transfers = []
+        if is_out_of_balance:
+            donors = [[i, max(float(values[i]) - avg_kw, 0.0)] for i in range(3)]
+            receivers = [[i, max(avg_kw - float(values[i]), 0.0)] for i in range(3)]
+            donors.sort(key=lambda item: item[1], reverse=True)
+            receivers.sort(key=lambda item: item[1], reverse=True)
+            di = ri = 0
+            while di < len(donors) and ri < len(receivers):
+                donor_idx, surplus = donors[di]
+                receiver_idx, deficit = receivers[ri]
+                amount_kw = min(surplus, deficit)
+                if amount_kw > 0.05:
+                    transfers.append((labels[PHASE_CODES[donor_idx]], labels[PHASE_CODES[receiver_idx]], amount_kw))
+                donors[di][1] -= amount_kw
+                receivers[ri][1] -= amount_kw
+                if donors[di][1] <= 1e-8:
+                    di += 1
+                if receivers[ri][1] <= 1e-8:
+                    ri += 1
+
+        if is_out_of_balance and transfers:
+            transfer_text = "; ".join(
+                f"{donor} → {receiver}: about {amount:.1f} kW"
+                for donor, receiver, amount in transfers
+            )
+            review_text = (
+                f"The lowest forecast total-load 3-hour window is {quiet_busy_window['quiet'][0]:%a %d %b %H:%M} → {quiet_busy_window['quiet'][1]:%H:%M}. "
+                "Recheck the phase kW pattern and operating constraints at that time before any approved change."
+                if quiet_busy_window and quiet_busy_window.get('quiet') else
+                "Choose a suitable operating window, then recheck all three phase kW values and actual electrical conditions before any approved change."
+            )
+            actions = [
+                ("Inspect the most imbalanced forecast hour",
+                 f"At {stamp:%a %d %b %H:%M}, {high_phase} is highest and {low_phase} is lowest. {load_detail}"),
+                ("Redistribute suitable loads (kW)",
+                 f"Indicative forecast balance: {transfer_text}. This is the phase-level kW gap at that forecast hour, not a circuit-level transfer instruction. Verify actual current, voltage, power factor and cable/breaker ratings with a qualified electrician."),
+                ("Choose a practical review window", review_text)
+            ]
+        elif is_out_of_balance:
+            actions = [
+                ("Review the forecast overload", forecast_line),
+                ("Check the phase circuits", "The phase-level forecast does not identify which individual circuits can be moved. Have a qualified electrician inspect the actual loads and ratings."),
+                ("Verify after any approved change", "Recheck all three phase kW values, currents and voltages after an approved circuit change.")
+            ]
+        else:
+            actions = [
+                ("No kW redistribution indicated", f"The worst loaded forecast hour is {stamp:%a %d %b %H:%M} with {worst_imbalance:.1f}% phase deviation, within the {ALARM_LIMIT_PCT:.0f}% review limit."),
+                ("Keep new loads balanced", "Distribute new single-phase equipment across Red, Yellow and Blue rather than adding it to the highest-loaded phase."),
+                ("Continue monitoring", "Review the forecast again when new meter readings update the model.")
+            ]
 
     def render_rows(items, icons):
         return "".join(
@@ -654,17 +624,8 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table,
             for i, (title, copy) in enumerate(items)
         )
 
-    badge_text, badge_class = ("Watch", "amber") if is_out_of_balance else ("Within limit", "good")
-    current_summary = (
-        f"Forecast average phase current: Red {current_stats[0]['R']:.1f} A · "
-        f"Yellow {current_stats[0]['Y']:.1f} A · Blue {current_stats[0]['B']:.1f} A."
-        if current_stats else "Three-phase current forecast unavailable; no amp transfer estimate is shown."
-    )
-    voltage_summary = (
-        f"Forecast voltage imbalance: {voltage_stats[2]:.1f}% over this horizon."
-        if voltage_stats else "Voltage forecast unavailable."
-    )
-
+    summary_sub = f"Selected {badge_period} forecast · phase load in kW only"
+    impact_sub = f"Possible impacts indicated by the selected {badge_period} phase-load forecast"
     return f'''<style>
     .phase-summary-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:stretch; margin:2px 0 8px; font-family:Inter,Arial,sans-serif; }}
     .phase-summary-card {{ min-width:0; height:100%; display:flex; flex-direction:column; background:linear-gradient(155deg,#fff 0%,#fbfcff 100%); border:1px solid #dfe7f3; border-left:3px solid #93c5fd; border-radius:14px; padding:12px 14px 10px; box-shadow:0 2px 7px rgba(15,23,42,.045); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease; animation:phaseSummaryEnter .35s ease both; }}
@@ -686,17 +647,17 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table,
     @media (prefers-reduced-motion:reduce) {{ .phase-summary-card {{ animation:none; transition:none; }} .phase-summary-card:hover {{ transform:none; }} }}
     </style>
     <div class="phase-summary-wrap">
-      <section class="phase-summary-card" tabindex="0" aria-label="Forecast based actions to take for phase imbalance">
-        <div class="phase-summary-head"><div class="phase-summary-title">✅ ACTIONS TO TAKE</div><span class="phase-summary-badge good">Forecast-based plan</span></div>
-        <div class="phase-summary-sub">Based only on the selected {esc(badge_period)} future forecast</div>
-        <div class="phase-summary-feature"><strong>Forecasted phase loading: {esc(forecast_line)}</strong><span>kW alarm hours: {n_alarm_hours} of {n_hours} · {esc(current_summary)} {esc(voltage_summary)}</span></div>
+      <section class="phase-summary-card" tabindex="0" aria-label="Forecast based kW phase balancing actions">
+        <div class="phase-summary-head"><div class="phase-summary-title">✅ ACTIONS TO TAKE</div><span class="phase-summary-badge {badge_class}">kW forecast plan</span></div>
+        <div class="phase-summary-sub">{esc(summary_sub)}</div>
+        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>{esc(load_detail)} · kW alarm hours: {n_alarm_hours} of {n_hours}.</span></div>
         {render_rows(actions, ("🔎", "⚖️", "✅"))}
       </section>
-      <section class="phase-summary-card" tabindex="0" aria-label="Forecast impacts if phase imbalance is not corrected">
+      <section class="phase-summary-card" tabindex="0" aria-label="Possible impacts if forecast phase imbalance is not addressed">
         <div class="phase-summary-head"><div class="phase-summary-title">⚠️ IF YOU DON'T ACT</div><span class="phase-summary-badge {badge_class}">{esc(badge_text)}</span></div>
-        <div class="phase-summary-sub">Possible impacts indicated by the selected forecast horizon</div>
-        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>Forecast period: {esc(badge_period)} ahead · actual circuit safety must be checked on site.</span></div>
-        {render_rows(impacts, ("🔥", "⚡", "🚨"))}
+        <div class="phase-summary-sub">{esc(impact_sub)}</div>
+        <div class="phase-summary-feature"><strong>{esc(forecast_line)}</strong><span>{esc(load_detail)} The displayed shift is an indicative kW balance target; confirm actual circuit safety on site.</span></div>
+        {render_rows(impacts, ("📉", "⚡", "🚨"))}
       </section>
     </div>'''
 
@@ -771,7 +732,7 @@ def fill_missing_hours(measured_hours, max_linear_gap_hours=3, max_neighbour_day
 
 @st.cache_data(show_spinner="Building the hourly series…")
 def load_hourly_frame(minute_table, min_readings_per_hour):
-    return gf.build_hourly_frame(minute_table, ["KW"] + PHASE_KW_COLS + CURRENT_COLS + VOLTAGE_COLS, min_readings_per_hour)
+    return gf.build_hourly_frame(minute_table, ["KW"] + PHASE_KW_COLS, min_readings_per_hour)
 
 
 @st.cache_data(show_spinner="Training the model and forecasting the total load…")
@@ -787,15 +748,7 @@ def run_total_load_holdout(total_measured_hourly, total_filled_hourly, season_le
 @st.cache_data(show_spinner="Training the model on Red, Yellow and Blue ")
 def forecast_phases_cached(history_window, steps_ahead, season_length):
     return gf.forecast_three_phases(history_window, steps_ahead, season_length, None)
-@st.cache_data(show_spinner="Forecasting current and voltage…")
-def forecast_current_voltage_cached(history_window, steps_ahead, season_length):
-    """Same Holt-Winters model, one series each for I1-I3 and V1-V3. No charts, only values for the tooltip."""
-    return pd.DataFrame({c: gf.forecast_one_series(history_window[c].to_numpy(float), steps_ahead, season_length, None)[0] for c in history_window.columns})
 
-@st.cache_data(show_spinner="Forecasting phase current and voltage…")
-def forecast_auxiliary_phases_cached(history_window, steps_ahead, season_length):
-    """Use the same phase forecasting model for current/voltage, with R/Y/B columns."""
-    return gf.forecast_three_phases(history_window, steps_ahead, season_length, None)
 
 # ------------------------------------------------------------------ PHASE PARAMETER HELPERS (load / current / voltage per colour)
 def build_phase_parameter_frame(minute_rows, running_kw_threshold, rule="1h", min_readings_per_hour=10):
@@ -866,7 +819,6 @@ if hourly_data_ok:
     hourly_measured, hourly_filled = hourly_data["measured"], hourly_data["filled"]
     PHASE_CODES = gf.PHASE_CODES
     phase_measured_hourly, phase_filled_hourly = hourly_measured[PHASE_KW_COLS].set_axis(PHASE_CODES, axis=1), fill_missing_hours(hourly_measured[PHASE_KW_COLS]).set_axis(PHASE_CODES, axis=1)
-    cv_filled_hourly = fill_missing_hours(hourly_measured[CURRENT_COLS + VOLTAGE_COLS])
     total_measured_hourly, total_filled_hourly, last_data_time = hourly_measured["KW"], hourly_filled["KW"], hourly_filled.index[-1]
     future_hours = pd.date_range(last_data_time + pd.Timedelta(hours=1), periods=MAX_FORECAST_HOURS, freq="h")
 
@@ -1045,38 +997,10 @@ with tab_phase:
     phase_season_hours = SEASON_LENGTH_HOURS[control_columns[1].selectbox("Seasonal cycle", list(SEASON_LENGTH_HOURS), index=6, key="ph_season")]
     phase_history_choice = control_columns[2].selectbox("History shown", list(HISTORY_SHOWN_HOURS), index=2, key="ph_hist")
     max_training_hours = len(phase_filled_hourly); horizon_hours = FORECAST_LENGTH_HOURS[phase_length_choice]
-    # forecast Red, Yellow and Blue 7 days ahead
+    # forecast Red, Yellow and Blue up to 7 days ahead; display slices the selected horizon
     phase_forecast_array, phase_labels_by_series, phase_fit_ok = forecast_phases_cached(phase_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_season_hours)
-    forecast_phase_kw = pd.DataFrame(phase_forecast_array[:horizon_hours], index=future_hours[:horizon_hours], columns=PHASE_CODES); 
-    forecast_table = analyse_balance(forecast_phase_kw.to_numpy())
-    cv_forecast = forecast_current_voltage_cached(cv_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_season_hours).iloc[:horizon_hours]
-    cv_forecast.index = forecast_phase_kw.index
-    spread_pct = lambda X: np.abs(X - X.mean(axis=1, keepdims=True)).max(axis=1) / np.where(X.mean(axis=1, keepdims=True)[:, 0] > 0, X.mean(axis=1, keepdims=True)[:, 0], np.nan) * 100
-    forecast_current_imb = spread_pct(cv_forecast[CURRENT_COLS].to_numpy())
-    forecast_voltage_imb = spread_pct(cv_forecast[VOLTAGE_COLS].to_numpy())
-    influence_is_current = forecast_current_imb >= forecast_voltage_imb        # per forecast hour: which one is more imbalanced
-    # Forecast phase currents and voltages with the same selected horizon/model.
-    # These future predictions (not measured averages) feed the advice-card amps
-    # and neutral-current estimate. Historical readings are training inputs only.
-    phase_parameter_hourly = load_phase_parameter_frame(minute_rows, RUNNING_KW_THRESHOLD, "1h", 10)
+    forecast_phase_kw = pd.DataFrame(phase_forecast_array[:horizon_hours], index=future_hours[:horizon_hours], columns=PHASE_CODES); forecast_table = analyse_balance(forecast_phase_kw.to_numpy())
 
-    def build_auxiliary_forecast(source_columns):
-        if phase_parameter_hourly is None or phase_parameter_hourly.empty:
-            return None
-        history = phase_parameter_hourly[source_columns].dropna(how="all")
-        if len(history) < 72:
-            return None
-        filled_history = fill_missing_hours(history)
-        if filled_history.empty or not np.isfinite(filled_history.to_numpy(dtype=float)).all():
-            return None
-        filled_history = filled_history.set_axis(PHASE_CODES, axis=1)
-        values, _, fit_ok = forecast_auxiliary_phases_cached(filled_history, horizon_hours, phase_season_hours)
-        if not fit_ok:
-            return None
-        return pd.DataFrame(values, index=future_hours[:horizon_hours], columns=PHASE_CODES)
-
-    forecast_phase_current_a = build_auxiliary_forecast(CURRENT_COLS)
-    forecast_phase_voltage_v = build_auxiliary_forecast(VOLTAGE_COLS)
     TEST_HOURS = 168                                                              # all test data = the last 168 hours (7 days)
     if not phase_fit_ok: note_box(f"A model fit failed for {', '.join(p for p in PHASE_CODES if phase_labels_by_series[p].startswith('failed'))} - that phase repeats its last value. Try the other model or cycle.", "amber")
 
@@ -1112,9 +1036,7 @@ with tab_phase:
     # best time to move loads = quietest 3-hour window
     quiet_busy_window = gr.find_quietest_and_busiest_windows(forecast_phase_kw.sum(axis=1).to_numpy(), forecast_phase_kw.index)
     phase_summary_html = phase_analysis_card_html(
-        forecast_phase_kw, forecast_table,
-        forecast_phase_current_a=forecast_phase_current_a,
-        forecast_phase_voltage_v=forecast_phase_voltage_v,
+        forecast_phase_kw,
         quiet_busy_window=quiet_busy_window,
     )
     try:
@@ -1137,16 +1059,18 @@ with tab_phase:
             fig.add_scatter(x=forecast_line_x, y=[last_phase_kw] + list(forecast_phase_kw[p]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines", line=dict(color=col, width=2.6, dash="dash"), row=j, col=1)
         worst_phase_names, legend_added = forecast_table.Worst_phase.to_numpy(), False
 
+        def driver_name():
+            """Whichever of current / voltage is more imbalanced in the measured history."""
+            if not diagnosis: return "n/a"
+            return "Current" if diagnosis["mean_I"] >= diagnosis["mean_V"] else "Voltage"
         for j, p in enumerate(PHASE_CODES, 1):
             phase_alarm_mask = forecast_table.Alarm.to_numpy() & (worst_phase_names == PHASE_LABELS[j - 1])
             if not phase_alarm_mask.any(): continue
             hour_average_kw = forecast_phase_kw.mean(axis=1).to_numpy()
             hour_dev_pct = (forecast_phase_kw[p].to_numpy() / np.where(hour_average_kw > 0, hour_average_kw, np.nan) - 1) * 100
-            cur_val, volt_val = cv_forecast[CURRENT_COLS[j - 1]].to_numpy(), cv_forecast[VOLTAGE_COLS[j - 1]].to_numpy()
-            influence_text = np.array([f"Current {cur_val[i]:.0f} A" if influence_is_current[i] else f"Voltage {volt_val[i]:.0f} V" for i in range(len(cur_val))])
             fig.add_scatter(x=forecast_phase_kw.index[phase_alarm_mask], y=forecast_phase_kw[p].to_numpy()[phase_alarm_mask], mode="markers", name="Alarm (forecast)", legendgroup="alarm", showlegend=not legend_added,
                           marker=dict(symbol="x", size=9, color=WARN_COLOR),
-                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask],influence_text[phase_alarm_mask], np.round(hour_dev_pct[phase_alarm_mask], 1)],
+                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask], np.full(phase_alarm_mask.sum(), driver_name()), np.round(hour_dev_pct[phase_alarm_mask], 1)],
                           hovertemplate="%{y:.1f} kW · %{customdata[3]}&nbsp;% vs 3-phase average this hour<br>Imbalance %{customdata[0]:.1f} % (%{customdata[1]}) · %{customdata[2]}<extra>Alarm (forecast)</extra>", row=j, col=1)
             legend_added = True
         fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
