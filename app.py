@@ -1217,10 +1217,12 @@ with tab_phase:
             if not phase_alarm_mask.any(): continue
             hour_average_kw = forecast_phase_kw.mean(axis=1).to_numpy()
             hour_dev_pct = (forecast_phase_kw[p].to_numpy() / np.where(hour_average_kw > 0, hour_average_kw, np.nan) - 1) * 100
+                        hour_average_kw = forecast_phase_kw.mean(axis=1).to_numpy()
+            hour_dev_pct = (forecast_phase_kw[p].to_numpy() / np.where(hour_average_kw > 0, hour_average_kw, np.nan) - 1) * 100
             fig.add_scatter(x=forecast_phase_kw.index[phase_alarm_mask], y=forecast_phase_kw[p].to_numpy()[phase_alarm_mask], mode="markers", name="Alarm (forecast)", legendgroup="alarm", showlegend=not legend_added,
                           marker=dict(symbol="x", size=9, color=WARN_COLOR),
-                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask], np.full(phase_alarm_mask.sum(), driver_name()), np.round(hour_dev_pct[phase_alarm_mask], 1)],                          
-                          hovertemplate="%{y:.1f} kW · %{customdata[3]}&nbsp;% vs 3-phase average this hour<br>Imbalance %{customdata[0]:.1f} % (%{customdata[1]}) · %{customdata[2]}<extra>Alarm (forecast)</extra>",
+                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask], np.full(phase_alarm_mask.sum(), driver_name()), np.round(hour_dev_pct[phase_alarm_mask], 1)],
+                          hovertemplate="%{y:.1f} kW · %{customdata[3]}&nbsp;% vs 3-phase average this hour<br>Imbalance %{customdata[0]:.1f} % (%{customdata[1]}) · %{customdata[2]}<extra>Alarm (forecast)</extra>", row=j, col=1)
             legend_added = True
         fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
         fig.update_yaxes(title_text="kW")
