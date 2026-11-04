@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+plotly
+sktime
+statsmodels   # still needed: sktime's ExponentialSmoothing is a wrapper around the statsmodels Holt-Winters code
