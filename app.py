@@ -974,7 +974,7 @@ with tab_phase:
     control_columns = st.columns([1, 1.3, 1])
     phase_model_name = "Exponential Smoothing"
     phase_length_choice = control_columns[0].selectbox("Forecast length", list(FORECAST_LENGTH_HOURS), index=6, key="ph_len")
-    phase_training_days = 14                                  # fixed learning window (the dropdown was removed)
+    phase_training_days = 28                                # fixed learning window (the dropdown was removed)
     phase_season_hours = SEASON_LENGTH_HOURS[control_columns[1].selectbox("Seasonal cycle", list(SEASON_LENGTH_HOURS), index=6, key="ph_season")]
     phase_history_choice = control_columns[2].selectbox("History shown", list(HISTORY_SHOWN_HOURS), index=2, key="ph_hist")
     max_training_hours = int(phase_training_days) * 24; horizon_hours = FORECAST_LENGTH_HOURS[phase_length_choice]
