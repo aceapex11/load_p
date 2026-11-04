@@ -1285,5 +1285,4 @@ with tab_phase:
 
             error_table = pd.DataFrame({name: phase_error_scores(actual_kw_real[p].to_numpy(), predicted_kw[p].to_numpy()) for name, p in zip(PHASE_LABELS, PHASE_CODES)}).T
             error_table.columns = ["MAE (kW)", "MAPE (%)", "SMAPE (%)"]
-            error_table.loc["Average"] = error_table.mean()
             st.dataframe(error_table.round(2), width="stretch")
