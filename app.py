@@ -802,11 +802,6 @@ def run_total_load_holdout(total_measured_hourly, total_filled_hourly, model_nam
 def forecast_phases_cached(history_window, steps_ahead, model_name, season_length, method=gf.PHASE_FORECAST_METHODS[0]):
     return gf.forecast_three_phases(history_window, steps_ahead, model_name, season_length, None, method)
 
-
-@st.cache_data(show_spinner="Testing the phase forecast on past weeks ")
-def backtest_phases_cached(measured_phase_hours, filled_phase_hours, model_name, season_length, max_training_hours, n_weeks, method, alarm_limit_pct, min_phase_kw):
-    return gf.backtest_phase_forecast(measured_phase_hours, filled_phase_hours, model_name, season_length, max_training_hours, 168, n_weeks, lambda phase_kw: analyse_balance(phase_kw, alarm_limit_pct, min_phase_kw), None, method)
-
 # ------------------------------------------------------------------ PHASE PARAMETER HELPERS (load / current / voltage per colour)
 def build_phase_parameter_frame(minute_rows, running_kw_threshold, rule="1h", min_readings_per_hour=10):
     """Loaded minutes only, averaged per hour / day. A period with too few loaded minutes is NaN (lines break)."""
@@ -1147,13 +1142,13 @@ with tab_load:
 with tab_phase:
   if not hourly_data_ok: show_not_enough_data_note()
   else:
-    control_columns = st.columns([1, 1.3, 1, 1.5])
+    control_columns = st.columns([1, 1.3, 1])
     phase_model_name = "Exponential Smoothing"
     phase_length_choice = control_columns[0].selectbox("Forecast length", list(FORECAST_LENGTH_HOURS), index=6, key="ph_len")
     phase_training_days = 14                                  # fixed learning window (the dropdown was removed)
     phase_season_hours = SEASON_LENGTH_HOURS[control_columns[1].selectbox("Seasonal cycle", list(SEASON_LENGTH_HOURS), index=6, key="ph_season")]
     phase_history_choice = control_columns[2].selectbox("History shown", list(HISTORY_SHOWN_HOURS), index=2, key="ph_hist")
-    phase_method = control_columns[3].selectbox("Forecast method", gf.PHASE_FORECAST_METHODS, key="ph_method", help="Each phase separately = forecast R, Y and B one by one. Total × phase shares = forecast the total and each phase's share, then rebuild R / Y / B. The test below shows which one does better on your data.")
+    phase_method = "Each phase separately"
     max_training_hours = int(phase_training_days) * 24; horizon_hours = FORECAST_LENGTH_HOURS[phase_length_choice]
     # forecast Red, Yellow and Blue 7 days ahead
     phase_forecast_array, phase_labels_by_series, phase_fit_ok = forecast_phases_cached(phase_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_model_name, phase_season_hours, phase_method)
