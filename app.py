@@ -516,7 +516,7 @@ def phase_analysis_card_html(forecast_phase_kw, forecast_table, diagnosis, quiet
     high_col, low_col = deviation_pct.idxmax(), deviation_pct.idxmin()
     high_phase, low_phase = labels[high_col], labels[low_col]
     high_dev, low_dev = float(deviation_pct[high_col]), float(deviation_pct[low_col])
-    forecast_line = f"{high_phase} is highest ({high_dev:+.1f}% vs average); {low_phase} is lowest ({low_dev:+.1f}%)."
+    forecast_line = f"{high_phase} is overloaded ({high_dev:+.1f}% vs average); {low_phase} is underloaded ({low_dev:+.1f}%)."
 
     has_diagnosis = bool(diagnosis) and not diagnosis.get("empty", False)
     current_pct = float(diagnosis["mean_I"]) if has_diagnosis else float("nan")
