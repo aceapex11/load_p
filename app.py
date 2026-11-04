@@ -771,7 +771,7 @@ def fill_missing_hours(measured_hours, max_linear_gap_hours=3, max_neighbour_day
 
 @st.cache_data(show_spinner="Building the hourly series…")
 def load_hourly_frame(minute_table, min_readings_per_hour):
-    return gf.build_hourly_frame(minute_table, ["KW"] + PHASE_KW_COLS, min_readings_per_hour)
+    return gf.build_hourly_frame(minute_table, ["KW"] + PHASE_KW_COLS + CURRENT_COLS + VOLTAGE_COLS, min_readings_per_hour)
 
 
 @st.cache_data(show_spinner="Training the model and forecasting the total load…")
@@ -787,7 +787,10 @@ def run_total_load_holdout(total_measured_hourly, total_filled_hourly, season_le
 @st.cache_data(show_spinner="Training the model on Red, Yellow and Blue ")
 def forecast_phases_cached(history_window, steps_ahead, season_length):
     return gf.forecast_three_phases(history_window, steps_ahead, season_length, None)
-
+@st.cache_data(show_spinner="Forecasting current and voltage…")
+def forecast_current_voltage_cached(history_window, steps_ahead, season_length):
+    """Same Holt-Winters model, one series each for I1-I3 and V1-V3. No charts, only values for the tooltip."""
+    return pd.DataFrame({c: gf.forecast_one_series(history_window[c].to_numpy(float), steps_ahead, season_length, None)[0] for c in history_window.columns})
 
 @st.cache_data(show_spinner="Forecasting phase current and voltage…")
 def forecast_auxiliary_phases_cached(history_window, steps_ahead, season_length):
@@ -863,6 +866,7 @@ if hourly_data_ok:
     hourly_measured, hourly_filled = hourly_data["measured"], hourly_data["filled"]
     PHASE_CODES = gf.PHASE_CODES
     phase_measured_hourly, phase_filled_hourly = hourly_measured[PHASE_KW_COLS].set_axis(PHASE_CODES, axis=1), fill_missing_hours(hourly_measured[PHASE_KW_COLS]).set_axis(PHASE_CODES, axis=1)
+    cv_filled_hourly = fill_missing_hours(hourly_measured[CURRENT_COLS + VOLTAGE_COLS])
     total_measured_hourly, total_filled_hourly, last_data_time = hourly_measured["KW"], hourly_filled["KW"], hourly_filled.index[-1]
     future_hours = pd.date_range(last_data_time + pd.Timedelta(hours=1), periods=MAX_FORECAST_HOURS, freq="h")
 
@@ -1043,8 +1047,14 @@ with tab_phase:
     max_training_hours = len(phase_filled_hourly); horizon_hours = FORECAST_LENGTH_HOURS[phase_length_choice]
     # forecast Red, Yellow and Blue 7 days ahead
     phase_forecast_array, phase_labels_by_series, phase_fit_ok = forecast_phases_cached(phase_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_season_hours)
-    forecast_phase_kw = pd.DataFrame(phase_forecast_array[:horizon_hours], index=future_hours[:horizon_hours], columns=PHASE_CODES); forecast_table = analyse_balance(forecast_phase_kw.to_numpy())
-
+    forecast_phase_kw = pd.DataFrame(phase_forecast_array[:horizon_hours], index=future_hours[:horizon_hours], columns=PHASE_CODES); 
+    forecast_table = analyse_balance(forecast_phase_kw.to_numpy())
+    cv_forecast = forecast_current_voltage_cached(cv_filled_hourly.iloc[-max_training_hours:], MAX_FORECAST_HOURS, phase_season_hours).iloc[:horizon_hours]
+    cv_forecast.index = forecast_phase_kw.index
+    spread_pct = lambda X: np.abs(X - X.mean(axis=1, keepdims=True)).max(axis=1) / np.where(X.mean(axis=1, keepdims=True)[:, 0] > 0, X.mean(axis=1, keepdims=True)[:, 0], np.nan) * 100
+    forecast_current_imb = spread_pct(cv_forecast[CURRENT_COLS].to_numpy())
+    forecast_voltage_imb = spread_pct(cv_forecast[VOLTAGE_COLS].to_numpy())
+    influence_is_current = forecast_current_imb >= forecast_voltage_imb        # per forecast hour: which one is more imbalanced
     # Forecast phase currents and voltages with the same selected horizon/model.
     # These future predictions (not measured averages) feed the advice-card amps
     # and neutral-current estimate. Historical readings are training inputs only.
@@ -1127,18 +1137,16 @@ with tab_phase:
             fig.add_scatter(x=forecast_line_x, y=[last_phase_kw] + list(forecast_phase_kw[p]), name="Forecast", legendgroup="f", showlegend=j == 1, mode="lines", line=dict(color=col, width=2.6, dash="dash"), row=j, col=1)
         worst_phase_names, legend_added = forecast_table.Worst_phase.to_numpy(), False
 
-        def driver_name():
-            """Whichever of current / voltage is more imbalanced in the measured history."""
-            if not diagnosis: return "n/a"
-            return "Current" if diagnosis["mean_I"] >= diagnosis["mean_V"] else "Voltage"
         for j, p in enumerate(PHASE_CODES, 1):
             phase_alarm_mask = forecast_table.Alarm.to_numpy() & (worst_phase_names == PHASE_LABELS[j - 1])
             if not phase_alarm_mask.any(): continue
             hour_average_kw = forecast_phase_kw.mean(axis=1).to_numpy()
             hour_dev_pct = (forecast_phase_kw[p].to_numpy() / np.where(hour_average_kw > 0, hour_average_kw, np.nan) - 1) * 100
+            cur_val, volt_val = cv_forecast[CURRENT_COLS[j - 1]].to_numpy(), cv_forecast[VOLTAGE_COLS[j - 1]].to_numpy()
+            influence_text = np.array([f"Current {cur_val[i]:.0f} A" if influence_is_current[i] else f"Voltage {volt_val[i]:.0f} V" for i in range(len(cur_val))])
             fig.add_scatter(x=forecast_phase_kw.index[phase_alarm_mask], y=forecast_phase_kw[p].to_numpy()[phase_alarm_mask], mode="markers", name="Alarm (forecast)", legendgroup="alarm", showlegend=not legend_added,
                           marker=dict(symbol="x", size=9, color=WARN_COLOR),
-                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask], np.full(phase_alarm_mask.sum(), driver_name()), np.round(hour_dev_pct[phase_alarm_mask], 1)],
+                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask],influence_text[phase_alarm_mask], np.round(hour_dev_pct[phase_alarm_mask], 1)],
                           hovertemplate="%{y:.1f} kW · %{customdata[3]}&nbsp;% vs 3-phase average this hour<br>Imbalance %{customdata[0]:.1f} % (%{customdata[1]}) · %{customdata[2]}<extra>Alarm (forecast)</extra>", row=j, col=1)
             legend_added = True
         fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
