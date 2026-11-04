@@ -1209,19 +1209,21 @@ with tab_phase:
         worst_phase_names, legend_added = forecast_table.Worst_phase.to_numpy(), False
 
         def reason_txt(name):
-            """Which parameter explains the imbalance, and how far this phase is from the 3-phase average (measured history)."""
-            if not diagnosis: return "Load (not enough data)"
-            param, col = ("Current", "Avg current A") if diagnosis["share"]["Current"] >= diagnosis["share"]["Voltage"] else ("Voltage", "Avg voltage V")
+            """Typical (measured-history) reading for this phase: current or voltage vs the 3-phase average. The same for every hour by design."""
+            if not diagnosis: return "not enough measured data"
+            param, col = ("current", "Avg current A") if diagnosis["share"]["Current"] >= diagnosis["share"]["Voltage"] else ("voltage", "Avg voltage V")
             v = diagnosis["per"][col]; d = (v[name] / v.mean() - 1) * 100
-            return f"{param} {'▲ up' if d > 0 else '▼ down'} {abs(d):.1f} % vs 3-phase average"
+            return f"{param} is usually {abs(d):.1f} % {'above' if d > 0 else 'below'} the 3-phase average"
 
         for j, p in enumerate(PHASE_CODES, 1):
             phase_alarm_mask = forecast_table.Alarm.to_numpy() & (worst_phase_names == PHASE_LABELS[j - 1])
             if not phase_alarm_mask.any(): continue
+            hour_average_kw = forecast_phase_kw.mean(axis=1).to_numpy()
+            hour_dev_pct = (forecast_phase_kw[p].to_numpy() / np.where(hour_average_kw > 0, hour_average_kw, np.nan) - 1) * 100
             fig.add_scatter(x=forecast_phase_kw.index[phase_alarm_mask], y=forecast_phase_kw[p].to_numpy()[phase_alarm_mask], mode="markers", name="Alarm (forecast)", legendgroup="alarm", showlegend=not legend_added,
                           marker=dict(symbol="x", size=9, color=WARN_COLOR),
-                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask], np.full(phase_alarm_mask.sum(), reason_txt(PHASE_LABELS[j - 1]))],
-                          hovertemplate="%{y:.1f} kW · imbalance %{customdata[0]:.1f} % (%{customdata[1]})<br>Reason: %{customdata[2]}<extra>Alarm</extra>", row=j, col=1)
+                          customdata=np.c_[forecast_imbalance_pct[phase_alarm_mask], forecast_table.Direction.to_numpy()[phase_alarm_mask], np.full(phase_alarm_mask.sum(), reason_txt(PHASE_LABELS[j - 1])), np.round(hour_dev_pct[phase_alarm_mask], 1)],
+                          hovertemplate="%{y:.1f} kW · %{customdata[3]}&nbsp;% vs 3-phase average this hour<br>Imbalance %{customdata[0]:.1f} % (%{customdata[1]})<br>Typical (measured history): %{customdata[2]}<extra>Alarm</extra>", row=j, col=1)
             legend_added = True
         fig.add_shape(type="line", xref="x", yref="paper", x0=last_data_time, x1=last_data_time, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
         fig.update_yaxes(title_text="kW")
