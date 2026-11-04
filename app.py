@@ -443,69 +443,126 @@ def forecast_advice_card_html(forecast_values, forecast_times, previous_energy_k
       </section>
     </div>'''
 def build_load_suggestions(forecast_values, forecast_times, previous_energy_kwh):
-    """Short rule-based risks + actions for the forecast TOTAL kW.  Direction = forecast energy vs the previous period of the same length (> LOAD_CHG_PCT).
-    Numbers come only from the forecast and the settings at the top of the file; a setting left at 0 is simply not mentioned.
-    Returns dict(kind, badge, tone, headline, risks, actions, managed, ignored)."""
-    forecast_values = np.asarray(forecast_values, float); n_hours = len(forecast_values); energy_kwh = float(forecast_values.sum()); average_kw = float(forecast_values.mean())
-    peak, peak_time = float(forecast_values.max()), forecast_times[int(forecast_values.argmax())]; lowest_kw, lowest_time = float(forecast_values.min()), forecast_times[int(forecast_values.argmin())]
-    energy_change_kwh = energy_kwh - previous_energy_kwh; energy_change_pct = energy_change_kwh / previous_energy_kwh * 100 if previous_energy_kwh >= 1 else float("nan")
-    # direction = forecast energy vs the previous period of the same length
-    trend_direction = "idle" if average_kw < MIN_PHASE_KW else "up" if energy_change_pct > LOAD_CHANGE_PCT else "down" if energy_change_pct < -LOAD_CHANGE_PCT else "stable"
-    change_text = "" if not np.isfinite(energy_change_pct) else f"{abs(energy_change_pct):.0f} % {'above' if energy_change_pct > 0 else 'below'} the previous {hours_to_text(n_hours)}" if abs(energy_change_pct) >= 0.5 else f"same as the previous {hours_to_text(n_hours)}"
-    format_money = lambda x: f"{x:,.0f}{(' ' + CURRENCY) if CURRENCY else ''}"
-    shortfall_kw = max(peak - OWN_GENERATION_KW, 0.0) if OWN_GENERATION_KW > 0 else 0.0; spare_kw = max(OWN_GENERATION_KW - peak, 0.0) if OWN_GENERATION_KW > 0 else 0.0
-    over_demand_kw = max(peak - SANCTIONED_DEMAND_KW, 0.0) if SANCTIONED_DEMAND_KW > 0 else 0.0; demand_use_pct = peak / SANCTIONED_DEMAND_KW * 100 if SANCTIONED_DEMAND_KW > 0 else float("nan")
-    peak_cut_kw = peak * SHIFTABLE_LOAD_PCT / 100; extra_cost = max(energy_change_kwh, 0) * TARIFF_PER_KWH + over_demand_kw * DEMAND_CHARGE_PER_KW; unused_kwh = max(-energy_change_kwh, 0.0)
-    format_time = lambda ts: f"{ts:%a %H:%M}"; capacity_gap_kw = max(shortfall_kw, over_demand_kw)
-    if trend_direction == "idle":
-        risks = [("Machine expected idle", f"Average {average_kw:,.1f} kW (below {MIN_PHASE_KW:g} kW). If it should be running, check supply, start-up and process."), ("Idle fixed charges", "Demand and fixed charges are still billed with no output.")]
-        actions = [("Confirm the stop is planned", "If yes, switch off auxiliaries and use the time for maintenance."), ("Look for a fault", "Tripped breaker, supply problem, sensor or data problem.")]
-        if_managed_text, if_ignored_text = (
-            "Confirming a planned stop and switching off unused equipment can avoid unnecessary energy use and create time for maintenance.",
-            "If the stop is not planned, a fault may go unnoticed and production may remain stopped."
-        )
-        why_text = f"The forecast average is {average_kw:,.1f} kW, below the {MIN_PHASE_KW:g} kW running level. Confirm whether this is a planned stop before changing equipment."
-    elif trend_direction == "up":
-        risks = [("Higher electricity cost", f"{energy_kwh:,.0f} kWh needed, {change_text}. " + (f"Extra grid or backup power may cost about {format_money(max(energy_change_kwh, 0) * TARIFF_PER_KWH)}." if TARIFF_PER_KWH > 0 else "Extra grid or backup power may be needed.")),
-                 ("Increased peak demand", f"Peak {peak:,.1f} kW around {format_time(peak_time)}" + (f", {shortfall_kw:,.1f} kW above own generation" if shortfall_kw else "") + (f", {over_demand_kw:,.1f} kW above sanctioned demand (penalty risk)" if over_demand_kw else f", {demand_use_pct:.0f} % of sanctioned demand" if SANCTIONED_DEMAND_KW > 0 else "") + "."),
-                 ("Missed energy storage" if HAS_BATTERY else "Missed load shifting", f"Battery not charged around {format_time(lowest_time)} may be empty at the peak." if HAS_BATTERY else f"Flexible work left in the peak wastes the {peak - lowest_kw:,.1f} kW gap to the lowest hour."),
-                 ("Increased operational risk", f"Peak exceeds available power by {capacity_gap_kw:,.1f} kW; backup or reduced operation may be needed." if capacity_gap_kw else "If demand exceeds supply, production may stop."),
-                 ("Higher energy management cost", f"Uncoordinated demand may add about {format_money(extra_cost)}." if extra_cost > 0 else "Unmanaged peaks and grid imports raise avoidable cost.")]
-        actions = [("Optimize internal generation", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {hours_to_text(n_hours)}, {change_text}. Plan own generation for it and arrange grid or backup for the rest."),
-                ("Prepare for peak demand", f"Keep {peak:,.1f} kW capacity ready around {format_time(peak_time)}" + (f" (shortfall {shortfall_kw:,.1f} kW)." if shortfall_kw else f" (spare {spare_kw:,.1f} kW)." if spare_kw else ".")),
-                ("Optimize energy storage" if HAS_BATTERY else "Use the low-load hours", f"Charge the battery around {format_time(lowest_time)}; discharge at the peak." if HAS_BATTERY else f"Run flexible work around {format_time(lowest_time)} ({lowest_kw:,.1f} kW), not at the peak."),
-                ("Shift flexible loads", f"Stagger motor starts away from {format_time(peak_time)}; moving {SHIFTABLE_LOAD_PCT:g} % cuts the peak by about {peak_cut_kw:,.1f} kW."),
-                ("Monitor power availability", "Compare the forecast with available generation; plan backup if short.")]
-        if_managed_text = "Preparing generation or backup and moving flexible work away from the peak can reduce supply pressure and lower the risk of production stops."
-        if_ignored_text = (f"Extra cost may be about {format_money(extra_cost)}" if extra_cost > 0 else "More grid or backup power may be needed") + (f"; the forecast peak is {capacity_gap_kw:,.1f} kW above the configured capacity or demand limit" if capacity_gap_kw else "") + ". Production may be affected if supply is not enough."
-        why_text = f"Forecast energy is {change_text or 'close to the previous period'}, and the highest load is {peak:,.1f} kW around {format_time(peak_time)}. Planning before this peak gives the site time to prepare supply and move flexible work."
-    elif trend_direction == "down":
-        risks = [("Under-utilised generation", f"{energy_kwh:,.0f} kWh needed, {change_text}; up to {unused_kwh:,.0f} kWh of usual generation may go unused" + (f" (about {format_money(unused_kwh * TARIFF_PER_KWH)})." if TARIFF_PER_KWH > 0 else ".")),
-                 ("Wasted fuel", f"Peak {peak:,.1f} kW leaves {spare_kw:,.1f} kW of own generation idle." if spare_kw else f"Generation sized for a higher load runs inefficiently (peak only {peak:,.1f} kW)."),
-                 ("Low-load inefficiency", f"Lowest hour {lowest_kw:,.1f} kW around {format_time(lowest_time)}; motors and generators are least efficient at low load."),
-                 ("Possible production slowdown", "Check the drop is planned, not a stoppage, fault or data problem."),
-                 ("Fixed-cost pressure", f"Contract demand {SANCTIONED_DEMAND_KW:g} kW is billed while the peak uses {demand_use_pct:.0f} %." if SANCTIONED_DEMAND_KW > 0 else "Fixed and demand charges stay the same, so cost per kWh rises.")]
-        actions = [("Right-size generation", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {hours_to_text(n_hours)}, {change_text}. Run fewer units or a lower setpoint to match it."),
-                ("Use the surplus", "Charge the battery when generation exceeds demand." if HAS_BATTERY else f"Move flexible work into the low hours around {format_time(lowest_time)}."),
-                ("Consolidate loads", f"Run machines together; switch off idle equipment around {format_time(lowest_time)}."),
-                ("Review contract demand", f"Peak is {demand_use_pct:.0f} % of contract demand; ask if it can be lowered." if SANCTIONED_DEMAND_KW > 0 and demand_use_pct < 80 else "If the peak stays well below contract demand, a lower contract may cut fixed charges."),
-                ("Check why demand fell", "Maintenance, planned shutdown, sensor or hidden machine fault.")]
-        if_managed_text = "Matching generation and equipment use to the lower forecast can reduce unnecessary fuel use and avoid running units at a poor load level."
-        if_ignored_text = "Generation may remain higher than needed, which can waste fuel. A sudden drop caused by a fault or production issue may also go unnoticed."
-        why_text = f"Forecast energy is {change_text or 'close to the previous period'}, and the forecast peak is {peak:,.1f} kW. First confirm that the lower demand is planned, then match generation and operation to it."
-    else:
-        risks = [("Demand is steady", f"{energy_kwh:,.0f} kWh needed, {change_text or 'no major change'}."), ("Peak to watch", f"{peak:,.1f} kW around {format_time(peak_time)}" + (f" ({demand_use_pct:.0f} % of sanctioned demand)." if SANCTIONED_DEMAND_KW > 0 else ".")), ("Low-load hours", f"Lowest {lowest_kw:,.1f} kW around {format_time(lowest_time)}.")]
-        actions = [("Keep the current plan", f"Forecast energy demand is {energy_kwh:,.0f} kWh over the next {hours_to_text(n_hours)}, {change_text or 'no major change'}. Generation and storage settings can stay as they are."), ("Prepare for the peak", f"Keep {peak:,.1f} kW ready around {format_time(peak_time)}; stagger motor starts."), ("Keep monitoring", "The forecast updates as new readings arrive.")]
-        if_managed_text, if_ignored_text = (
-            "Keeping the current plan and starting large motors at different times can help the site run steadily and avoid sudden peaks.",
-            "Several machines starting together can still create a short peak and put extra pressure on the supply."
-        )
-        why_text = f"Forecast energy is {change_text or 'close to the previous period'} and the peak is {peak:,.1f} kW around {format_time(peak_time)}. The current plan can continue, but the peak still needs attention."
-    # a drop of more than 10 % needs attention
-    big_drop = trend_direction == "down" and np.isfinite(energy_change_pct) and energy_change_pct < -10
-    tone = "bad" if capacity_gap_kw else "amber" if trend_direction in ("up", "down") else "good"
-    return dict(kind=trend_direction, tone=tone, badge="Attention" if capacity_gap_kw or big_drop else "Watch" if trend_direction in ("up", "down") else "Normal", risks=risks, actions=actions, managed=if_managed_text, ignored=if_ignored_text, why=why_text, headline=f"Forecasted peak demand: {peak:,.1f} kW around {peak_time:%A, %H:%M}")
+    """Build simple actions, reasons, benefits and risks from the total-load forecast."""
+    forecast_values = np.asarray(forecast_values, dtype=float)
+    n_hours = len(forecast_values)
+    energy_kwh = float(np.nansum(forecast_values))
+    average_kw = float(np.nanmean(forecast_values))
+    peak_idx = int(np.nanargmax(forecast_values))
+    low_idx = int(np.nanargmin(forecast_values))
+    peak, peak_time = float(forecast_values[peak_idx]), pd.Timestamp(forecast_times[peak_idx])
+    lowest_kw, lowest_time = float(forecast_values[low_idx]), pd.Timestamp(forecast_times[low_idx])
 
+    energy_change_kwh = energy_kwh - previous_energy_kwh
+    energy_change_pct = (energy_change_kwh / previous_energy_kwh * 100
+                         if previous_energy_kwh >= 1 else float("nan"))
+    trend_direction = (
+        "idle" if average_kw < MIN_PHASE_KW else
+        "up" if np.isfinite(energy_change_pct) and energy_change_pct > LOAD_CHANGE_PCT else
+        "down" if np.isfinite(energy_change_pct) and energy_change_pct < -LOAD_CHANGE_PCT else
+        "stable"
+    )
+    period_text = hours_to_text(n_hours)
+    if not np.isfinite(energy_change_pct):
+        change_text = "there is no matching past period to compare"
+    elif abs(energy_change_pct) < 0.5:
+        change_text = f"it is about the same as the previous {period_text}"
+    else:
+        change_text = f"it is {abs(energy_change_pct):.0f}% {'higher' if energy_change_pct > 0 else 'lower'} than the previous {period_text}"
+
+    format_money = lambda x: f"{x:,.0f}{(' ' + CURRENCY) if CURRENCY else ''}"
+    format_time = lambda ts: f"{pd.Timestamp(ts):%a %d %b at %H:%M}"
+    shortfall_kw = max(peak - OWN_GENERATION_KW, 0.0) if OWN_GENERATION_KW > 0 else 0.0
+    spare_kw = max(OWN_GENERATION_KW - peak, 0.0) if OWN_GENERATION_KW > 0 else 0.0
+    over_demand_kw = max(peak - SANCTIONED_DEMAND_KW, 0.0) if SANCTIONED_DEMAND_KW > 0 else 0.0
+    demand_use_pct = peak / SANCTIONED_DEMAND_KW * 100 if SANCTIONED_DEMAND_KW > 0 else float("nan")
+    capacity_gap_kw = max(shortfall_kw, over_demand_kw)
+    extra_energy_cost = max(energy_change_kwh, 0.0) * TARIFF_PER_KWH
+    demand_cost = over_demand_kw * DEMAND_CHARGE_PER_KW
+    extra_cost = extra_energy_cost + demand_cost
+    peak_to_low_gap_kw = max(peak - lowest_kw, 0.0)
+
+    if trend_direction == "idle":
+        risks = [
+            ("Very low load expected", f"The forecast average is {average_kw:,.1f} kW. Check whether the stop is planned."),
+            ("Production may be affected", "If the site should be running, a supply, machine or meter problem may need attention."),
+        ]
+        actions = [
+            ("Confirm the stop is planned", "Check the production plan before switching off equipment."),
+            ("Check for a problem", "If the stop is not planned, check the supply, breakers, machines and meter readings."),
+        ]
+        managed_text = "Confirming a planned stop and switching off equipment that is not needed can avoid waste and create time for maintenance."
+        ignored_text = "If the low load is caused by a fault, the problem may go unnoticed and production may remain stopped."
+        why_text = f"The forecast average is {average_kw:,.1f} kW, below the {MIN_PHASE_KW:g} kW running level. Check whether this is a planned stop."
+
+    elif trend_direction == "up":
+        risks = [
+            ("More energy may be needed", f"The forecast is {change_text}. The site may need more grid power or backup supply."),
+            ("High demand at the peak", f"The forecast peak is {peak:,.1f} kW around {format_time(peak_time)}."),
+            ("Peak may be harder to manage", "If many machines run together, the site may need more power at the same time."),
+        ]
+        actions = [
+            ("Plan the power supply", f"The forecast is {change_text}. Check how much power can come from the site generator and the grid."),
+            ("Prepare for the peak", f"Keep enough supply ready for about {peak:,.1f} kW around {format_time(peak_time)}" + (f". The forecast is {shortfall_kw:,.1f} kW above the configured own-generation level." if OWN_GENERATION_KW > 0 and shortfall_kw > 0 else f". This is {over_demand_kw:,.1f} kW above the configured demand limit." if over_demand_kw > 0 else ".")),
+            ("Review flexible equipment times", f"The lower-load hour is {format_time(lowest_time)} at {lowest_kw:,.1f} kW. The peak is {format_time(peak_time)} at {peak:,.1f} kW. Check whether any suitable equipment planned near the peak can safely run in the lower-load period instead. The {peak_to_low_gap_kw:,.1f} kW gap is only a difference between forecast hours; it is not the amount of equipment that can be moved."),
+        ]
+        if HAS_BATTERY:
+            actions[2] = ("Plan battery use", f"Review charging around the lower-load hour ({format_time(lowest_time)}) and discharge near the peak ({format_time(peak_time)}), within battery limits.")
+        managed_text = ("Planning power supply early and, where production allows, moving suitable flexible work away from the peak may lower peak demand. "
+                        "This can reduce supply pressure and may lower demand charges if the tariff includes them. Total energy use may stay the same.")
+        if extra_cost > 0:
+            ignored_text = f"Using more energy may add about {format_money(extra_energy_cost)}. The configured peak or demand limit may also add about {format_money(demand_cost)}. If supply is not enough, production may be affected."
+        elif capacity_gap_kw > 0:
+            ignored_text = f"The forecast peak is {capacity_gap_kw:,.1f} kW above the configured supply or demand limit. Extra supply may be needed, and production may be affected if it is not available."
+        else:
+            ignored_text = "The site may need more grid or backup power. If supply is not ready for the forecast peak, production may be affected."
+        why_text = (f"Forecast energy is {change_text}. The highest load is {peak:,.1f} kW around {format_time(peak_time)}. "
+                    f"The lower-load hour is {lowest_kw:,.1f} kW around {format_time(lowest_time)}. These are forecast hours, not a confirmed machine schedule. "
+                    "Check which equipment can safely run at a different time before changing the schedule.")
+
+    elif trend_direction == "down":
+        risks = [
+            ("Lower energy use expected", f"The forecast is {change_text}. Check whether this matches the production plan."),
+            ("Generation may be higher than needed", "Running more generators than needed can waste fuel. Check the actual supply and process demand."),
+            ("A fault may go unnoticed", "A sudden drop can also come from a machine, supply or meter problem."),
+        ]
+        actions = [
+            ("Check the lower demand", f"The forecast is {change_text}. Confirm that the lower load is planned and not caused by a fault."),
+            ("Match generation to demand", "If the lower demand is confirmed, review generator output and keep enough supply for the process."),
+            ("Keep essential equipment ready", f"The forecast peak is {peak:,.1f} kW around {format_time(peak_time)}. Do not reduce supply below the site's needs."),
+        ]
+        managed_text = "If the lower demand is planned, matching generation to the real need may reduce unnecessary fuel use. Checking the reason for the drop can also help find faults early."
+        ignored_text = "Generators may run above the site's needs and use extra fuel. If the drop is caused by a fault, production problems may continue without being noticed."
+        why_text = f"Forecast energy is {change_text}, and the peak is {peak:,.1f} kW. First confirm that the lower demand is planned. Then adjust generation only after checking the process needs."
+
+    else:
+        risks = [
+            ("Energy use is steady", f"The forecast is {change_text} over the selected period."),
+            ("A peak still needs planning", f"The highest load is {peak:,.1f} kW around {format_time(peak_time)}."),
+            ("Machines starting together can raise demand", "Several large machines starting at once can create a short peak."),
+        ]
+        actions = [
+            ("Keep the current supply plan", f"Forecast energy is {energy_kwh:,.0f} kWh, and {change_text}. Keep checking that supply matches demand."),
+            ("Prepare for the peak", f"Keep enough supply ready for {peak:,.1f} kW around {format_time(peak_time)}."),
+            ("Review machine start times", "Where the process allows, start large machines at different times to avoid one sudden rise in demand."),
+        ]
+        managed_text = "Keeping supply ready and spacing out large machine starts can help avoid sudden demand peaks and support steady operation."
+        ignored_text = "If several large machines start together, demand may rise above the planned level and put extra pressure on the supply."
+        why_text = f"Forecast energy is {change_text}, but the peak is still {peak:,.1f} kW around {format_time(peak_time)}. The current plan can continue, with attention to the peak and machine start times."
+
+    big_drop = trend_direction == "down" and np.isfinite(energy_change_pct) and energy_change_pct < -10
+    tone = "bad" if capacity_gap_kw > 0 else "amber" if trend_direction in ("up", "down") else "good"
+    return dict(
+        kind=trend_direction,
+        tone=tone,
+        badge="Attention" if capacity_gap_kw > 0 or big_drop else "Watch" if trend_direction in ("up", "down") else "Normal",
+        risks=risks,
+        actions=actions,
+        managed=managed_text,
+        ignored=ignored_text,
+        why=why_text,
+        headline=f"Forecasted peak demand: {peak:,.1f} kW around {peak_time:%A, %H:%M}",
+    )
 
 def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosis=None):
     'Show the suggested kW phase shift, its possible company benefit, and the risk of doing nothing.'
@@ -547,24 +604,24 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
                     voltage_share = f"Voltage averaged {voltage_pct:.1f}% and stayed below the limit in all valid records (highest {max_voltage:.1f}%). "
                 else:
                     voltage_share = f"Voltage averaged {voltage_pct:.1f}% and stayed within the set limit. "
-                diagnostic_text = (f"From {date_range}, current imbalance averaged {current_pct:.1f}%. "
-                                   f"{current_share}{voltage_share}Current imbalance closely followed the phase kW imbalance. "
-                                   "This points to uneven phase loading as the main issue, not voltage variation.")
+                diagnostic_text = (f"Past readings ({date_range}) show average current imbalance of {current_pct:.1f}%. "
+                                   f"{current_share}{voltage_share}The current imbalance also closely matched the phase load imbalance. "
+                                   "This suggests uneven phase loading is the main issue. Voltage variation is less likely to be the main cause.")
             elif voltage_pct > ALARM_LIMIT_PCT and current_pct <= ALARM_LIMIT_PCT:
-                diagnostic_text = (f"From {date_range}, voltage imbalance averaged {voltage_pct:.1f}% and crossed the "
-                                   f"{ALARM_LIMIT_PCT:.0f}% limit. Current imbalance averaged {current_pct:.1f}%. "
-                                   "Check the incoming supply before shifting loads.")
+                diagnostic_text = (f"Past readings ({date_range}) show average voltage imbalance of {voltage_pct:.1f}%, above the "
+                                   f"{ALARM_LIMIT_PCT:.0f}% limit. Average current imbalance was {current_pct:.1f}%. "
+                                   "Ask an electrician to check the incoming supply before moving loads.")
             elif current_pct > ALARM_LIMIT_PCT and voltage_pct > ALARM_LIMIT_PCT:
-                diagnostic_text = (f"From {date_range}, current imbalance averaged {current_pct:.1f}% and voltage "
-                                   f"imbalance averaged {voltage_pct:.1f}%. Both crossed the {ALARM_LIMIT_PCT:.0f}% limit. "
-                                   "Check the supply and phase loads together.")
+                diagnostic_text = (f"Past readings ({date_range}) show current imbalance of {current_pct:.1f}% and voltage "
+                                   f"imbalance of {voltage_pct:.1f}%. Both are above the {ALARM_LIMIT_PCT:.0f}% limit. "
+                                   "Check the incoming supply and the phase loads together.")
             else:
-                diagnostic_text = (f"From {date_range}, current imbalance averaged {current_pct:.1f}% and voltage "
-                                   f"imbalance averaged {voltage_pct:.1f}%. Both stayed within the {ALARM_LIMIT_PCT:.0f}% limit.")
+                diagnostic_text = (f"Past readings ({date_range}) show current imbalance of {current_pct:.1f}% and voltage "
+                                   f"imbalance of {voltage_pct:.1f}%. Both stayed within the {ALARM_LIMIT_PCT:.0f}% limit.")
         else:
-            diagnostic_text = "Past current and voltage readings are not complete enough to compare the three phases."
+            diagnostic_text = "There are not enough past current and voltage readings to compare the three phases."
     else:
-        diagnostic_text = "There are not enough valid past current and voltage readings to check the phase balance."
+        diagnostic_text = "There are not enough valid past readings to check current and voltage balance."
 
     impacts = []
     if worst_pos is None:
@@ -622,24 +679,24 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
                     ri += 1
 
         reason_text = (f"At {stamp:%a %d %b %H:%M}, {high_phase} is {high_kw:,.1f} kW and {low_phase} is "
-                       f"{low_kw:,.1f} kW. The suggested shift is based on the difference between each phase "
-                       "and the three-phase average.")
+                       f"{low_kw:,.1f} kW. The estimate compares each phase with the average of all three phases. "
+                       "It is a forecast estimate, not a confirmed amount of equipment that can be moved.")
         if is_out_of_balance and transfers:
             transfer_text = "; ".join(f"{donor} → {receiver}: about {amount:.1f} kW" for donor, receiver, amount in transfers)
             actions = [
-                ("Review the high phase", f"{high_phase} has the highest forecast load at {stamp:%a %d %b %H:%M}. {load_detail}"),
-                ("Check a possible kW shift", f"Estimated phase balance: {transfer_text}. Check the real circuits and ratings before making any change."),
-                ("Measure after the change", "After an approved change, check all three phase loads, currents and voltages again.")
+                ("Check the highest phase", f"{high_phase} has the highest forecast load at {stamp:%a %d %b %H:%M}. {load_detail}"),
+                ("Review suitable equipment", f"The forecast balance estimate is {transfer_text}. Check whether suitable single-phase equipment can safely be moved. This is not a confirmed amount of movable load."),
+                ("Check after any change", "After an approved change, measure all three phase loads, currents and voltages again.")
             ]
             total_shift = sum(item[2] for item in transfers)
-            benefit_text = (f"A suitable shift of about {total_shift:.1f} kW may bring the three forecast phase loads closer together at this hour. "
-                            "This can reduce uneven phase loading. It does not reduce total energy use by itself.")
+            benefit_text = (f"If suitable equipment with a total load of about {total_shift:.1f} kW can be moved safely, the phase loads may become closer at this forecast hour. "
+                            "This may reduce phase imbalance. Total site energy use may stay the same.")
             loss_text = (f"If no suitable load is moved, {high_phase} is still forecast to carry more kW than the other phases. "
-                         "If the real current is also high, cables may heat up or protection may trip when equipment limits are exceeded.")
+                         "If actual current goes above cable or breaker limits, cables may heat up or protection may trip. Check live readings and equipment ratings.")
             impacts = [
                 ("Uneven phase load", f"{high_phase} is forecast at {high_kw:,.1f} kW, above the three-phase average of {avg_kw:,.1f} kW."),
-                ("Cable heating risk", "Higher real phase current can heat cables. The forecast is not a live current reading."),
-                ("Breaker trip risk", "A breaker may trip if real current goes above its rating. Check the actual circuit before any change.")
+                ("Cable heating risk", "If actual current is too high for the cable, it can heat up. Check the live current and cable rating."),
+                ("Breaker trip risk", "A breaker can trip if actual current goes above its rating. Check the circuit before making a change.")
             ]
         elif is_out_of_balance:
             actions = [
@@ -647,8 +704,8 @@ def phase_analysis_card_html(forecast_phase_kw, quiet_busy_window=None, diagnosi
                 ("Check the real circuits", "The forecast cannot show which circuit can be moved. Ask a qualified electrician to check the loads and ratings."),
                 ("Measure after any change", "Check all three phase loads, currents and voltages after an approved change.")
             ]
-            benefit_text = "Checking the phase loads and suitable circuits may help reduce the imbalance. No safe transfer amount can be confirmed from this forecast alone."
-            loss_text = f"The predicted difference between {high_phase} and {low_phase} may remain. If the real current is above equipment limits, cables may heat up or protection may trip."
+            benefit_text = "Checking the real phase loads and suitable equipment may help reduce the imbalance. This forecast does not confirm a safe transfer amount."
+            loss_text = f"The predicted difference between {high_phase} and {low_phase} may remain. If actual current goes above cable or breaker limits, cables may heat up or protection may trip."
             impacts = [
                 ("Uneven phase load", forecast_line),
                 ("Cable heating risk", "Check actual current and cable ratings before changing loads."),
