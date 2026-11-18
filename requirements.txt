@@ -1,7 +1,28 @@
+# Streamlit application
 streamlit
+
+# Data handling and visualisation
 pandas
 numpy
 plotly
-sktime
-statsmodels   # still needed: sktime's ExponentialSmoothing is a wrapper around the statsmodels Holt-Winters code
+matplotlib
 
+# Forecasting models used by the app and energy_forecasting_final.ipynb
+sktime
+statsmodels
+xgboost
+scikit-learn
+mlforecast
+tbats
+# Darts' notorch extra includes optional tree-model integrations such as XGBoost.
+darts[notorch]>=0.41.0
+
+# Notebook tuning and notebook execution / display
+optuna
+ipython
+ipykernel
+
+# File readers supported by the existing app (Excel and Parquet)
+openpyxl
+xlrd
+pyarrow
