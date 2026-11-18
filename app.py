@@ -19,6 +19,8 @@ import streamlit as st
 from plotly.subplots import make_subplots
 import gridsense_forecast as gf
 import gridsense_rules as gr
+import plant_load_forecasting as plf
+import plant_cost_optimization as pco
 
 # ------------------------------------------------------------------ PAGE SETUP
 warnings.filterwarnings("ignore")
@@ -28,7 +30,8 @@ st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡",
 
 # ------------------------------------------------------------------ SETTINGS - edit the limits here
 APP_DIR = Path(__file__).resolve().parent
-DATA_FILE_NAME = "device_16_full_data.csv"       # put this file next to app.py
+DATA_FILE_NAME = "device_16_full_data.csv"       # used by the existing Overview / Load forecast / Phase balance tabs
+PLANT_HOURLY_DATA_FILE_NAME = "hourly_energy_consumption.csv"  # used only by Plant load forecasting & optimization
 PHASE_KW_COLS = ["RKW", "YKW", "BKW"]
 PHASE_LABEL_BY_COL = {"RKW": "Red", "YKW": "Yellow", "BKW": "Blue"}
 PHASE_LABELS = [PHASE_LABEL_BY_COL[p] for p in PHASE_KW_COLS]
@@ -926,11 +929,11 @@ latest_balance_table = analyse_balance(smoothed_complete_minutes.iloc[-1][PHASE_
 status_pill_html = (f'<span class="pill run"><span class="dot"></span>Running now</span>' if timeline_stats["now_running"] else
           f'<span class="pill idle"><span class="dot"></span>Idle · last ran {timeline_stats["last_run"]:%d %b %H:%M}</span>')
 clock_chip_html = '<span class="chip">clock assumed</span>' if not has_real_clock else ""
-app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase imbalance</div></div><div class="sp"></div>
+app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase balance · plant optimization</div></div><div class="sp"></div>
 {status_pill_html}<span class="chip">{data_file_label}</span><span class="chip">{minute_rows.Timestamps.min():%d %b} → {minute_rows.Timestamps.max():%d %b %Y}</span><span class="chip">{len(minute_rows):,} readings</span>{clock_chip_html}</div>""", unsafe_allow_html=True)
 
 # three pages: overview, load forecast, phase balance
-tab_overview, tab_load, tab_phase = st.tabs(["Overview", "Load forecast", "Phase balance"])
+tab_overview, tab_load, tab_phase, tab_plant = st.tabs(["Overview", "Load forecast", "Phase balance", "Plant load forecasting & optimization"])
 hourly_data = load_hourly_frame(minute_rows, MIN_READINGS_PER_HOUR)                                      # hourly series for both forecast tabs (notebook method)
 hourly_data_ok = hourly_data is not None and len(hourly_data["filled"]) >= 72
 
@@ -1253,3 +1256,8 @@ with tab_phase:
             error_table = pd.DataFrame({name: phase_error_scores(actual_kw_real[p].to_numpy(), predicted_kw[p].to_numpy()) for name, p in zip(PHASE_LABELS, PHASE_CODES)}).T
             error_table.columns = ["MAE (kW)", "MAPE (%)", "SMAPE (%)"]
             st.dataframe(error_table.round(2), width="stretch")
+
+
+# ================================================================== PLANT LOAD FORECASTING & COST OPTIMIZATION
+with tab_plant:
+    plf.render_plant_load_tab(st, APP_DIR, pco, PLANT_HOURLY_DATA_FILE_NAME)
