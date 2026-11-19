@@ -78,15 +78,17 @@ BEST_PARAMS = {
     "neuralforecast_TSMixer": {"num_blocks": 2, "ff_size": 64, "dropout": 0.1},   # NeuralForecast TSMixerx
     "neuralforecast_TFT": {"hidden_size": 32, "num_attention_heads": 4, "dropout": 0.1},
     "sktime_TFT": {"hidden_size": 32, "lstm_layers": 1, "num_attention_heads": 4, "hidden_continuous_size": 16,
-                   "dropout": 0.1, "lr": 1e-3, "epochs": 20},
+                   "dropout": 0.1, "lr": 1e-3, "epochs": 5},
 }
+
+DEEP_MODELS = [m for m in MODEL_ORDER if m.split("_", 1)[-1] in ("TiDE", "TSMixer", "TFT")]
 
 # Shared training settings for the deep models (same values as the notebook's configuration cell).
 DEEP_INPUT_HOURS = 48        # history window seen by the models (2 days)
-DEEP_EPOCHS = 60
+DEEP_EPOCHS = 15             # notebook used 60 on a GPU; lowered so CPU hosts finish in reasonable time
 DEEP_BATCH_SIZE = 64
 DEEP_LR = 1e-3
-DEEP_PATIENCE = 8
+DEEP_PATIENCE = 3
 DEEP_VAL_HOURS = 240         # last 10 days of the training data, used for early stopping only
 DEEP_SEED = 42
 CAL_COLS = ["tod_sin", "tod_cos", "dow_sin", "dow_cos", "weekend"]
@@ -462,7 +464,7 @@ def _scores(actual, predicted) -> dict[str, float]:
     }
 
 
-def run_model_comparison(y: pd.Series) -> dict[str, Any]:
+def run_model_comparison(y: pd.Series, include_deep: bool = False) -> dict[str, Any]:
     """Hold out last 168h, score models, then refit each on full data for next 168h."""
     if len(y) < 2 * HORIZON_HOURS + 1:
         raise ValueError("Not enough history for the 7-day test and training window.")
@@ -478,6 +480,8 @@ def run_model_comparison(y: pd.Series) -> dict[str, Any]:
     status_rows = []
 
     for name in MODEL_ORDER:
+        if name in DEEP_MODELS and not include_deep:
+            continue
         try:
             test_pred, fit_test, predict_test, feature_test = _run_model(name, train_y, HORIZON_HOURS)
             future_pred, fit_full, predict_full, feature_full = _run_model(name, y, HORIZON_HOURS)
@@ -685,10 +689,14 @@ def render_plant_load_tab(
     existing = st_module.session_state.get(session_key)
     has_current_result = existing is not None and st_module.session_state.get(hash_key) == file_hash
 
+    include_deep = st_module.checkbox(
+        "Include deep-learning models (TiDE, TSMixer, TFT) - slow on a CPU host, can take 30+ minutes",
+        value=False, key="plant_include_deep",
+    )
     if st_module.button("Run model comparison & 7-day optimization", type="primary", key="plant_run_models"):
         try:
             with st_module.spinner("Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…"):
-                result = run_model_comparison(y)
+                result = run_model_comparison(y, include_deep=include_deep)
             st_module.session_state[session_key] = result
             st_module.session_state[hash_key] = file_hash
             has_current_result = True
