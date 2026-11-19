@@ -2,7 +2,7 @@
 streamlit
 
 # Data handling and visualisation
-# pandas is held below 3.0 because sktime / neuralforecast / darts are built against the 2.x series.
+# pandas is held below 3.0 because sktime / darts are built against the 2.x series.
 # If the resolver ever picks a 2.3.x build that breaks a model, pin it back to pandas==2.2.3.
 pandas>=2.2.3,<3.0
 numpy
@@ -21,10 +21,6 @@ tbats
 #   [torch]   -> PyTorch neural models (TiDE, TSMixer, TFT)
 #   [notorch] -> tree-model integrations (XGBModel used by darts_XGBoost)
 darts[torch,notorch]>=0.41.0
-
-# Deep-learning models added to the Plant Load Forecasting tab
-neuralforecast        # NeuralForecast TiDE / TSMixerx / TFT
-pytorch-forecasting   # needed by sktime's TFT wrapper
 
 # Optional, for CPU-only hosts such as Streamlit Community Cloud: the default torch wheel bundles CUDA
 # (about 2 GB). Uncomment this line (keep it above the packages it affects) to install the small CPU build.
