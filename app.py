@@ -5,10 +5,11 @@ Overview        : load timeline (kW, phases, current, voltage, imbalance) and wh
 Load forecast   : hourly total kW, Exponential Smoothing (sktime) tested on the last 168 hours, power advice
 Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast, imbalance alarms,
                   and a rule-based action plan: what is out of phase, why, what to do now, when to do what, what can happen
-Plant forecasting: plant_load_visualization.py draws the tab; plant_load_forecasting.py holds the ML part and the DL part
+Plant forecasting: the plant tab is drawn at the bottom of this file; models live in plant_load_forecasting.py (ML part + DL part), tariff savings in plant_cost_optimization.py
 Files next to app.py: gridsense_forecast.py (the notebooks' models, built on sktime) and gridsense_rules.py (the rule-based phase-balance logic)
 Layout of this file : page setup -> settings -> colours + CSS -> UI helpers -> data loading -> phase maths -> advice text -> forecast helpers -> the page itself
 """
+import hashlib
 import html as html_lib
 import warnings
 from contextlib import contextmanager
@@ -20,7 +21,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 import gridsense_forecast as gf
 import gridsense_rules as gr
-import plant_load_visualization as plv      # draws the Plant load forecasting & optimization tab (uses plant_load_forecasting.py)
+import plant_load_forecasting as plf        # plant models: ML part + DL part, metrics, rolling P90 uncertainty
 import plant_cost_optimization as pco
 
 # ------------------------------------------------------------------ PAGE SETUP
@@ -1263,6 +1264,167 @@ with tab_phase:
 
 
 # ================================================================== PLANT LOAD FORECASTING & COST OPTIMIZATION
+# This whole section is the plant dashboard (merged into app.py).
+#   models + metrics + P90 uncertainty : plant_load_forecasting.py  (plf)  -> ML part and DL part
+#   tariff cost optimisation           : plant_cost_optimization.py (pco)  -> kept as its own file
+# Layout of this section: theme -> helpers -> KPI cards -> selected-model chart -> model comparison -> tab entry point
+
+# ---- theme for the plant charts (same palette as the rest of the app)
+PLANT_BAND_FILL = "rgba(99,102,241,0.18)"                                   # P90 uncertainty band (accent tint)
+PLANT_MODEL_PALETTE = [ACCENT, GOOD_COLOR, BLUE_COLOR, WARN_COLOR, "#8B5CF6", "#EC4899", "#64748B", "#0EA5E9",
+                       "#EF4444", "#14B8A6", "#84CC16", "#F97316", "#A855F7", "#06B6D4", "#78716C"]   # one colour per model
+PLANT_BASELINE_COLORS = ["#94A3B8", "#CBD5E1"]                              # grey shades for the naive baselines
+
+
+def plant_style_plot(fig, height=390):
+    """Apply the shared plant-chart look. The legend is a column on the RIGHT so it never covers the lines."""
+    fig.update_layout(
+        template="plotly_white", height=height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, sans-serif", color=TEXT_COLOR, size=12),
+        margin=dict(l=12, r=190, t=60, b=50), hovermode="x unified",        # r=190 reserves room for the legend
+        title=dict(x=0, xanchor="left", font=dict(size=16, color=TEXT_COLOR)),
+        legend=dict(orientation="v", x=1.02, xanchor="left", y=1, yanchor="top", bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+        hoverlabel=dict(bgcolor="white", bordercolor=GRID_COLOR, font=dict(color=TEXT_COLOR)),
+    )
+    fig.update_xaxes(gridcolor=GRID_COLOR, linecolor=AXIS_COLOR, tickfont=dict(color=MUTED_COLOR))
+    fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, tickfont=dict(color=MUTED_COLOR))
+    return fig
+
+
+def plant_kpi(col, label, value, sub, icon):
+    """Draw one KPI card (the .kpi CSS above) inside the given column."""
+    with col:
+        st.markdown(f'<div class="kpi"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div>'
+                    f'<div class="v">{value}</div><div class="s">{sub}</div></div>', unsafe_allow_html=True)
+
+
+def plant_add_forecast_boundary(fig, boundary, end):
+    """Shade the forecast area and draw a dotted line where history ends and the forecast starts."""
+    fig.add_shape(type="rect", xref="x", yref="paper", x0=boundary, x1=end, y0=0, y1=1, fillcolor="rgba(99,102,241,0.05)", line_width=0, layer="below")
+    fig.add_shape(type="line", xref="x", yref="paper", x0=boundary, x1=boundary, y0=0, y1=1, line=dict(color=MUTED_COLOR, width=1.2, dash="dot"))
+
+
+def plant_render_forecast_kpis(result):
+    """Four KPI cards: forecast energy, last-7-day energy, forecast peak, low-demand average."""
+    y = result["series"]; fc = result["future_forecasts"][plf.BEST_MODEL_NAME]
+    forecast_energy = float(fc.sum())                                          # hourly kW summed over 1-hour steps -> kWh
+    previous_energy = float(y.iloc[-plf.HORIZON_HOURS:].sum())
+    peak = float(fc.max())
+    low_count = max(1, int(np.ceil(len(fc) * 0.25)))                           # lowest 25 % of forecast hours
+    low_average = float(np.sort(fc.to_numpy())[:low_count].mean())
+    st.markdown('<div class="ph"><b>Plant load forecast · key indicators</b><span>Cost optimization uses sktime_XGBoost</span></div>', unsafe_allow_html=True)
+    cols = st.columns(4)
+    plant_kpi(cols[0], "Forecast load · next 7 days", f"{forecast_energy / 1000:,.1f} MWh", f"{forecast_energy:,.0f} kWh · sktime_XGBoost", "🔮")
+    plant_kpi(cols[1], "Actual load · last 7 days", f"{previous_energy / 1000:,.1f} MWh", f"{previous_energy:,.0f} kWh · historical meter data", "📊")
+    plant_kpi(cols[2], "Forecast peak demand", f"{peak:,.1f} kW", "Highest hourly average over next 7 days", "📈")
+    plant_kpi(cols[3], "Low-demand average", f"{low_average:,.1f} kW", f"Average of the lowest 25% forecast hours ({low_count} hours)", "🌙")
+
+
+def plant_render_selected_forecast(result):
+    """Selected-model chart: ONLY the last 7 days of history + the next 7 days forecast, with a rolling P90 error band."""
+    hist = result["series"].iloc[-plf.HORIZON_HOURS:]                          # exactly 7 days of history
+    future = result["future_forecasts"][plf.BEST_MODEL_NAME]                   # exactly 7 days of forecast
+    band = result["future_band"]                                               # forecast +/- latest rolling P90 error
+    st.markdown('<div class="ph"><b>Selected model forecast · sktime_XGBoost</b><span>Last 7 days actual + next 7 days forecast with rolling P90 error band</span></div>', unsafe_allow_html=True)
+    k1, k2, _rest = st.columns([1, 1, 2])
+    plant_kpi(k1, "Rolling MAE", f"{result['latest_mae']:.2f} kW", "mean absolute error on the 7-day test", "📏")
+    plant_kpi(k2, "Rolling P90 error", f"{result['latest_p90']:.2f} kW", "90 % of hours miss by less than this", "🎯")
+    fig = go.Figure()
+    plant_add_forecast_boundary(fig, hist.index[-1], future.index[-1])
+    fig.add_trace(go.Scatter(x=hist.index, y=hist.values, name="Actual (last 7 days)", line=dict(color=TEXT_COLOR, width=2)))
+    # band: upper edge first (invisible), then the lower edge filled up to it
+    fig.add_trace(go.Scatter(x=band.index, y=band["upper"], mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=band.index, y=band["lower"], mode="lines", line=dict(width=0), fill="tonexty", fillcolor=PLANT_BAND_FILL, name="P90 uncertainty range",
+                             customdata=band["upper"], hovertemplate="P90 range: %{y:,.1f} – %{customdata:,.1f} kW<extra></extra>"))
+    fig.add_trace(go.Scatter(x=future.index, y=future.values, name="Forecast (next 7 days)", line=dict(color=ACCENT, width=2.7)))
+    fig.update_layout(title="Last 7 days actual and next 7 days forecast", xaxis_title="Timestamp", yaxis_title="Load (kW)")
+    show_figure(plant_style_plot(fig, 400), key="plant_selected_forecast")
+    st.caption(f"Band = forecast ± rolling P90 of the absolute error (60-day window; {result['uncertainty_hours_used']} hours of test errors are available, so all of them are used). Lower edge is never below 0 kW.")
+
+
+def plant_render_actual_vs_forecast_all_models(result):
+    """ONE chart: last 7 days actual vs every model's prediction, then every model's next 7 days forecast.
+
+    Each model keeps one colour and one legend entry (clicking it hides both its test line and its forecast line).
+    Naive baselines only exist for the test window.
+    """
+    test, future = result["actual_vs_pred"], result["future_forecasts"]
+    model_names = list(test.columns[1:])
+    colours, palette_i, base_i = {}, 0, 0                                      # fixed colour per model so test and forecast lines match
+    for name in model_names:
+        if name.startswith("Baseline"): colours[name] = PLANT_BASELINE_COLORS[base_i % len(PLANT_BASELINE_COLORS)]; base_i += 1
+        else: colours[name] = PLANT_MODEL_PALETTE[palette_i % len(PLANT_MODEL_PALETTE)]; palette_i += 1
+    fig = go.Figure()
+    plant_add_forecast_boundary(fig, test.index[-1], future.index[-1])
+    fig.add_trace(go.Scatter(x=test.index, y=test["Actual"], name="Actual", line=dict(color=TEXT_COLOR, width=2.8)))
+    for name in model_names:
+        width = 2.6 if name == plf.BEST_MODEL_NAME else 1.4
+        # test window: predicted vs actual
+        fig.add_trace(go.Scatter(x=test.index, y=test[name], name=name, legendgroup=name, line=dict(color=colours[name], width=width, dash="dot" if name.startswith("Baseline") else "solid")))
+        # next 7 days: same colour, dashed, hidden from the legend (the legend group toggles both)
+        if name in future.columns:
+            fig.add_trace(go.Scatter(x=future.index, y=future[name], name=f"{name} (forecast)", legendgroup=name, showlegend=False, line=dict(color=colours[name], width=width, dash="dash")))
+    fig.add_annotation(x=test.index[len(test) // 2], xref="x", yref="paper", y=1.0, yanchor="bottom", text="Last 7 days · actual vs predicted", showarrow=False, font=dict(size=11, color=MUTED_COLOR))
+    fig.add_annotation(x=future.index[len(future) // 2], xref="x", yref="paper", y=1.0, yanchor="bottom", text="Next 7 days · forecast (dashed)", showarrow=False, font=dict(size=11, color=MUTED_COLOR))
+    fig.update_layout(title="Actual vs predicted (last 7 days) and next 7 days forecast · all models", xaxis_title="Timestamp", yaxis_title="Load (kW)")
+    show_figure(plant_style_plot(fig, 520), key="plant_all_models_merged")
+
+
+def plant_render_model_comparison(result):
+    """Model-comparison section: metrics + timing table, failed-model list and the merged all-models chart."""
+    st.markdown('<div class="ph"><b>Model comparison · last 7-day holdout</b><span>Lower error and shorter training time are better</span></div>', unsafe_allow_html=True)
+    metrics, timing = result["metrics"].copy(), result["timing"].copy()
+    if not timing.empty: metrics = metrics.merge(timing[["model", "train_total_s", "predict_7d_s", "speed_rank"]], on="model", how="left")   # timing next to the errors
+    else: metrics["train_total_s"], metrics["predict_7d_s"], metrics["speed_rank"] = np.nan, np.nan, np.nan
+    metrics["Optimization model"] = np.where(metrics["model"] == plf.BEST_MODEL_NAME, "Selected for cost optimization", "Comparison only")
+    metrics = metrics.rename(columns={"model": "Model", "family": "Family", "MAE": "MAE (kW)", "RMSE": "RMSE (kW)", "Optimization model": "Dashboard role", "MAPE_pct": "MAPE (%)", "WAPE_pct": "WAPE (%)",
+                                      "train_total_s": "Training time (s)", "predict_7d_s": "7-day forecast time (s)", "speed_rank": "Speed rank"})
+    st.dataframe(metrics.round(3), width="stretch", hide_index=True)
+    st.caption("Accuracy is measured on the last 168 actual hours. Each model is fitted on earlier hours for testing, then refitted on all available data for the next 168-hour forecast. Baseline rows have no model-training time.")
+    failed = result["status"][result["status"]["status"] == "Failed"]          # models that crashed (missing package, etc.)
+    if not failed.empty:
+        with st.expander(f"Models that could not run ({len(failed)})"): st.dataframe(failed, width="stretch", hide_index=True)
+    plant_render_actual_vs_forecast_all_models(result)                         # one merged graph: last-7-day actual vs predicted + next-7-day forecast
+
+
+def render_plant_load_tab():
+    """Plant tab entry point: controls, model run, recommendation, KPIs, charts, cost optimisation and model comparison."""
+    data_path = APP_DIR / PLANT_HOURLY_DATA_FILE_NAME
+    if not data_path.exists():
+        st.error(f"Required file not found: {data_path}. Add {PLANT_HOURLY_DATA_FILE_NAME} to the same folder as app.py."); return
+    file_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()             # a changed CSV invalidates the stored model run
+    try: y = plf.read_hourly_series(data_path)
+    except Exception as exc: st.error(str(exc)); return
+
+    session_key, hash_key = "plant_load_model_result", "plant_load_model_hash"
+    has_current_result = st.session_state.get(session_key) is not None and st.session_state.get(hash_key) == file_hash
+
+    # compact controls at the top right: [DL checkbox] [Run button]
+    _spacer, col_dl, col_run = st.columns([7, 1.7, 1.9], vertical_alignment="center")
+    with col_dl: include_deep = st.checkbox("Include DL models", value=False, key="plant_include_deep")
+    with col_run: run_clicked = st.button("Run model comparison", type="primary", key="plant_run_models")
+    if run_clicked:
+        try:
+            with st.spinner("Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…"):
+                result = plf.run_model_comparison(y, include_deep=include_deep)
+            st.session_state[session_key], st.session_state[hash_key] = result, file_hash; has_current_result = True
+        except Exception as exc:
+            st.error(f"Could not complete the model run: {type(exc).__name__}: {exc}"); return
+    if not has_current_result:
+        st.info("Click **Run model comparison** (top right) to train/evaluate the models and build the dashboard."); return
+
+    result = st.session_state[session_key]
+    if plf.BEST_MODEL_NAME not in result["future_forecasts"].columns:
+        st.error("sktime_XGBoost forecast is unavailable; cost optimization cannot run."); return
+    with st.spinner("Calculating load-shifting opportunities using the sktime_XGBoost forecast…"):
+        opt_result = pco.optimize_load_shifting(result["future_forecasts"][plf.BEST_MODEL_NAME])
+
+    pco.render_recommendation(st, opt_result); st.write("")                    # 1) recommendation first
+    plant_render_forecast_kpis(result); st.write("")                           # 2) forecast KPIs
+    with st.container(border=True): plant_render_selected_forecast(result)     # 3) 7 days history + 7 days forecast + P90 band
+    pco.render_optimization_results(st, opt_result)                            # 4) cost-optimisation KPIs and charts
+    with st.container(border=True): plant_render_model_comparison(result)      # 5) model evaluation + merged all-models chart
+
+
 with tab_plant:
-    # the tab is drawn by plant_load_visualization.py (charts) on top of plant_load_forecasting.py (ML part + DL part)
-    plv.render_plant_load_tab(st, APP_DIR, pco, PLANT_HOURLY_DATA_FILE_NAME)
+    render_plant_load_tab()
