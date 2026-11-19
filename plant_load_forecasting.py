@@ -560,16 +560,7 @@ def render_plant_load_tab(
     st_module, app_dir: Path, cost_module, data_file_name: str = "hourly_energy_consumption.csv"
 ) -> None:
     """Render the new Plant Load Forecasting & Optimization tab."""
-    st_module.markdown(
-        '<div class="ph"><b>Plant load forecasting & optimization</b>'
-        '<span>7-day demand outlook · cost-saving opportunities · model performance</span></div>',
-        unsafe_allow_html=True,
-    )
     data_path = Path(app_dir) / data_file_name
-    st_module.caption(
-        f"Data source: {data_file_name} · stored beside app.py in the GitHub repository. "
-        "Required fields: Timestamps and kw."
-    )
 
     if not data_path.exists():
         st_module.error(
@@ -585,24 +576,20 @@ def render_plant_load_tab(
         st_module.error(str(exc))
         return
 
-    top_cols = st_module.columns([1, 1, 2])
-    with top_cols[0]:
-        st_module.metric("Hourly observations", f"{len(y):,}")
-    with top_cols[1]:
-        st_module.metric("Data coverage", f"{(y.index[-1] - y.index[0]).days + 1:,} days")
-    with top_cols[2]:
-        st_module.caption(f"{y.index.min():%d %b %Y %H:%M} → {y.index.max():%d %b %Y %H:%M}")
-
     session_key = "plant_load_model_result"
     hash_key = "plant_load_model_hash"
     existing = st_module.session_state.get(session_key)
     has_current_result = existing is not None and st_module.session_state.get(hash_key) == file_hash
 
-    include_deep = st_module.checkbox(
-        "Include deep-learning models (TiDE, TSMixer, TFT) - slow on a CPU host, can take 30+ minutes",
-        value=False, key="plant_include_deep",
-    )
-    if st_module.button("Run model comparison & 7-day optimization", type="primary", key="plant_run_models"):
+    _spacer, col_dl, col_run = st_module.columns([3, 1.3, 2.4], vertical_alignment="center")
+    with col_dl:
+        include_deep = st_module.checkbox("Include DL models", value=False, key="plant_include_deep")
+    with col_run:
+        run_clicked = st_module.button(
+            "Run model comparison & 7-day optimization", type="primary",
+            key="plant_run_models", use_container_width=True,
+        )
+    if run_clicked:
         try:
             with st_module.spinner("Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…"):
                 result = run_model_comparison(y, include_deep=include_deep)
