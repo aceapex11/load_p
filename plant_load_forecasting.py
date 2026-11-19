@@ -1,24 +1,21 @@
-"""Plant load forecasting: notebook-matched model comparison and 7-day forecasts.
+"""Model configurations, training, evaluation, and forecasting for plant hourly load.
 
-The six forecasters and saved hyperparameters mirror energy_forecasting_final.ipynb.
-Three Darts deep-learning models from kw_framework_comparison.ipynb (TiDE, TSMixer, TFT) are added
-after them and run through the same holdout + refit flow.
-The app uses the saved tuned parameters (the notebook's default TUNE=0 workflow).
-Expected CSV columns: Timestamps, kw. Hourly observations are required.
+This module intentionally contains no Streamlit UI, Plotly charts, dashboard KPIs,
+or cost-optimization presentation. Import its public functions from the dashboard layer.
+
+Input CSV columns: Timestamps and kw (hourly observations).
 """
 from __future__ import annotations
 
 import hashlib
 import math
 import time
-import traceback
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 
 HORIZON_HOURS = 168
 MIN_HISTORY = 168
@@ -84,13 +81,6 @@ DEEP_VAL_HOURS = 240         # last 10 days of the training data, used for early
 DEEP_SEED = 42
 CAL_COLS = ["tod_sin", "tod_cos", "dow_sin", "dow_cos", "weekend"]
 
-TEXT = "#0F172A"
-MUTED = "#64748B"
-GRID = "#EDF0F6"
-ACCENT = "#6366F1"
-GREEN = "#10B981"
-BLUE = "#3B82F6"
-AMBER = "#F59E0B"
 
 
 def read_hourly_series(file_path: Path | str) -> pd.Series:
@@ -452,189 +442,3 @@ def run_model_comparison(y: pd.Series, include_deep: bool = False) -> dict[str, 
         "status": pd.DataFrame(status_rows),
         "best_model": BEST_MODEL_NAME,
     }
-
-
-def _style_plot(fig: go.Figure, height: int = 390) -> go.Figure:
-    fig.update_layout(
-        template="plotly_white", height=height, paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter, sans-serif", color=TEXT, size=12),
-        margin=dict(l=12, r=15, t=72, b=20), hovermode="x unified",
-        title=dict(x=0, xanchor="left", font=dict(size=16, color=TEXT)),
-        legend=dict(orientation="h", y=1.12, x=0, yanchor="bottom"),
-        hoverlabel=dict(bgcolor="white", bordercolor=GRID, font=dict(color=TEXT)),
-    )
-    fig.update_xaxes(gridcolor=GRID, linecolor="#E2E8F0", tickfont=dict(color=MUTED))
-    fig.update_yaxes(gridcolor=GRID, zeroline=False, tickfont=dict(color=MUTED))
-    return fig
-
-
-def _kpi(st_module, col, label, value, sub, icon):
-    with col:
-        st_module.markdown(
-            f'<div class="kpi"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div>'
-            f'<div class="v">{value}</div><div class="s">{sub}</div></div>',
-            unsafe_allow_html=True,
-        )
-
-
-def _render_forecast_kpis(st_module, result: dict[str, Any]) -> None:
-    y = result["series"]
-    fc = result["future_forecasts"][BEST_MODEL_NAME]
-    forecast_energy = float(fc.sum())  # hourly kW values summed over 1-hour intervals -> kWh
-    previous_energy = float(y.iloc[-HORIZON_HOURS:].sum())
-    peak = float(fc.max())
-    low_count = max(1, int(np.ceil(len(fc) * 0.25)))
-    low_average = float(np.sort(fc.to_numpy())[:low_count].mean())
-    st_module.markdown('<div class="ph"><b>Plant load forecast · key indicators</b><span>Cost optimization uses sktime_XGBoost</span></div>', unsafe_allow_html=True)
-    cols = st_module.columns(4)
-    _kpi(st_module, cols[0], "Forecast load · next 7 days", f"{forecast_energy / 1000:,.1f} MWh", f"{forecast_energy:,.0f} kWh · sktime_XGBoost", "🔮")
-    _kpi(st_module, cols[1], "Actual load · last 7 days", f"{previous_energy / 1000:,.1f} MWh", f"{previous_energy:,.0f} kWh · historical meter data", "📊")
-    _kpi(st_module, cols[2], "Forecast peak demand", f"{peak:,.1f} kW", f"Highest hourly average over next 7 days", "📈")
-    _kpi(st_module, cols[3], "Low-demand average", f"{low_average:,.1f} kW", f"Average of the lowest 25% forecast hours ({low_count} hours)", "🌙")
-
-
-def _render_model_comparison(st_module, result: dict[str, Any]) -> None:
-    st_module.markdown('<div class="ph"><b>Model comparison · last 7-day holdout</b><span>Lower error and shorter training time are better</span></div>', unsafe_allow_html=True)
-    metrics = result["metrics"].copy()
-    timing = result["timing"].copy()
-    if not timing.empty:
-        metrics = metrics.merge(
-            timing[["model", "train_total_s", "predict_7d_s", "speed_rank"]],
-            on="model", how="left"
-        )
-    else:
-        metrics["train_total_s"] = np.nan
-        metrics["predict_7d_s"] = np.nan
-        metrics["speed_rank"] = np.nan
-    metrics["Optimization model"] = np.where(metrics["model"] == BEST_MODEL_NAME, "Selected for cost optimization", "Comparison only")
-    metrics = metrics.rename(columns={
-        "model": "Model", "MAE": "MAE (kW)", "RMSE": "RMSE (kW)",
-        "Optimization model": "Dashboard role",
-        "MAPE_pct": "MAPE (%)", "WAPE_pct": "WAPE (%)",
-        "train_total_s": "Training time (s)", "predict_7d_s": "7-day forecast time (s)",
-        "speed_rank": "Speed rank",
-    })
-    st_module.dataframe(metrics.round(3), use_container_width=True, hide_index=True)
-    st_module.caption("Accuracy is measured on the last 168 actual hours. Each model is fitted on earlier hours for testing, then refitted on all available data for the next 168-hour forecast. Baseline rows have no model-training time.")
-
-    status = result["status"]
-    failed = status[status["status"] == "Failed"]
-    if not failed.empty:
-        with st_module.expander(f"Models that could not run ({len(failed)})"):
-            st_module.dataframe(failed, use_container_width=True, hide_index=True)
-
-    if not timing.empty:
-        fig = go.Figure()
-        t = timing.sort_values("train_total_s", ascending=True)
-        fig.add_trace(go.Bar(
-            x=t["model"], y=t["train_total_s"], name="Training time",
-            marker_color=ACCENT, text=t["train_total_s"].map(lambda v: f"{v:.2f}s"), textposition="outside"
-        ))
-        fig.update_layout(title="Training-time comparison · full historical dataset", xaxis_title="Model", yaxis_title="Seconds")
-        st_module.plotly_chart(_style_plot(fig, 330), use_container_width=True, config={"displayModeBar": False})
-
-    # Actual vs predicted on holdout window for every model and baseline.
-    test = result["actual_vs_pred"]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=test.index, y=test["Actual"], name="Actual", line=dict(color=TEXT, width=2.8)))
-    palette = [ACCENT, GREEN, BLUE, AMBER, "#8B5CF6", "#EC4899", "#64748B", "#0EA5E9",
-               "#EF4444", "#14B8A6", "#84CC16", "#F97316", "#A855F7", "#06B6D4", "#78716C"]
-    for i, col in enumerate(test.columns[1:]):
-        fig.add_trace(go.Scatter(x=test.index, y=test[col], name=col, line=dict(color=palette[i % len(palette)], width=1.5)))
-    fig.update_layout(title="Actual vs predicted · last 7 days", xaxis_title="Timestamp", yaxis_title="Load (kW)")
-    st_module.plotly_chart(_style_plot(fig, 430), use_container_width=True, config={"displayModeBar": False})
-
-    # All successful model forecasts for the next 7 days.
-    future = result["future_forecasts"]
-    fig = go.Figure()
-    for i, col in enumerate(future.columns):
-        fig.add_trace(go.Scatter(
-            x=future.index, y=future[col], name=col,
-            line=dict(color=palette[i % len(palette)], width=2.0 if col == BEST_MODEL_NAME else 1.5)
-        ))
-    fig.update_layout(title="Next 7 days forecast · all successful models", xaxis_title="Timestamp", yaxis_title="Forecast load (kW)")
-    st_module.plotly_chart(_style_plot(fig, 430), use_container_width=True, config={"displayModeBar": False})
-
-
-def render_plant_load_tab(
-    st_module, app_dir: Path, cost_module, data_file_name: str = "hourly_energy_consumption.csv"
-) -> None:
-    """Render the new Plant Load Forecasting & Optimization tab."""
-    data_path = Path(app_dir) / data_file_name
-
-    if not data_path.exists():
-        st_module.error(
-            f"Required file not found: {data_path}. Add {data_file_name} "
-            "to the same GitHub folder as app.py."
-        )
-        return
-
-    file_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()
-    try:
-        y = read_hourly_series(data_path)
-    except Exception as exc:
-        st_module.error(str(exc))
-        return
-
-    session_key = "plant_load_model_result"
-    hash_key = "plant_load_model_hash"
-    existing = st_module.session_state.get(session_key)
-    has_current_result = existing is not None and st_module.session_state.get(hash_key) == file_hash
-
-    _spacer, col_dl, col_run = st_module.columns([3, 1.3, 2.4], vertical_alignment="center")
-    with col_dl:
-        include_deep = st_module.checkbox("Include DL models", value=False, key="plant_include_deep")
-    with col_run:
-        run_clicked = st_module.button(
-            "Run model comparison & 7-day optimization", type="primary",
-            key="plant_run_models", use_container_width=True,
-        )
-    if run_clicked:
-        try:
-            with st_module.spinner("Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…"):
-                result = run_model_comparison(y, include_deep=include_deep)
-            st_module.session_state[session_key] = result
-            st_module.session_state[hash_key] = file_hash
-            has_current_result = True
-        except Exception as exc:
-            st_module.error(f"Could not complete the model run: {type(exc).__name__}: {exc}")
-            return
-
-    if not has_current_result:
-        st_module.info("Click **Run model comparison & 7-day optimization** to train/evaluate the models and build the dashboard.")
-        return
-
-    result = st_module.session_state[session_key]
-    if BEST_MODEL_NAME not in result["future_forecasts"].columns:
-        st_module.error("sktime_XGBoost forecast is unavailable; cost optimization cannot run.")
-        return
-
-    with st_module.spinner("Calculating load-shifting opportunities using the sktime_XGBoost forecast…"):
-        opt_result = cost_module.optimize_load_shifting(result["future_forecasts"][BEST_MODEL_NAME])
-
-    # Recommendation first, as requested.
-    cost_module.render_recommendation(st_module, opt_result)
-    st_module.write("")
-
-    # Forecast KPIs.
-    _render_forecast_kpis(st_module, result)
-    st_module.write("")
-
-    # Forecast path selected for the cost optimization model.
-    with st_module.container(border=True):
-        st_module.markdown('<div class="ph"><b>Selected model forecast · sktime_XGBoost</b><span>Next 168 hourly values</span></div>', unsafe_allow_html=True)
-        hist = result["series"].iloc[-14 * 24:]
-        future = result["future_forecasts"][BEST_MODEL_NAME]
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=hist.index, y=hist.values, name="Historical load", line=dict(color=TEXT, width=2)))
-        fig.add_trace(go.Scatter(x=future.index, y=future.values, name="7-day forecast", line=dict(color=ACCENT, width=2.7)))
-        fig.add_vline(x=result["series"].index[-1], line_dash="dot", line_color=MUTED)
-        fig.update_layout(title="Historical load and next 7-day forecast", xaxis_title="Timestamp", yaxis_title="Load (kW)")
-        st_module.plotly_chart(_style_plot(fig, 390), use_container_width=True, config={"displayModeBar": False})
-
-    # Optimization KPIs and Plotly graphs.
-    cost_module.render_optimization_results(st_module, opt_result)
-
-    # Model evaluation and all-model plots at the end of the page.
-    with st_module.container(border=True):
-        _render_model_comparison(st_module, result)
