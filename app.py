@@ -9,6 +9,7 @@ Plant forecasting: the plant tab is drawn at the bottom of this file; ALL plant 
 Files next to app.py: gridsense_forecast.py (the notebooks' models, built on sktime) and gridsense_rules.py (the rule-based phase-balance logic)
 Layout of this file : page setup -> settings -> colours + CSS -> UI helpers -> data loading -> phase maths -> advice text -> forecast helpers -> the page itself
 """
+import hashlib
 import html as html_lib
 import warnings
 from contextlib import contextmanager
@@ -33,7 +34,6 @@ st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡",
 APP_DIR = Path(__file__).resolve().parent
 DATA_FILE_NAME = "device_16_full_data.csv"       # used by the existing Overview / Load forecast / Phase balance tabs
 PLANT_HOURLY_DATA_FILE_NAME = "hourly_energy_consumption.csv"  # used only by Plant load forecasting & optimization
-PLANT_INCLUDE_DL = False   # True = also train the slow deep-learning models (TiDE / TSMixer / TFT) in the plant tab; no button needed
 PHASE_KW_COLS = ["RKW", "YKW", "BKW"]
 PHASE_LABEL_BY_COL = {"RKW": "Red", "YKW": "Yellow", "BKW": "Blue"}
 PHASE_LABELS = [PHASE_LABEL_BY_COL[p] for p in PHASE_KW_COLS]
@@ -1495,22 +1495,35 @@ def plant_render_cost_optimization(result):
                "Each hourly kW value is treated as kWh for a one-hour interval. Demand-charge components are not included.")
 
 
-@st.cache_data(show_spinner="Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…")
-def run_plant_models(hourly_kw, include_deep):
-    """Runs once per data file / setting and is then served from the cache (no button, no re-training on reruns)."""
-    return plf.run_model_comparison(hourly_kw, include_deep=include_deep)
-
-
 def render_plant_load_tab():
-    """Plant tab entry point: model run (automatic), recommendation, KPIs, charts, cost optimisation and model comparison."""
+    """Plant tab entry point: controls (only until the comparison has run), recommendation, KPIs, charts, cost optimisation and model comparison."""
     data_path = APP_DIR / PLANT_HOURLY_DATA_FILE_NAME
     if not data_path.exists():
         st.error(f"Required file not found: {data_path}. Add {PLANT_HOURLY_DATA_FILE_NAME} to the same folder as app.py."); return
+    file_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()             # a changed CSV invalidates the stored model run
     try: y = load_plant_series(str(data_path), data_path.stat().st_mtime)
     except Exception as exc: st.error(str(exc)); return
-    try: result = run_plant_models(y, PLANT_INCLUDE_DL)
-    except Exception as exc: st.error(f"Could not complete the model run: {type(exc).__name__}: {exc}"); return
 
+    session_key, hash_key = "plant_load_model_result", "plant_load_model_hash"
+    has_current_result = st.session_state.get(session_key) is not None and st.session_state.get(hash_key) == file_hash
+
+    # controls (top-right, one below the other) exist ONLY until the comparison has run; afterwards they are not drawn at all, so no blank space is left
+    if not has_current_result:
+        _spacer, col_ctrl = st.columns([4, 1])
+        with col_ctrl:
+            include_deep = st.checkbox("Include DL models", value=False, key="plant_include_deep")
+            run_clicked = st.button("Run model comparison", type="primary", key="plant_run_models", use_container_width=True)
+        if not run_clicked:
+            st.info("Click **Run model comparison** (top right) to train/evaluate the models and build the dashboard."); return
+        try:
+            with st.spinner("Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…"):
+                st.session_state[session_key] = plf.run_model_comparison(y, include_deep=include_deep)
+            st.session_state[hash_key] = file_hash
+        except Exception as exc:
+            st.error(f"Could not complete the model run: {type(exc).__name__}: {exc}"); return
+        st.rerun()                                                             # redraw the tab without the checkbox and button
+
+    result = st.session_state[session_key]
     if plf.BEST_MODEL_NAME not in result["future_forecasts"].columns:
         st.error("sktime_XGBoost forecast is unavailable; cost optimization cannot run."); return
     with st.spinner("Calculating load-shifting opportunities using the sktime_XGBoost forecast…"):
