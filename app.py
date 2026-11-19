@@ -1371,7 +1371,7 @@ def plant_render_model_comparison(result):
     if not timing.empty: metrics = metrics.merge(timing[["model", "train_total_s", "predict_7d_s", "speed_rank"]], on="model", how="left")   # timing next to the errors
     else: metrics["train_total_s"], metrics["predict_7d_s"], metrics["speed_rank"] = np.nan, np.nan, np.nan
     metrics["Optimization model"] = np.where(metrics["model"] == plf.BEST_MODEL_NAME, "Selected for cost optimization", "Comparison only")
-    metrics = metrics.rename(columns={"model": "Model", "family": "Family", "MAE": "MAE (kW)", "RMSE": "RMSE (kW)", "Optimization model": "Dashboard role", "MAPE_pct": "MAPE (%)", "WAPE_pct": "WAPE (%)",
+    metrics = metrics.rename(columns={"model": "Model", "MAE": "MAE (kW)", "RMSE": "RMSE (kW)", "Optimization model": "Dashboard role", "MAPE_pct": "MAPE (%)", "WAPE_pct": "WAPE (%)",
                                       "train_total_s": "Training time (s)", "predict_7d_s": "7-day forecast time (s)", "speed_rank": "Speed rank"})
     st.dataframe(metrics.round(3), width="stretch", hide_index=True)
     st.caption("Accuracy is measured on the last 168 actual hours. Each model is fitted on earlier hours for testing, then refitted on all available data for the next 168-hour forecast.")
@@ -1465,7 +1465,7 @@ def plant_render_cost_optimization(result):
 
     with st.expander("Tariff-band detail"):
         show = summary.rename(columns={
-            "tariff_band": "Tariff band", "hours": "Hours", "rate_inr": "Rate (₹/kWh)",
+            "tariff_band": "Tariff band", "time_window": "Time window", "rate_inr": "Rate (₹/kWh)",
             "original_energy_kwh": "Original energy (kWh)", "optimised_energy_kwh": "Optimized energy (kWh)",
             "original_cost_inr": "Original cost (₹)", "optimised_cost_inr": "Optimized cost (₹)",
             "energy_change_kwh": "Energy change (kWh)", "cost_change_inr": "Cost change (₹)"})
