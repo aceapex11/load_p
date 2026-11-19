@@ -1,6 +1,8 @@
 """Plant load forecasting: notebook-matched model comparison and 7-day forecasts.
 
 The six forecasters and saved hyperparameters mirror energy_forecasting_final.ipynb.
+Seven deep-learning models from kw_framework_comparison.ipynb (Darts / NeuralForecast TiDE,
+TSMixer, TFT and sktime TFT) are added after them and run through the same holdout + refit flow.
 The app uses the saved tuned parameters (the notebook's default TUNE=0 workflow).
 Expected CSV columns: Timestamps, kw. Hourly observations are required.
 """
@@ -10,6 +12,7 @@ import hashlib
 import math
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +30,14 @@ MODEL_ORDER = [
     "mlforecast_XGBoost",
     "sktime_HoltWinters",
     "TBATS",
+    # deep-learning models from the framework-comparison notebook
+    "darts_TiDE",
+    "darts_TSMixer",
+    "darts_TFT",
+    "neuralforecast_TiDE",
+    "neuralforecast_TSMixer",
+    "neuralforecast_TFT",
+    "sktime_TFT",
 ]
 
 # Saved best parameters from the uploaded notebook (TUNE=0).
@@ -58,7 +69,27 @@ BEST_PARAMS = {
         "trend": "add", "damped": False, "seasonal": "mul", "sp": 7,
     },
     "TBATS": {"periods": "daily", "box_cox": True, "trend": False},
+    # Deep models: hyperparameters copied from the framework-comparison notebook (DEFAULT_PARAMS).
+    "darts_TiDE": {"hidden_size": 256, "num_encoder_layers": 2, "num_decoder_layers": 2, "dropout": 0.1, "lr": 1e-3},
+    "darts_TSMixer": {"hidden_size": 64, "ff_size": 64, "num_blocks": 2, "dropout": 0.1, "lr": 1e-3},
+    "darts_TFT": {"hidden_size": 32, "lstm_layers": 1, "num_attention_heads": 4, "hidden_continuous_size": 16,
+                  "dropout": 0.1, "lr": 1e-3},
+    "neuralforecast_TiDE": {"hidden_size": 256, "num_encoder_layers": 2, "num_decoder_layers": 2, "dropout": 0.1},
+    "neuralforecast_TSMixer": {"num_blocks": 2, "ff_size": 64, "dropout": 0.1},   # NeuralForecast TSMixerx
+    "neuralforecast_TFT": {"hidden_size": 32, "num_attention_heads": 4, "dropout": 0.1},
+    "sktime_TFT": {"hidden_size": 32, "lstm_layers": 1, "num_attention_heads": 4, "hidden_continuous_size": 16,
+                   "dropout": 0.1, "lr": 1e-3, "epochs": 20},
 }
+
+# Shared training settings for the deep models (same values as the notebook's configuration cell).
+DEEP_INPUT_HOURS = 48        # history window seen by the models (2 days)
+DEEP_EPOCHS = 60
+DEEP_BATCH_SIZE = 64
+DEEP_LR = 1e-3
+DEEP_PATIENCE = 8
+DEEP_VAL_HOURS = 240         # last 10 days of the training data, used for early stopping only
+DEEP_SEED = 42
+CAL_COLS = ["tod_sin", "tod_cos", "dow_sin", "dow_cos", "weekend"]
 
 TEXT = "#0F172A"
 MUTED = "#64748B"
@@ -123,6 +154,178 @@ def _row_features(hist: np.ndarray, ts: pd.Timestamp) -> list[float]:
     f += [hr, dw, int(dw >= 5), math.sin(2 * math.pi * hr / 24), math.cos(2 * math.pi * hr / 24),
           math.sin(2 * math.pi * dw / 7), math.cos(2 * math.pi * dw / 7)]
     return f
+
+
+def _calendar(index: pd.DatetimeIndex) -> pd.DataFrame:
+    """Calendar covariates used by the deep models (same features as the notebook)."""
+    tod = (index.hour * 60 + index.minute) / 1440.0
+    dow = index.dayofweek
+    return pd.DataFrame({
+        "tod_sin": np.sin(2 * np.pi * tod), "tod_cos": np.cos(2 * np.pi * tod),
+        "dow_sin": np.sin(2 * np.pi * dow / 7), "dow_cos": np.cos(2 * np.pi * dow / 7),
+        "weekend": (dow >= 5).astype(float),
+    }, index=index)
+
+
+def _deep_val_len(n: int, horizon: int = HORIZON_HOURS) -> int:
+    """Hours held out for early stopping; 0 (no validation) when the history is too short."""
+    if n - DEEP_VAL_HOURS >= 2 * (DEEP_INPUT_HOURS + horizon):
+        return DEEP_VAL_HOURS
+    return 0
+
+
+@contextmanager
+def _trusted_torch_load():
+    """PyTorch >= 2.6 refuses to reload Lightning checkpoints (weights_only=True). The checkpoints
+    reloaded here were written by this process a moment earlier, so allow it, only inside this block."""
+    import torch
+    original = torch.load
+
+    def patched(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return original(*args, **kwargs)
+
+    torch.load = patched
+    try:
+        yield
+    finally:
+        torch.load = original
+
+
+def _run_darts_deep(name: str, y_hist: pd.Series, horizon: int):
+    """Darts TiDE / TSMixer / TFT: direct 168-step forecast, calendar future covariates."""
+    import shutil
+    import tempfile
+    import torch
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import EarlyStopping
+    from darts import TimeSeries
+    from darts.dataprocessing.transformers import Scaler
+    from darts.models import TFTModel, TiDEModel, TSMixerModel
+
+    kind = name.split("_", 1)[1]
+    cls = {"TiDE": TiDEModel, "TSMixer": TSMixerModel, "TFT": TFTModel}[kind]
+    ps = dict(BEST_PARAMS[name])
+    lr = ps.pop("lr")
+    pl.seed_everything(DEEP_SEED, workers=True)
+
+    n = len(y_hist)
+    val_len = _deep_val_len(n, horizon)
+    i_val = n - val_len                       # train on [:i_val], early-stop on [i_val:]
+    full_idx = pd.date_range(y_hist.index[0], periods=n + horizon, freq="h")
+    y_ts = TimeSeries.from_series(y_hist, freq="h")
+    fut_ts = TimeSeries.from_dataframe(_calendar(full_idx), freq="h")
+    sc_y = Scaler().fit(y_ts[:i_val])
+    y_s = sc_y.transform(y_ts)
+    fut_s = Scaler().fit(fut_ts[:i_val]).transform(fut_ts)
+
+    callbacks = [EarlyStopping(monitor="val_loss", patience=DEEP_PATIENCE, min_delta=1e-4, mode="min")] if val_len else []
+    work_dir = tempfile.mkdtemp(prefix="plant_darts_")
+    model_name = f"{kind.lower()}_app"
+    try:
+        model = cls(
+            input_chunk_length=DEEP_INPUT_HOURS, output_chunk_length=horizon, n_epochs=DEEP_EPOCHS,
+            batch_size=DEEP_BATCH_SIZE, optimizer_kwargs={"lr": lr}, use_reversible_instance_norm=True,
+            random_state=DEEP_SEED, save_checkpoints=True, force_reset=True, model_name=model_name, work_dir=work_dir,
+            pl_trainer_kwargs={"accelerator": "auto", "enable_progress_bar": False,
+                               "enable_model_summary": False, "callbacks": callbacks},
+            **({"loss_fn": torch.nn.MSELoss()} if kind == "TFT" else {}), **ps,
+        )
+        fit_kwargs = dict(series=y_s[:i_val], future_covariates=fut_s)
+        if val_len:
+            fit_kwargs.update(val_series=y_s[i_val:], val_future_covariates=fut_s)
+        t = time.perf_counter()
+        model.fit(**fit_kwargs)
+        if val_len:                            # restore the best-validation weights
+            try:
+                with _trusted_torch_load():
+                    model = cls.load_from_checkpoint(model_name, work_dir=work_dir, best=True)
+            except Exception:
+                pass                           # keep the last-epoch weights
+        fit_s = time.perf_counter() - t
+        t = time.perf_counter()
+        pred = model.predict(n=horizon, series=y_s, future_covariates=fut_s)
+        out = sc_y.inverse_transform(pred).values().ravel()
+        predict_s = time.perf_counter() - t
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    return np.asarray(out, dtype=float), fit_s, predict_s, 0.0
+
+
+def _run_neuralforecast_deep(name: str, y_hist: pd.Series, horizon: int):
+    """NeuralForecast TiDE / TSMixerx / TFT with calendar future exogenous variables."""
+    from neuralforecast import NeuralForecast
+    from neuralforecast.losses.pytorch import MSE
+    from neuralforecast.models import TFT as NF_TFT, TiDE as NF_TiDE, TSMixerx as NF_TSMixerx
+
+    kind = name.split("_", 1)[1]
+    p = BEST_PARAMS[name]
+    n = len(y_hist)
+    val_len = _deep_val_len(n, horizon)
+    steps_per_epoch = max(1, (n - val_len) // DEEP_BATCH_SIZE)
+    common = dict(
+        h=horizon, input_size=DEEP_INPUT_HOURS, loss=MSE(), learning_rate=DEEP_LR, batch_size=DEEP_BATCH_SIZE,
+        max_steps=DEEP_EPOCHS * steps_per_epoch, val_check_steps=steps_per_epoch,
+        early_stop_patience_steps=DEEP_PATIENCE if val_len else -1, scaler_type="standard",
+        random_seed=DEEP_SEED, futr_exog_list=CAL_COLS, hist_exog_list=None,
+        enable_progress_bar=False, enable_model_summary=False,
+    )
+    if kind == "TiDE":
+        model = NF_TiDE(hidden_size=p["hidden_size"], num_encoder_layers=p["num_encoder_layers"],
+                        num_decoder_layers=p["num_decoder_layers"], dropout=p["dropout"], **common)
+    elif kind == "TSMixer":
+        model = NF_TSMixerx(n_series=1, n_block=p["num_blocks"], ff_dim=p["ff_size"], dropout=p["dropout"], **common)
+    else:
+        model = NF_TFT(hidden_size=p["hidden_size"], n_head=p["num_attention_heads"], dropout=p["dropout"], **common)
+
+    train_df = pd.concat([pd.DataFrame({"y": y_hist.values}, index=y_hist.index), _calendar(y_hist.index)], axis=1)
+    train_df.index.name = "ds"
+    train_df = train_df.reset_index()
+    train_df.insert(0, "unique_id", "kw")
+    future_idx = pd.date_range(y_hist.index[-1] + pd.Timedelta(hours=1), periods=horizon, freq="h")
+    futr_df = _calendar(future_idx)
+    futr_df.index.name = "ds"
+    futr_df = futr_df.reset_index()
+    futr_df.insert(0, "unique_id", "kw")
+
+    nf = NeuralForecast(models=[model], freq="h")
+    t = time.perf_counter()
+    nf.fit(df=train_df, val_size=val_len)
+    fit_s = time.perf_counter() - t
+    t = time.perf_counter()
+    pred = nf.predict(futr_df=futr_df)
+    predict_s = time.perf_counter() - t
+    if "unique_id" not in pred.columns:
+        pred = pred.reset_index()
+    pred = pred.sort_values("ds")
+    col = [c for c in pred.columns if c not in ("unique_id", "ds", "cutoff", "y")][0]
+    return pred[col].to_numpy(dtype=float), fit_s, predict_s, 0.0
+
+
+def _run_sktime_tft(y_hist: pd.Series, horizon: int):
+    """sktime TFT (pytorch-forecasting wrapper): KW history + calendar features, fixed epoch budget."""
+    from sktime.forecasting.base import ForecastingHorizon
+    from sktime.forecasting.pytorchforecasting import PytorchForecastingTFT
+
+    p = BEST_PARAMS["sktime_TFT"]
+    future_idx = pd.date_range(y_hist.index[-1] + pd.Timedelta(hours=1), periods=horizon, freq="h")
+    fh = ForecastingHorizon(np.arange(1, horizon + 1), is_relative=True)
+    model = PytorchForecastingTFT(
+        model_params={"hidden_size": p["hidden_size"], "lstm_layers": p["lstm_layers"],
+                      "attention_head_size": p["num_attention_heads"], "dropout": p["dropout"],
+                      "hidden_continuous_size": p["hidden_continuous_size"], "learning_rate": p["lr"]},
+        dataset_params={"max_encoder_length": DEEP_INPUT_HOURS},
+        trainer_params={"max_epochs": p["epochs"], "accelerator": "auto", "enable_progress_bar": False},
+        train_to_dataloader_params={"batch_size": DEEP_BATCH_SIZE},
+        validation_to_dataloader_params={"batch_size": DEEP_BATCH_SIZE},
+    )
+    t = time.perf_counter()
+    model.fit(y=y_hist, X=_calendar(y_hist.index), fh=fh)
+    fit_s = time.perf_counter() - t
+    t = time.perf_counter()
+    out = np.asarray(model.predict(fh=fh, X=_calendar(future_idx))).ravel()[:horizon]
+    predict_s = time.perf_counter() - t
+    return out.astype(float), fit_s, predict_s, 0.0
 
 
 def _run_model(name: str, y_hist: pd.Series, horizon: int = HORIZON_HOURS):
@@ -227,6 +430,15 @@ def _run_model(name: str, y_hist: pd.Series, horizon: int = HORIZON_HOURS):
         t = time.perf_counter(); fitted = estimator.fit(y_hist.values); fit_s = time.perf_counter() - t
         t = time.perf_counter(); out = np.asarray(fitted.forecast(steps=horizon)); predict_s = time.perf_counter() - t
         return out, fit_s, predict_s, feature_build_s
+
+    if name in ("darts_TiDE", "darts_TSMixer", "darts_TFT"):
+        return _run_darts_deep(name, y_hist, horizon)
+
+    if name in ("neuralforecast_TiDE", "neuralforecast_TSMixer", "neuralforecast_TFT"):
+        return _run_neuralforecast_deep(name, y_hist, horizon)
+
+    if name == "sktime_TFT":
+        return _run_sktime_tft(y_hist, horizon)
 
     raise KeyError(f"Unknown forecasting model: {name}")
 
@@ -412,7 +624,8 @@ def _render_model_comparison(st_module, result: dict[str, Any]) -> None:
     test = result["actual_vs_pred"]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=test.index, y=test["Actual"], name="Actual", line=dict(color=TEXT, width=2.8)))
-    palette = [ACCENT, GREEN, BLUE, AMBER, "#8B5CF6", "#EC4899", "#64748B", "#0EA5E9"]
+    palette = [ACCENT, GREEN, BLUE, AMBER, "#8B5CF6", "#EC4899", "#64748B", "#0EA5E9",
+               "#EF4444", "#14B8A6", "#84CC16", "#F97316", "#A855F7", "#06B6D4", "#78716C"]
     for i, col in enumerate(test.columns[1:]):
         fig.add_trace(go.Scatter(x=test.index, y=test[col], name=col, line=dict(color=palette[i % len(palette)], width=1.5)))
     fig.update_layout(title="Actual vs predicted · last 7 days", xaxis_title="Timestamp", yaxis_title="Load (kW)")
