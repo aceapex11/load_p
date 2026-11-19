@@ -5,7 +5,7 @@ Overview        : load timeline (kW, phases, current, voltage, imbalance) and wh
 Load forecast   : hourly total kW, Exponential Smoothing (sktime) tested on the last 168 hours, power advice
 Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast, imbalance alarms,
                   and a rule-based action plan: what is out of phase, why, what to do now, when to do what, what can happen
-Plant forecasting: the plant tab is drawn at the bottom of this file; models live in plant_load_forecasting.py (ML part + DL part), tariff savings in plant_cost_optimization.py
+Plant forecasting: the plant tab is drawn at the bottom of this file; ALL plant frontend is in this file; plant_load_forecasting.py (ML + DL models) and plant_cost_optimization.py (tariff shifting) are pure logic, no UI
 Files next to app.py: gridsense_forecast.py (the notebooks' models, built on sktime) and gridsense_rules.py (the rule-based phase-balance logic)
 Layout of this file : page setup -> settings -> colours + CSS -> UI helpers -> data loading -> phase maths -> advice text -> forecast helpers -> the page itself
 """
@@ -72,7 +72,7 @@ PHASE_PARAMETER_COLS = {"Load (kW)": ["RKW", "YKW", "BKW"], "Current (A)": ["I1"
 #   accent   : indigo (ACCENT = measured load + forecasts + selected buttons; ACCENT_LIGHT = its tint)
 #   status   : green = good, amber = warning, rose = alarm / bad   (status only)
 #   phases   : R rose, Y amber, B blue                              (phase charts only)
-#   bars     : purple bars, yellow highlight bar                    (every bar chart)
+#   bars     : blue bars, yellow highlight bar                      (every bar chart)
 TEXT_COLOR, MUTED_COLOR, GRID_COLOR = "#0F172A", "#64748B", "#EDF0F6"
 
 
@@ -81,7 +81,7 @@ LOAD_COLOR = FORECAST_COLOR = ACCENT
 CONFIDENCE_Z, CONFIDENCE_TEXT = 1.96, "95 %"                              # width of the forecast interval
 GOOD_COLOR, WARN_COLOR, BAD_COLOR = "#10B981", "#F59E0B", "#F43F5E"
 BLUE_COLOR = "#3B82F6"
-BAR_PURPLE, BAR_YELLOW = "#7C3AED", "#FACC15"                             # bar charts: normal bars purple, the highlighted (peak) bar yellow
+BAR_BLUE, BAR_YELLOW = BLUE_COLOR, "#FACC15"                              # bar charts: normal bars theme blue, the highlighted (peak) bar yellow
 IDLE_COLOR, NO_DATA_COLOR, AXIS_COLOR = "#CBD5E1", BAD_COLOR, "#E2E8F0"            # idle share (slate), NO DATA (red), axis lines / empty bars
 
 
@@ -1033,7 +1033,7 @@ with tab_load:
         st.caption("Each bar compares the same one-hour slot across all forecast days. The highlighted (yellow) bar is the recurring peak hour.")
         if not hourly_profile.empty:
             peak_position = int(hourly_profile["Avg kW"].to_numpy().argmax())
-            bar_colors = [BAR_YELLOW if i == peak_position else BAR_PURPLE for i in range(len(hourly_profile))]     # purple bars, yellow peak bar
+            bar_colors = [BAR_YELLOW if i == peak_position else BAR_BLUE for i in range(len(hourly_profile))]       # blue bars, yellow peak bar
             customdata = [
                 [int(row.Days), row["Daily detail"]]
                 for _, row in hourly_profile.iterrows()
@@ -1273,7 +1273,7 @@ with tab_phase:
 PLANT_BAND_FILL = "rgba(99,102,241,0.18)"                                   # P90 uncertainty band (accent tint)
 PLANT_MODEL_PALETTE = [ACCENT, GOOD_COLOR, BLUE_COLOR, WARN_COLOR, "#8B5CF6", "#EC4899", "#64748B", "#0EA5E9",
                        "#EF4444", "#14B8A6", "#84CC16", "#F97316", "#A855F7", "#06B6D4", "#78716C"]   # one colour per model
-PLANT_BASELINE_COLORS = ["#94A3B8", "#CBD5E1"]                              # grey shades for the naive baselines
+PLANT_BAR_ORIGINAL, PLANT_BAR_OPTIMISED = "#94A3B8", BAR_BLUE              # cost charts: original = grey, optimised = theme blue
 
 
 def plant_style_plot(fig, height=390):
@@ -1305,7 +1305,7 @@ def plant_add_forecast_boundary(fig, boundary, end):
 
 
 def plant_render_forecast_kpis(result):
-    """Four KPI cards: forecast energy, last-7-day energy, forecast peak, low-demand average."""
+    """Five KPI cards in one row: forecast energy, last-7-day energy, forecast peak, low-demand average, rolling P90 error."""
     y = result["series"]; fc = result["future_forecasts"][plf.BEST_MODEL_NAME]
     forecast_energy = float(fc.sum())                                          # hourly kW summed over 1-hour steps -> kWh
     previous_energy = float(y.iloc[-plf.HORIZON_HOURS:].sum())
@@ -1313,11 +1313,12 @@ def plant_render_forecast_kpis(result):
     low_count = max(1, int(np.ceil(len(fc) * 0.25)))                           # lowest 25 % of forecast hours
     low_average = float(np.sort(fc.to_numpy())[:low_count].mean())
     st.markdown('<div class="ph"><b>Plant load forecast · key indicators</b><span>Cost optimization uses sktime_XGBoost</span></div>', unsafe_allow_html=True)
-    cols = st.columns(4)
+    cols = st.columns(5)
     plant_kpi(cols[0], "Forecast load · next 7 days", f"{forecast_energy / 1000:,.1f} MWh", f"{forecast_energy:,.0f} kWh · sktime_XGBoost", "🔮")
     plant_kpi(cols[1], "Actual load · last 7 days", f"{previous_energy / 1000:,.1f} MWh", f"{previous_energy:,.0f} kWh · historical meter data", "📊")
     plant_kpi(cols[2], "Forecast peak demand", f"{peak:,.1f} kW", "Highest hourly average over next 7 days", "📈")
     plant_kpi(cols[3], "Low-demand average", f"{low_average:,.1f} kW", f"Average of the lowest 25% forecast hours ({low_count} hours)", "🌙")
+    plant_kpi(cols[4], "Rolling P90 error", f"{result['latest_p90']:.2f} kW", "90 % of hours miss by less than this", "🎯")
 
 
 def plant_render_selected_forecast(result):
@@ -1326,9 +1327,6 @@ def plant_render_selected_forecast(result):
     future = result["future_forecasts"][plf.BEST_MODEL_NAME]                   # exactly 7 days of forecast
     band = result["future_band"]                                               # forecast +/- latest rolling P90 error
     st.markdown('<div class="ph"><b>Selected model forecast · sktime_XGBoost</b><span>Last 7 days actual + next 7 days forecast with rolling P90 error band</span></div>', unsafe_allow_html=True)
-    k1, k2, _rest = st.columns([1, 1, 2])
-    plant_kpi(k1, "Rolling MAE", f"{result['latest_mae']:.2f} kW", "mean absolute error on the 7-day test", "📏")
-    plant_kpi(k2, "Rolling P90 error", f"{result['latest_p90']:.2f} kW", "90 % of hours miss by less than this", "🎯")
     fig = go.Figure()
     plant_add_forecast_boundary(fig, hist.index[-1], future.index[-1])
     fig.add_trace(go.Scatter(x=hist.index, y=hist.values, name="Actual (last 7 days)", line=dict(color=TEXT_COLOR, width=2)))
@@ -1346,21 +1344,17 @@ def plant_render_actual_vs_forecast_all_models(result):
     """ONE chart: last 7 days actual vs every model's prediction, then every model's next 7 days forecast.
 
     Each model keeps one colour and one legend entry (clicking it hides both its test line and its forecast line).
-    Naive baselines only exist for the test window.
     """
     test, future = result["actual_vs_pred"], result["future_forecasts"]
     model_names = list(test.columns[1:])
-    colours, palette_i, base_i = {}, 0, 0                                      # fixed colour per model so test and forecast lines match
-    for name in model_names:
-        if name.startswith("Baseline"): colours[name] = PLANT_BASELINE_COLORS[base_i % len(PLANT_BASELINE_COLORS)]; base_i += 1
-        else: colours[name] = PLANT_MODEL_PALETTE[palette_i % len(PLANT_MODEL_PALETTE)]; palette_i += 1
+    colours = {name: PLANT_MODEL_PALETTE[i % len(PLANT_MODEL_PALETTE)] for i, name in enumerate(model_names)}   # fixed colour per model so test and forecast lines match
     fig = go.Figure()
     plant_add_forecast_boundary(fig, test.index[-1], future.index[-1])
     fig.add_trace(go.Scatter(x=test.index, y=test["Actual"], name="Actual", line=dict(color=TEXT_COLOR, width=2.8)))
     for name in model_names:
         width = 2.6 if name == plf.BEST_MODEL_NAME else 1.4
         # test window: predicted vs actual
-        fig.add_trace(go.Scatter(x=test.index, y=test[name], name=name, legendgroup=name, line=dict(color=colours[name], width=width, dash="dot" if name.startswith("Baseline") else "solid")))
+        fig.add_trace(go.Scatter(x=test.index, y=test[name], name=name, legendgroup=name, line=dict(color=colours[name], width=width)))
         # next 7 days: same colour, dashed, hidden from the legend (the legend group toggles both)
         if name in future.columns:
             fig.add_trace(go.Scatter(x=future.index, y=future[name], name=f"{name} (forecast)", legendgroup=name, showlegend=False, line=dict(color=colours[name], width=width, dash="dash")))
@@ -1380,11 +1374,104 @@ def plant_render_model_comparison(result):
     metrics = metrics.rename(columns={"model": "Model", "family": "Family", "MAE": "MAE (kW)", "RMSE": "RMSE (kW)", "Optimization model": "Dashboard role", "MAPE_pct": "MAPE (%)", "WAPE_pct": "WAPE (%)",
                                       "train_total_s": "Training time (s)", "predict_7d_s": "7-day forecast time (s)", "speed_rank": "Speed rank"})
     st.dataframe(metrics.round(3), width="stretch", hide_index=True)
-    st.caption("Accuracy is measured on the last 168 actual hours. Each model is fitted on earlier hours for testing, then refitted on all available data for the next 168-hour forecast. Baseline rows have no model-training time.")
+    st.caption("Accuracy is measured on the last 168 actual hours. Each model is fitted on earlier hours for testing, then refitted on all available data for the next 168-hour forecast.")
     failed = result["status"][result["status"]["status"] == "Failed"]          # models that crashed (missing package, etc.)
     if not failed.empty:
         with st.expander(f"Models that could not run ({len(failed)})"): st.dataframe(failed, width="stretch", hide_index=True)
     plant_render_actual_vs_forecast_all_models(result)                         # one merged graph: last-7-day actual vs predicted + next-7-day forecast
+
+
+def plant_render_recommendation(result):
+    """Green / amber recommendation banner (shift opportunity found or not)."""
+    shifted, saving = result["total_shifted_kwh"], result["savings_inr"]
+    if shifted > 1e-6 and saving > 0:
+        title, status = "Recommended: shift eligible peak-period load", "Recommended opportunity"
+        text = (f"The sktime_XGBoost 7-day forecast indicates that approximately {shifted:,.0f} kWh can be shifted "
+                f"from Morning Peak / Evening Peak into eligible Morning / Day hours. Estimated energy-charge saving: "
+                f"₹{saving:,.0f} ({result['savings_pct']:.2f}%).")
+        bg, border, fg = "#E8FAF3", "#A7F3D0", "#047857"
+    else:
+        title, status = "No cost-saving shift identified", "No shift opportunity"
+        text = "Under the configured time-of-use tariffs and Off-Peak receiving-load benchmark, no eligible load transfer produced a positive saving."
+        bg, border, fg = "#FFF4DD", "#FDE68A", "#B45309"
+    st.markdown(
+        f'<div style="background:{bg};border:1px solid {border};border-radius:16px;padding:16px 18px;margin:4px 0 14px;">'
+        f'<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
+        f'<div style="font-size:1rem;font-weight:750;color:{TEXT_COLOR};">{title}</div>'
+        f'<span style="font-size:.75rem;font-weight:700;color:{fg};">{status}</span></div>'
+        f'<div style="font-size:.88rem;color:#475569;margin-top:7px;line-height:1.5;">{text}</div>'
+        f'<div style="font-size:.75rem;color:#64748B;margin-top:6px;">Indicative forecast-based estimate using the configured tariffs. Confirm equipment/process flexibility before applying any schedule change.</div>'
+        f'</div>', unsafe_allow_html=True)
+
+
+def plant_render_cost_optimization(result):
+    """Cost-optimisation KPIs, original-vs-optimised bar charts, demand profile, shift-route chart and tariff-band table."""
+    st.markdown('<div class="ph"><b>Cost optimization · 7-day forecast</b><span>TOU tariff shifting · sktime_XGBoost</span></div>', unsafe_allow_html=True)
+    cols = st.columns(4)
+    cards = [
+        ("Energy shifted", f"{result['total_shifted_kwh']:,.0f} kWh", "Across eligible peak hours", "🔁"),
+        ("Estimated savings", f"₹{result['savings_inr']:,.0f}", f"{result['savings_pct']:.2f}% of forecast energy cost", "💰"),
+        ("Original → optimized cost", f"₹{result['original_cost_inr']:,.0f} → ₹{result['optimised_cost_inr']:,.0f}", "7-day energy charge estimate", "🧾"),
+        ("Peak hourly demand", f"{result['original_peak_kw']:,.0f} → {result['optimised_peak_kw']:,.0f} kW", f"Change: {result['peak_reduction_kw']:,.1f} kW", "📉"),
+    ]
+    for col, (label, value, sub, icon) in zip(cols, cards):
+        with col:
+            st.markdown(f'<div class="kpi"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div>'
+                        f'<div class="v" style="font-size:1.22rem;letter-spacing:-.4px;">{value}</div>'
+                        f'<div class="s">{sub}</div></div>', unsafe_allow_html=True)
+
+    df, summary = result["df"], result["band_summary"]
+    st.write("")
+
+    # Original (grey) vs optimised (blue) energy and cost, grouped by tariff band
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("Energy consumption breakdown", "Electricity cost breakdown"), horizontal_spacing=0.15)
+    fig.add_trace(go.Bar(name="Original", x=summary["tariff_band"], y=summary["original_energy_kwh"], marker_color=PLANT_BAR_ORIGINAL,
+                         hovertemplate="%{x}<br>Original: %{y:,.1f} kWh<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Bar(name="Optimised", x=summary["tariff_band"], y=summary["optimised_energy_kwh"], marker_color=PLANT_BAR_OPTIMISED,
+                         hovertemplate="%{x}<br>Optimised: %{y:,.1f} kWh<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Bar(name="Original Cost", x=summary["tariff_band"], y=summary["original_cost_inr"], marker_color=PLANT_BAR_ORIGINAL, showlegend=False,
+                         hovertemplate="%{x}<br>Original: ₹%{y:,.0f}<extra></extra>"), row=1, col=2)
+    fig.add_trace(go.Bar(name="Optimised Cost", x=summary["tariff_band"], y=summary["optimised_cost_inr"], marker_color=PLANT_BAR_OPTIMISED, showlegend=False,
+                         hovertemplate="%{x}<br>Optimised: ₹%{y:,.0f}<extra></extra>"), row=1, col=2)
+    fig.update_layout(title="Original vs optimized energy and cost", barmode="group")
+    fig.update_yaxes(title_text="Energy (kWh)", row=1, col=1)
+    fig.update_yaxes(title_text="Cost (₹)", row=1, col=2)
+    show_figure(plant_style_plot(fig, 430), key="plant_cost_bars")
+
+    # Original / optimised demand with the tariff on the secondary axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=df.index, y=df["original_load_kw"], name="Original Demand", mode="lines", line=dict(color=PLANT_BAR_ORIGINAL, width=1.7, dash="dash")), secondary_y=False)
+    fig.add_trace(go.Scatter(x=df.index, y=df["optimised_load_kw"], name="Optimised Demand", mode="lines", line=dict(color=GOOD_COLOR, width=2.3)), secondary_y=False)
+    fig.add_trace(go.Scatter(x=df.index, y=df["rate_inr"], name="Tariff (₹/kWh)", mode="lines", line=dict(color=WARN_COLOR, width=2, shape="hv")), secondary_y=True)
+    fig.add_hline(y=result["benchmark_kw"], line_dash="dot", line_color=BLUE_COLOR, annotation_text=f"Off-Peak max benchmark {result['benchmark_kw']:,.0f} kW",
+                  annotation_position="top left", secondary_y=False)
+    fig.update_layout(title="Original vs optimized demand profile with tariff overlay", xaxis_title="Timestamp")
+    fig.update_yaxes(title_text="Demand (kW)", secondary_y=False)
+    fig.update_yaxes(title_text="Tariff (₹/kWh)", secondary_y=True)
+    show_figure(plant_style_plot(fig, 430), key="plant_cost_demand")
+
+    # Where the load was shifted
+    st.markdown('<div class="ph"><b>Where the load was shifted</b><span>kWh moved from each source period into each receiving period</span></div>', unsafe_allow_html=True)
+    route = result["route_summary"]
+    if route.empty:
+        st.info("No eligible load shift was made under the current tariff and receiving-capacity rules.")
+    else:
+        route = route.sort_values("shifted_kwh", ascending=False)
+        fig = go.Figure(go.Bar(x=route["route"], y=route["shifted_kwh"], marker_color=PLANT_BAR_OPTIMISED,
+                               text=route["shifted_kwh"].map(lambda v: f"{v:,.0f} kWh"), textposition="outside",
+                               hovertemplate="%{x}<br>Shifted: %{y:,.2f} kWh<extra></extra>"))
+        fig.update_layout(title="Load shifted by source and destination", xaxis_title="Shift route", yaxis_title="Shifted energy (kWh)", showlegend=False)
+        show_figure(plant_style_plot(fig, 330), key="plant_cost_routes")
+
+    with st.expander("Tariff-band detail"):
+        show = summary.rename(columns={
+            "tariff_band": "Tariff band", "hours": "Hours", "rate_inr": "Rate (₹/kWh)",
+            "original_energy_kwh": "Original energy (kWh)", "optimised_energy_kwh": "Optimized energy (kWh)",
+            "original_cost_inr": "Original cost (₹)", "optimised_cost_inr": "Optimized cost (₹)",
+            "energy_change_kwh": "Energy change (kWh)", "cost_change_inr": "Cost change (₹)"})
+        st.dataframe(show.round(2), width="stretch", hide_index=True)
+    st.caption(f"Off-Peak benchmark: {result['benchmark_kw']:,.2f} kW (maximum individual hourly Off-Peak forecast). "
+               "Each hourly kW value is treated as kWh for a one-hour interval. Demand-charge components are not included.")
 
 
 def render_plant_load_tab():
@@ -1399,10 +1486,11 @@ def render_plant_load_tab():
     session_key, hash_key = "plant_load_model_result", "plant_load_model_hash"
     has_current_result = st.session_state.get(session_key) is not None and st.session_state.get(hash_key) == file_hash
 
-    # compact controls at the top right: [DL checkbox] [Run button]
-    _spacer, col_dl, col_run = st.columns([7, 1.7, 1.9], vertical_alignment="center")
-    with col_dl: include_deep = st.checkbox("Include DL models", value=False, key="plant_include_deep")
-    with col_run: run_clicked = st.button("Run model comparison", type="primary", key="plant_run_models")
+    # controls in the top-right corner, one below the other: [DL checkbox] then [Run button]
+    _spacer, col_ctrl = st.columns([4, 1])
+    with col_ctrl:
+        include_deep = st.checkbox("Include DL models", value=False, key="plant_include_deep")
+        run_clicked = st.button("Run model comparison", type="primary", key="plant_run_models", use_container_width=True)
     if run_clicked:
         try:
             with st.spinner("Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…"):
@@ -1419,10 +1507,10 @@ def render_plant_load_tab():
     with st.spinner("Calculating load-shifting opportunities using the sktime_XGBoost forecast…"):
         opt_result = pco.optimize_load_shifting(result["future_forecasts"][plf.BEST_MODEL_NAME])
 
-    pco.render_recommendation(st, opt_result); st.write("")                    # 1) recommendation first
+    plant_render_recommendation(opt_result); st.write("")                    # 1) recommendation first
     plant_render_forecast_kpis(result); st.write("")                           # 2) forecast KPIs
     with st.container(border=True): plant_render_selected_forecast(result)     # 3) 7 days history + 7 days forecast + P90 band
-    pco.render_optimization_results(st, opt_result)                            # 4) cost-optimisation KPIs and charts
+    plant_render_cost_optimization(opt_result)                             # 4) cost-optimisation KPIs and charts
     with st.container(border=True): plant_render_model_comparison(result)      # 5) model evaluation + merged all-models chart
 
 
