@@ -9,7 +9,6 @@ Plant forecasting: the plant tab is drawn at the bottom of this file; ALL plant 
 Files next to app.py: gridsense_forecast.py (the notebooks' models, built on sktime) and gridsense_rules.py (the rule-based phase-balance logic)
 Layout of this file : page setup -> settings -> colours + CSS -> UI helpers -> data loading -> phase maths -> advice text -> forecast helpers -> the page itself
 """
-import hashlib
 import html as html_lib
 import warnings
 from contextlib import contextmanager
@@ -34,6 +33,7 @@ st.set_page_config(page_title="GridSense · Load intelligence", page_icon="⚡",
 APP_DIR = Path(__file__).resolve().parent
 DATA_FILE_NAME = "device_16_full_data.csv"       # used by the existing Overview / Load forecast / Phase balance tabs
 PLANT_HOURLY_DATA_FILE_NAME = "hourly_energy_consumption.csv"  # used only by Plant load forecasting & optimization
+PLANT_INCLUDE_DL = False   # True = also train the slow deep-learning models (TiDE / TSMixer / TFT) in the plant tab; no button needed
 PHASE_KW_COLS = ["RKW", "YKW", "BKW"]
 PHASE_LABEL_BY_COL = {"RKW": "Red", "YKW": "Yellow", "BKW": "Blue"}
 PHASE_LABELS = [PHASE_LABEL_BY_COL[p] for p in PHASE_KW_COLS]
@@ -108,6 +108,10 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 .appbar .logo { width:42px; height:42px; border-radius:12px; display:grid; place-items:center; font-size:1.3rem; background:linear-gradient(135deg,#818CF8,#6366F1 55%,#4F46E5); box-shadow:0 6px 16px -6px rgba(99,102,241,.7); }
 .appbar .t { font-weight:800; font-size:1.2rem; letter-spacing:-.4px; color:#0F172A !important; } .appbar .s { font-size:.78rem; color:#64748B !important; margin-top:-1px; }
 .appbar .sp { flex:1; }
+/* app bar info switches with the tab: device data on tabs 1-3, overall plant kW data on tab 4 */
+.appbar .grp-dev, .appbar .grp-plant { display:contents; } .appbar .grp-plant { display:none; }
+.stApp:has([data-baseweb="tab-list"] [role="tab"]:nth-of-type(4)[aria-selected="true"]) .appbar .grp-dev { display:none; }
+.stApp:has([data-baseweb="tab-list"] [role="tab"]:nth-of-type(4)[aria-selected="true"]) .appbar .grp-plant { display:contents; }
 .chip { display:inline-flex; align-items:center; gap:.35rem; padding:.28rem .7rem; border-radius:999px; font-size:.76rem; font-weight:500; border:1px solid #E6EAF2; background:#F8FAFD; color:#475569 !important; }
 .pill { display:inline-flex; align-items:center; gap:.45rem; padding:.3rem .8rem; border-radius:999px; font-size:.78rem; font-weight:600; }
 .pill.run { background:#E8FAF3; color:#047857 !important; } .pill.idle { background:#F1F4F9; color:#475569 !important; } .pill.warn { background:#FFF4DD; color:#B45309 !important; } .pill.bad { background:#FFE9ED; color:#BE123C !important; }
@@ -934,8 +938,25 @@ latest_balance_table = analyse_balance(smoothed_complete_minutes.iloc[-1][PHASE_
 status_pill_html = (f'<span class="pill run"><span class="dot"></span>Running now</span>' if timeline_stats["now_running"] else
           f'<span class="pill idle"><span class="dot"></span>Idle · last ran {timeline_stats["last_run"]:%d %b %H:%M}</span>')
 clock_chip_html = '<span class="chip">clock assumed</span>' if not has_real_clock else ""
+
+
+@st.cache_data(show_spinner=False)
+def load_plant_series(path_str, mtime):
+    return plf.read_hourly_series(path_str)
+
+
+def plant_appbar_html():
+    """App-bar info shown on the plant tab: the overall hourly kW file instead of the device file."""
+    path = APP_DIR / PLANT_HOURLY_DATA_FILE_NAME
+    try: hourly_kw = load_plant_series(str(path), path.stat().st_mtime)
+    except Exception: return '<span class="pill warn"><span class="dot"></span>Plant data not available</span>'
+    return (f'<span class="pill idle"><span class="dot"></span>Overall plant load · hourly</span><span class="chip">{path.name}</span>'
+            f'<span class="chip">{hourly_kw.index.min():%d %b %Y} → {hourly_kw.index.max():%d %b %Y}</span><span class="chip">{len(hourly_kw):,} hourly readings</span>'
+            f'<span class="chip">average {hourly_kw.mean():,.0f} kW</span><span class="chip">peak {hourly_kw.max():,.0f} kW</span>')
+
+
 app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase balance · plant optimization</div></div><div class="sp"></div>
-{status_pill_html}<span class="chip">{data_file_label}</span><span class="chip">{minute_rows.Timestamps.min():%d %b} → {minute_rows.Timestamps.max():%d %b %Y}</span><span class="chip">{len(minute_rows):,} readings</span>{clock_chip_html}</div>""", unsafe_allow_html=True)
+<span class="grp-dev">{status_pill_html}<span class="chip">{data_file_label}</span><span class="chip">{minute_rows.Timestamps.min():%d %b} → {minute_rows.Timestamps.max():%d %b %Y}</span><span class="chip">{len(minute_rows):,} readings</span>{clock_chip_html}</span><span class="grp-plant">{plant_appbar_html()}</span></div>""", unsafe_allow_html=True)
 
 # three pages: overview, load forecast, phase balance
 tab_overview, tab_load, tab_phase, tab_plant = st.tabs(["Overview", "Load forecast", "Phase balance", "Plant load forecasting & optimization"])
@@ -1318,7 +1339,7 @@ def plant_render_forecast_kpis(result):
     plant_kpi(cols[1], "Actual load · last 7 days", f"{previous_energy / 1000:,.1f} MWh", f"{previous_energy:,.0f} kWh · historical meter data", "📊")
     plant_kpi(cols[2], "Forecast peak demand", f"{peak:,.1f} kW", "Highest hourly average over next 7 days", "📈")
     plant_kpi(cols[3], "Low-demand average", f"{low_average:,.1f} kW", f"Average of the lowest 25% forecast hours ({low_count} hours)", "🌙")
-    plant_kpi(cols[4], "Rolling P90 error", f"{result['latest_p90']:.2f} kW", "90 % of hours miss by less than this", "🎯")
+    plant_kpi(cols[4], "Rolling P90 error", f"± {result['latest_p90']:.2f} kW", "Uncertainty error<br>90 % of hours miss by less than this", "🎯")
 
 
 def plant_render_selected_forecast(result):
@@ -1474,34 +1495,22 @@ def plant_render_cost_optimization(result):
                "Each hourly kW value is treated as kWh for a one-hour interval. Demand-charge components are not included.")
 
 
+@st.cache_data(show_spinner="Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…")
+def run_plant_models(hourly_kw, include_deep):
+    """Runs once per data file / setting and is then served from the cache (no button, no re-training on reruns)."""
+    return plf.run_model_comparison(hourly_kw, include_deep=include_deep)
+
+
 def render_plant_load_tab():
-    """Plant tab entry point: controls, model run, recommendation, KPIs, charts, cost optimisation and model comparison."""
+    """Plant tab entry point: model run (automatic), recommendation, KPIs, charts, cost optimisation and model comparison."""
     data_path = APP_DIR / PLANT_HOURLY_DATA_FILE_NAME
     if not data_path.exists():
         st.error(f"Required file not found: {data_path}. Add {PLANT_HOURLY_DATA_FILE_NAME} to the same folder as app.py."); return
-    file_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()             # a changed CSV invalidates the stored model run
-    try: y = plf.read_hourly_series(data_path)
+    try: y = load_plant_series(str(data_path), data_path.stat().st_mtime)
     except Exception as exc: st.error(str(exc)); return
+    try: result = run_plant_models(y, PLANT_INCLUDE_DL)
+    except Exception as exc: st.error(f"Could not complete the model run: {type(exc).__name__}: {exc}"); return
 
-    session_key, hash_key = "plant_load_model_result", "plant_load_model_hash"
-    has_current_result = st.session_state.get(session_key) is not None and st.session_state.get(hash_key) == file_hash
-
-    # controls in the top-right corner, one below the other: [DL checkbox] then [Run button]
-    _spacer, col_ctrl = st.columns([4, 1])
-    with col_ctrl:
-        include_deep = st.checkbox("Include DL models", value=False, key="plant_include_deep")
-        run_clicked = st.button("Run model comparison", type="primary", key="plant_run_models", use_container_width=True)
-    if run_clicked:
-        try:
-            with st.spinner("Fitting the forecasting models, evaluating the last 7 days and forecasting the next 7 days…"):
-                result = plf.run_model_comparison(y, include_deep=include_deep)
-            st.session_state[session_key], st.session_state[hash_key] = result, file_hash; has_current_result = True
-        except Exception as exc:
-            st.error(f"Could not complete the model run: {type(exc).__name__}: {exc}"); return
-    if not has_current_result:
-        st.info("Click **Run model comparison** (top right) to train/evaluate the models and build the dashboard."); return
-
-    result = st.session_state[session_key]
     if plf.BEST_MODEL_NAME not in result["future_forecasts"].columns:
         st.error("sktime_XGBoost forecast is unavailable; cost optimization cannot run."); return
     with st.spinner("Calculating load-shifting opportunities using the sktime_XGBoost forecast…"):
