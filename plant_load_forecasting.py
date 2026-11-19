@@ -1,7 +1,7 @@
 """Plant hourly-load forecasting: data loading, ML models, DL models, evaluation, P90 uncertainty.
 
 This module has NO Streamlit code, NO charts and NO cost optimisation.
-The dashboard layer (plant_load_visualization.py) imports the public functions below.
+All frontend code lives in app.py, which imports the public functions below.
 
 Input CSV columns: Timestamps and kw (hourly observations).
 
@@ -47,7 +47,7 @@ ML_MODEL_ORDER = [
 ]
 DL_MODEL_ORDER = ["darts_TiDE", "darts_TSMixer", "darts_TFT"]
 MODEL_ORDER = ML_MODEL_ORDER + DL_MODEL_ORDER
-DEEP_MODELS = DL_MODEL_ORDER        # kept under the old name for the dashboard layer
+DEEP_MODELS = DL_MODEL_ORDER        # kept under the old name for app.py
 
 # Saved best parameters from the notebook (TUNE=0) - ML models.
 ML_PARAMS = {
