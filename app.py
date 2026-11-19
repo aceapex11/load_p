@@ -5,6 +5,7 @@ Overview        : load timeline (kW, phases, current, voltage, imbalance) and wh
 Load forecast   : hourly total kW, Exponential Smoothing (sktime) tested on the last 168 hours, power advice
 Phase balance   : ONE page - measured imbalance, 7-day R / Y / B forecast, imbalance alarms,
                   and a rule-based action plan: what is out of phase, why, what to do now, when to do what, what can happen
+Plant forecasting: plant_load_visualization.py draws the tab; plant_load_forecasting.py holds the ML part and the DL part
 Files next to app.py: gridsense_forecast.py (the notebooks' models, built on sktime) and gridsense_rules.py (the rule-based phase-balance logic)
 Layout of this file : page setup -> settings -> colours + CSS -> UI helpers -> data loading -> phase maths -> advice text -> forecast helpers -> the page itself
 """
@@ -19,7 +20,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 import gridsense_forecast as gf
 import gridsense_rules as gr
-import plant_load_forecasting as plf
+import plant_load_visualization as plv      # draws the Plant load forecasting & optimization tab (uses plant_load_forecasting.py)
 import plant_cost_optimization as pco
 
 # ------------------------------------------------------------------ PAGE SETUP
@@ -70,6 +71,7 @@ PHASE_PARAMETER_COLS = {"Load (kW)": ["RKW", "YKW", "BKW"], "Current (A)": ["I1"
 #   accent   : indigo (ACCENT = measured load + forecasts + selected buttons; ACCENT_LIGHT = its tint)
 #   status   : green = good, amber = warning, rose = alarm / bad   (status only)
 #   phases   : R rose, Y amber, B blue                              (phase charts only)
+#   bars     : purple bars, yellow highlight bar                    (every bar chart)
 TEXT_COLOR, MUTED_COLOR, GRID_COLOR = "#0F172A", "#64748B", "#EDF0F6"
 
 
@@ -78,6 +80,7 @@ LOAD_COLOR = FORECAST_COLOR = ACCENT
 CONFIDENCE_Z, CONFIDENCE_TEXT = 1.96, "95 %"                              # width of the forecast interval
 GOOD_COLOR, WARN_COLOR, BAD_COLOR = "#10B981", "#F59E0B", "#F43F5E"
 BLUE_COLOR = "#3B82F6"
+BAR_PURPLE, BAR_YELLOW = "#7C3AED", "#FACC15"                             # bar charts: normal bars purple, the highlighted (peak) bar yellow
 IDLE_COLOR, NO_DATA_COLOR, AXIS_COLOR = "#CBD5E1", BAD_COLOR, "#E2E8F0"            # idle share (slate), NO DATA (red), axis lines / empty bars
 
 
@@ -186,13 +189,14 @@ def panel(title, sub="", key="p"):
 
 
 def style_figure(fig, h=440, legend=True, legend_y=1.02, top=95):
-    """Title sits at the top-left; the legend gets its own row just above the plot, so they never overlap."""
+    """Title sits at the top-left; the legend is a vertical column on the RIGHT of the plot, so it never overlaps the lines.
+    (legend_y is kept only so older calls still work.)"""
     # one shared look for every chart
     fig.update_layout(height=h + (top - 50), template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", hovermode="x unified",
-                      font=dict(family="Inter, sans-serif", size=12.5, color=TEXT_COLOR), margin=dict(l=10, r=10, t=top, b=10),
+                      font=dict(family="Inter, sans-serif", size=12.5, color=TEXT_COLOR), margin=dict(l=10, r=150 if legend else 10, t=top, b=10),
                       title=dict(x=0, xanchor="left", y=0.985, yanchor="top", font=dict(size=15, color=TEXT_COLOR)),
                       hoverlabel=dict(bgcolor="#FFFFFF", bordercolor=AXIS_COLOR, font=dict(family="Inter, sans-serif", size=12, color=TEXT_COLOR)),
-                      legend=dict(orientation="h", x=0, xanchor="left", y=legend_y, yanchor="bottom", bgcolor="rgba(0,0,0,0)"), showlegend=legend)
+                      legend=dict(orientation="v", x=1.02, xanchor="left", y=1, yanchor="top", bgcolor="rgba(0,0,0,0)"), showlegend=legend)
     fig.update_xaxes(gridcolor=GRID_COLOR, zeroline=False, linecolor=AXIS_COLOR, showspikes=False, tickfont=dict(color=MUTED_COLOR), title_font=dict(color=MUTED_COLOR)); fig.update_yaxes(gridcolor=GRID_COLOR, zeroline=False, tickfont=dict(color=MUTED_COLOR), title_font=dict(color=MUTED_COLOR))
     return fig
 
@@ -969,7 +973,7 @@ with tab_overview:
         fig = go.Figure(go.Pie(labels=["Running", "Idle", "No data"], values=[timeline_stats["run_min"], timeline_stats["idle_min"], timeline_stats["nodata_min"]], hole=.68, sort=False, marker=dict(colors=[GOOD_COLOR, IDLE_COLOR, NO_DATA_COLOR], line=dict(color="#fff", width=2)),
                              textinfo="percent", hovertemplate="%{label}<br>%{value:,} min<extra></extra>"))
         fig.update_layout(hovermode="closest", annotations=[dict(text=f"<b>{timeline_stats['util']:.1f}%</b><br><span style='font-size:11px;color:{MUTED_COLOR}'>uptime</span>", showarrow=False, font=dict(size=22))])
-        show_figure(style_figure(fig, 400, True, top=40).update_layout(legend=dict(orientation="h", y=-0.08, x=0.1), margin=dict(l=10, r=10, t=40, b=60)))
+        show_figure(style_figure(fig, 400, True, top=40).update_layout(legend=dict(orientation="v", x=1.02, xanchor="left", y=0.5, yanchor="middle"), margin=dict(l=10, r=110, t=40, b=10)))
 
 # ================================================================== LOAD FORECAST (hourly total kW - Exponential Smoothing)
 with tab_load:
@@ -1025,10 +1029,10 @@ with tab_load:
             '<div class="ph" style="margin:.45rem 0 .2rem"><b>Daily demand by time of day</b></div>',
             unsafe_allow_html=True,
         )
-        st.caption("Each bar compares the same one-hour slot across all forecast days. The highlighted bar is the recurring peak hour.")
+        st.caption("Each bar compares the same one-hour slot across all forecast days. The highlighted (yellow) bar is the recurring peak hour.")
         if not hourly_profile.empty:
             peak_position = int(hourly_profile["Avg kW"].to_numpy().argmax())
-            bar_colors = [WARN_COLOR if i == peak_position else ACCENT for i in range(len(hourly_profile))]
+            bar_colors = [BAR_YELLOW if i == peak_position else BAR_PURPLE for i in range(len(hourly_profile))]     # purple bars, yellow peak bar
             customdata = [
                 [int(row.Days), row["Daily detail"]]
                 for _, row in hourly_profile.iterrows()
@@ -1260,4 +1264,5 @@ with tab_phase:
 
 # ================================================================== PLANT LOAD FORECASTING & COST OPTIMIZATION
 with tab_plant:
-    plf.render_plant_load_tab(st, APP_DIR, pco, PLANT_HOURLY_DATA_FILE_NAME)
+    # the tab is drawn by plant_load_visualization.py (charts) on top of plant_load_forecasting.py (ML part + DL part)
+    plv.render_plant_load_tab(st, APP_DIR, pco, PLANT_HOURLY_DATA_FILE_NAME)
