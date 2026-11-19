@@ -4,19 +4,19 @@ Uses the tariff windows and load-shifting logic from the user's notebook/current
 agreed logic: no 15% cap and no fixed kW cap; same-day shifting only; destinations
 cannot exceed the maximum hourly Off-Peak forecast load.
 
+This module has NO Streamlit code and NO charts. All plant-tab frontend (banner, KPI cards,
+charts, tables) lives in app.py, which calls optimize_load_shifting() below.
+
 File layout
 -----------
-1. SETTINGS + TARIFF       constants, colours, tariff lookup
-2. OPTIMISATION            optimize_load_shifting (pure pandas, no Streamlit)
-3. CHARTS + DASHBOARD      _style, render_recommendation, render_optimization_results
+1. SETTINGS + TARIFF       constants, tariff lookup
+2. OPTIMISATION            optimize_load_shifting (pure pandas)
 """
 from __future__ import annotations
 
 from typing import Any
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # =====================================================================================
 # 1. SETTINGS + TARIFF
@@ -25,15 +25,6 @@ TARIFF_BANDS = ["Off-peak", "Morning", "Morning peak", "Day", "Evening peak"]
 TARIFF_ORDER = {name: i for i, name in enumerate(TARIFF_BANDS)}
 MIN_TARIFF_DIFF = 1.0
 INTERVAL_HOURS = 1.0
-TEXT = "#0F172A"
-MUTED = "#64748B"
-GRID = "#EDF0F6"
-ACCENT = "#6366F1"
-GREEN = "#10B981"
-BLUE = "#3B82F6"
-AMBER = "#F59E0B"
-PURPLE = "#7C3AED"      # bar charts: optimised / main bars
-YELLOW = "#FACC15"      # bar charts: original / comparison bars
 
 
 def get_tariff_rate(dt: pd.Timestamp) -> tuple[str, float]:
@@ -200,160 +191,3 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
         "optimised_peak_kw": optimised_peak,
         "peak_reduction_kw": original_peak - optimised_peak,
     }
-
-
-# =====================================================================================
-# 3. CHARTS + DASHBOARD
-# =====================================================================================
-def _style(fig: go.Figure, height: int = 390) -> go.Figure:
-    """Shared chart look. The legend is a column on the RIGHT so it never overlaps the plot."""
-    fig.update_layout(
-        template="plotly_white", height=height, paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)", font=dict(family="Inter, sans-serif", size=12, color=TEXT),
-        margin=dict(l=14, r=190, t=70, b=30), hovermode="x unified",   # r=190 reserves room for the legend
-        title=dict(x=0, xanchor="left", font=dict(size=16, color=TEXT)),
-        legend=dict(orientation="v", x=1.02, xanchor="left", y=1, yanchor="top",
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
-        hoverlabel=dict(bgcolor="white", bordercolor=GRID, font=dict(color=TEXT)),
-    )
-    fig.update_xaxes(gridcolor=GRID, linecolor="#E2E8F0", tickfont=dict(color=MUTED))
-    fig.update_yaxes(gridcolor=GRID, zeroline=False, tickfont=dict(color=MUTED))
-    return fig
-
-
-def render_recommendation(st_module, result: dict[str, Any]) -> None:
-    """Show the green / amber recommendation banner (shift opportunity found or not)."""
-    shifted = result["total_shifted_kwh"]
-    saving = result["savings_inr"]
-    if shifted > 1e-6 and saving > 0:
-        title = "Recommended: shift eligible peak-period load"
-        text = (
-            f"The sktime_XGBoost 7-day forecast indicates that approximately {shifted:,.0f} kWh can be shifted "
-            f"from Morning Peak / Evening Peak into eligible Morning / Day hours. Estimated energy-charge saving: "
-            f"₹{saving:,.0f} ({result['savings_pct']:.2f}%)."
-        )
-        status = "Recommended opportunity"
-        bg, border, fg = "#E8FAF3", "#A7F3D0", "#047857"
-    else:
-        title = "No cost-saving shift identified"
-        text = "Under the configured time-of-use tariffs and Off-Peak receiving-load benchmark, no eligible load transfer produced a positive saving."
-        status = "No shift opportunity"
-        bg, border, fg = "#FFF4DD", "#FDE68A", "#B45309"
-
-    st_module.markdown(
-        f'<div style="background:{bg};border:1px solid {border};border-radius:16px;padding:16px 18px;margin:4px 0 14px;">'
-        f'<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
-        f'<div style="font-size:1rem;font-weight:750;color:{TEXT};">{title}</div>'
-        f'<span style="font-size:.75rem;font-weight:700;color:{fg};">{status}</span></div>'
-        f'<div style="font-size:.88rem;color:#475569;margin-top:7px;line-height:1.5;">{text}</div>'
-        f'<div style="font-size:.75rem;color:#64748B;margin-top:6px;">Indicative forecast-based estimate using the configured tariffs. Confirm equipment/process flexibility before applying any schedule change.</div>'
-        f'</div>', unsafe_allow_html=True
-    )
-
-
-def render_optimization_results(st_module, result: dict[str, Any]) -> None:
-    """Draw the cost-optimisation KPIs, the energy/cost bar charts, the demand profile and the shift-route bar chart."""
-    st_module.markdown('<div class="ph"><b>Cost optimization · 7-day forecast</b><span>TOU tariff shifting · sktime_XGBoost</span></div>', unsafe_allow_html=True)
-    cols = st_module.columns(4)
-    metrics = [
-        ("Energy shifted", f"{result['total_shifted_kwh']:,.0f} kWh", "Across eligible peak hours", "🔁"),
-        ("Estimated savings", f"₹{result['savings_inr']:,.0f}", f"{result['savings_pct']:.2f}% of forecast energy cost", "💰"),
-        ("Original → optimized cost", f"₹{result['original_cost_inr']:,.0f} → ₹{result['optimised_cost_inr']:,.0f}", "7-day energy charge estimate", "🧾"),
-        ("Peak hourly demand", f"{result['original_peak_kw']:,.0f} → {result['optimised_peak_kw']:,.0f} kW", f"Change: {result['peak_reduction_kw']:,.1f} kW", "📉"),
-    ]
-    for col, (label, value, sub, icon) in zip(cols, metrics):
-        with col:
-            st_module.markdown(
-                f'<div class="kpi"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div>'
-                f'<div class="v" style="font-size:1.22rem;letter-spacing:-.4px;">{value}</div>'
-                f'<div class="s">{sub}</div></div>', unsafe_allow_html=True
-            )
-
-    df = result["df"]
-    summary = result["band_summary"]
-    st_module.write("")
-
-    # Original (yellow) vs optimized (purple) energy and cost, grouped by tariff band.
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=("Energy consumption breakdown", "Electricity cost breakdown"),
-        horizontal_spacing=0.15,
-    )
-    fig.add_trace(go.Bar(
-        name="Original", x=summary["tariff_band"], y=summary["original_energy_kwh"],
-        marker_color=YELLOW, hovertemplate="%{x}<br>Original: %{y:,.1f} kWh<extra></extra>"
-    ), row=1, col=1)
-    fig.add_trace(go.Bar(
-        name="Optimised", x=summary["tariff_band"], y=summary["optimised_energy_kwh"],
-        marker_color=PURPLE, hovertemplate="%{x}<br>Optimised: %{y:,.1f} kWh<extra></extra>"
-    ), row=1, col=1)
-    fig.add_trace(go.Bar(
-        name="Original Cost", x=summary["tariff_band"], y=summary["original_cost_inr"],
-        marker_color=YELLOW, showlegend=False,
-        hovertemplate="%{x}<br>Original: ₹%{y:,.0f}<extra></extra>"
-    ), row=1, col=2)
-    fig.add_trace(go.Bar(
-        name="Optimised Cost", x=summary["tariff_band"], y=summary["optimised_cost_inr"],
-        marker_color=PURPLE, showlegend=False,
-        hovertemplate="%{x}<br>Optimised: ₹%{y:,.0f}<extra></extra>"
-    ), row=1, col=2)
-    fig.update_layout(title="Original vs optimized energy and cost", barmode="group")
-    fig.update_yaxes(title_text="Energy (kWh)", row=1, col=1)
-    fig.update_yaxes(title_text="Cost (₹)", row=1, col=2)
-    st_module.plotly_chart(_style(fig, 430), width="stretch", config={"displayModeBar": False})
-
-    # Combined original/optimized demand with tariff on the secondary axis.
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["original_load_kw"], name="Original Demand",
-        mode="lines", line=dict(color="#94A3B8", width=1.7, dash="dash"),
-    ), secondary_y=False)
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["optimised_load_kw"], name="Optimised Demand",
-        mode="lines", line=dict(color=GREEN, width=2.3),
-    ), secondary_y=False)
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["rate_inr"], name="Tariff (₹/kWh)",
-        mode="lines", line=dict(color=AMBER, width=2, shape="hv"),
-    ), secondary_y=True)
-    fig.add_hline(y=result["benchmark_kw"], line_dash="dot", line_color=BLUE,
-                  annotation_text=f"Off-Peak max benchmark {result['benchmark_kw']:,.0f} kW",
-                  annotation_position="top left", secondary_y=False)
-    fig.update_layout(title="Original vs optimized demand profile with tariff overlay", xaxis_title="Timestamp")
-    fig.update_yaxes(title_text="Demand (kW)", secondary_y=False)
-    fig.update_yaxes(title_text="Tariff (₹/kWh)", secondary_y=True)
-    st_module.plotly_chart(_style(fig, 430), width="stretch", config={"displayModeBar": False})
-
-    # Route-level bar chart makes source-to-destination shifts explicit (the route table was removed).
-    st_module.markdown('<div class="ph"><b>Where the load was shifted</b><span>kWh moved from each source period into each receiving period</span></div>', unsafe_allow_html=True)
-    route = result["route_summary"]
-    if route.empty:
-        st_module.info("No eligible load shift was made under the current tariff and receiving-capacity rules.")
-    else:
-        route = route.sort_values("shifted_kwh", ascending=False)
-        fig = go.Figure(go.Bar(
-            x=route["route"], y=route["shifted_kwh"],
-            marker_color=PURPLE,
-            text=route["shifted_kwh"].map(lambda v: f"{v:,.0f} kWh"),
-            textposition="outside",
-            hovertemplate="%{x}<br>Shifted: %{y:,.2f} kWh<extra></extra>",
-        ))
-        fig.update_layout(title="Load shifted by source and destination", xaxis_title="Shift route", yaxis_title="Shifted energy (kWh)", showlegend=False)
-        st_module.plotly_chart(_style(fig, 330), width="stretch", config={"displayModeBar": False})
-
-    with st_module.expander("Tariff-band detail"):
-        show = summary.rename(columns={
-            "tariff_band": "Tariff band",
-            "original_energy_kwh": "Original energy (kWh)",
-            "optimised_energy_kwh": "Optimized energy (kWh)",
-            "original_cost_inr": "Original cost (₹)",
-            "optimised_cost_inr": "Optimized cost (₹)",
-            "energy_change_kwh": "Energy change (kWh)",
-            "cost_change_inr": "Cost change (₹)",
-        })
-        st_module.dataframe(show.round(2), width="stretch", hide_index=True)
-
-    st_module.caption(
-        f"Off-Peak benchmark: {result['benchmark_kw']:,.2f} kW (maximum individual hourly Off-Peak forecast). "
-        "Each hourly kW value is treated as kWh for a one-hour interval. Demand-charge components are not included."
-    )
