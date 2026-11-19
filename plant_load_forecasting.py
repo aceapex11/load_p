@@ -464,7 +464,7 @@ def rolling_error_uncertainty(actual: pd.Series, predicted: np.ndarray,
 # =====================================================================================
 def _evaluate_model_group(names: list[str], family: str, y: pd.Series, split: int,
                           predictions: dict, future_predictions: dict,
-                          timing_rows: list, status_rows: list, families: dict) -> None:
+                          timing_rows: list, status_rows: list) -> None:
     """Run every model in `names`: score it on the held-out last 168 h, refit on all data, forecast the next 168 h.
 
     Results are appended in place to the shared dicts / lists. A model that raises is recorded as Failed
@@ -479,7 +479,6 @@ def _evaluate_model_group(names: list[str], family: str, y: pd.Series, split: in
                 raise ValueError("Model returned a forecast with an unexpected length.")
             predictions[name] = np.asarray(test_pred, dtype=float)
             future_predictions[name] = np.asarray(future_pred, dtype=float)
-            families[name] = family
             timing_rows.append({
                 "model": name,
                 "fit_time_s": float(fit_full),
@@ -514,13 +513,12 @@ def run_model_comparison(y: pd.Series, include_deep: bool = False) -> dict[str, 
     future_predictions: dict[str, np.ndarray] = {}
     timing_rows: list = []
     status_rows: list = []
-    families: dict[str, str] = {}
 
     # ---- Part A: ML models
-    _evaluate_model_group(ML_MODEL_ORDER, "ML", y, split, predictions, future_predictions, timing_rows, status_rows, families)
+    _evaluate_model_group(ML_MODEL_ORDER, "ML", y, split, predictions, future_predictions, timing_rows, status_rows)
     # ---- Part B: DL models (optional, slow)
     if include_deep:
-        _evaluate_model_group(DL_MODEL_ORDER, "DL", y, split, predictions, future_predictions, timing_rows, status_rows, families)
+        _evaluate_model_group(DL_MODEL_ORDER, "DL", y, split, predictions, future_predictions, timing_rows, status_rows)
 
     if BEST_MODEL_NAME not in future_predictions:
         errors = [r["details"] for r in status_rows if r["model"] == BEST_MODEL_NAME]
@@ -529,19 +527,11 @@ def run_model_comparison(y: pd.Series, include_deep: bool = False) -> dict[str, 
             + (errors[0] if errors else "Install the notebook dependencies and retry.")
         )
 
-    # Notebook baselines (not trainable, so no training time).
-    baselines = {
-        "Baseline_naive_24h": np.tile(y.iloc[split - 24:split].values, HORIZON_HOURS // 24),
-        "Baseline_naive_168h": y.iloc[split - HORIZON_HOURS:split].values,
-    }
     actual_vs_pred = pd.DataFrame({"Actual": actual.to_numpy()}, index=test_index)
     for name, pred in predictions.items():
         actual_vs_pred[name] = pred
-    for name, pred in baselines.items():
-        actual_vs_pred[name] = pred
-        families[name] = "Baseline"
 
-    metric_rows = [{"model": name, "family": families.get(name, ""), **_scores(actual_vs_pred["Actual"], actual_vs_pred[name])}
+    metric_rows = [{"model": name, **_scores(actual_vs_pred["Actual"], actual_vs_pred[name])}
                    for name in actual_vs_pred.columns[1:]]
     metrics = pd.DataFrame(metric_rows).sort_values("MAE", na_position="last").reset_index(drop=True)
 
