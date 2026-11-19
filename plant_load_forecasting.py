@@ -1,8 +1,8 @@
 """Plant load forecasting: notebook-matched model comparison and 7-day forecasts.
 
 The six forecasters and saved hyperparameters mirror energy_forecasting_final.ipynb.
-Seven deep-learning models from kw_framework_comparison.ipynb (Darts / NeuralForecast TiDE,
-TSMixer, TFT and sktime TFT) are added after them and run through the same holdout + refit flow.
+Three Darts deep-learning models from kw_framework_comparison.ipynb (TiDE, TSMixer, TFT) are added
+after them and run through the same holdout + refit flow.
 The app uses the saved tuned parameters (the notebook's default TUNE=0 workflow).
 Expected CSV columns: Timestamps, kw. Hourly observations are required.
 """
@@ -30,14 +30,10 @@ MODEL_ORDER = [
     "mlforecast_XGBoost",
     "sktime_HoltWinters",
     "TBATS",
-    # deep-learning models from the framework-comparison notebook
+    # Darts deep-learning models from the framework-comparison notebook
     "darts_TiDE",
     "darts_TSMixer",
     "darts_TFT",
-    "neuralforecast_TiDE",
-    "neuralforecast_TSMixer",
-    "neuralforecast_TFT",
-    "sktime_TFT",
 ]
 
 # Saved best parameters from the uploaded notebook (TUNE=0).
@@ -74,11 +70,6 @@ BEST_PARAMS = {
     "darts_TSMixer": {"hidden_size": 64, "ff_size": 64, "num_blocks": 2, "dropout": 0.1, "lr": 1e-3},
     "darts_TFT": {"hidden_size": 32, "lstm_layers": 1, "num_attention_heads": 4, "hidden_continuous_size": 16,
                   "dropout": 0.1, "lr": 1e-3},
-    "neuralforecast_TiDE": {"hidden_size": 256, "num_encoder_layers": 2, "num_decoder_layers": 2, "dropout": 0.1},
-    "neuralforecast_TSMixer": {"num_blocks": 2, "ff_size": 64, "dropout": 0.1},   # NeuralForecast TSMixerx
-    "neuralforecast_TFT": {"hidden_size": 32, "num_attention_heads": 4, "dropout": 0.1},
-    "sktime_TFT": {"hidden_size": 32, "lstm_layers": 1, "num_attention_heads": 4, "hidden_continuous_size": 16,
-                   "dropout": 0.1, "lr": 1e-3, "epochs": 5},
 }
 
 DEEP_MODELS = [m for m in MODEL_ORDER if m.split("_", 1)[-1] in ("TiDE", "TSMixer", "TFT")]
@@ -254,82 +245,6 @@ def _run_darts_deep(name: str, y_hist: pd.Series, horizon: int):
     return np.asarray(out, dtype=float), fit_s, predict_s, 0.0
 
 
-def _run_neuralforecast_deep(name: str, y_hist: pd.Series, horizon: int):
-    """NeuralForecast TiDE / TSMixerx / TFT with calendar future exogenous variables."""
-    from neuralforecast import NeuralForecast
-    from neuralforecast.losses.pytorch import MSE
-    from neuralforecast.models import TFT as NF_TFT, TiDE as NF_TiDE, TSMixerx as NF_TSMixerx
-
-    kind = name.split("_", 1)[1]
-    p = BEST_PARAMS[name]
-    n = len(y_hist)
-    val_len = _deep_val_len(n, horizon)
-    steps_per_epoch = max(1, (n - val_len) // DEEP_BATCH_SIZE)
-    common = dict(
-        h=horizon, input_size=DEEP_INPUT_HOURS, loss=MSE(), learning_rate=DEEP_LR, batch_size=DEEP_BATCH_SIZE,
-        max_steps=DEEP_EPOCHS * steps_per_epoch, val_check_steps=steps_per_epoch,
-        early_stop_patience_steps=DEEP_PATIENCE if val_len else -1, scaler_type="standard",
-        random_seed=DEEP_SEED, futr_exog_list=CAL_COLS, hist_exog_list=None,
-        enable_progress_bar=False, enable_model_summary=False,
-    )
-    if kind == "TiDE":
-        model = NF_TiDE(hidden_size=p["hidden_size"], num_encoder_layers=p["num_encoder_layers"],
-                        num_decoder_layers=p["num_decoder_layers"], dropout=p["dropout"], **common)
-    elif kind == "TSMixer":
-        model = NF_TSMixerx(n_series=1, n_block=p["num_blocks"], ff_dim=p["ff_size"], dropout=p["dropout"], **common)
-    else:
-        model = NF_TFT(hidden_size=p["hidden_size"], n_head=p["num_attention_heads"], dropout=p["dropout"], **common)
-
-    train_df = pd.concat([pd.DataFrame({"y": y_hist.values}, index=y_hist.index), _calendar(y_hist.index)], axis=1)
-    train_df.index.name = "ds"
-    train_df = train_df.reset_index()
-    train_df.insert(0, "unique_id", "kw")
-    future_idx = pd.date_range(y_hist.index[-1] + pd.Timedelta(hours=1), periods=horizon, freq="h")
-    futr_df = _calendar(future_idx)
-    futr_df.index.name = "ds"
-    futr_df = futr_df.reset_index()
-    futr_df.insert(0, "unique_id", "kw")
-
-    nf = NeuralForecast(models=[model], freq="h")
-    t = time.perf_counter()
-    nf.fit(df=train_df, val_size=val_len)
-    fit_s = time.perf_counter() - t
-    t = time.perf_counter()
-    pred = nf.predict(futr_df=futr_df)
-    predict_s = time.perf_counter() - t
-    if "unique_id" not in pred.columns:
-        pred = pred.reset_index()
-    pred = pred.sort_values("ds")
-    col = [c for c in pred.columns if c not in ("unique_id", "ds", "cutoff", "y")][0]
-    return pred[col].to_numpy(dtype=float), fit_s, predict_s, 0.0
-
-
-def _run_sktime_tft(y_hist: pd.Series, horizon: int):
-    """sktime TFT (pytorch-forecasting wrapper): KW history + calendar features, fixed epoch budget."""
-    from sktime.forecasting.base import ForecastingHorizon
-    from sktime.forecasting.pytorchforecasting import PytorchForecastingTFT
-
-    p = BEST_PARAMS["sktime_TFT"]
-    future_idx = pd.date_range(y_hist.index[-1] + pd.Timedelta(hours=1), periods=horizon, freq="h")
-    fh = ForecastingHorizon(np.arange(1, horizon + 1), is_relative=True)
-    model = PytorchForecastingTFT(
-        model_params={"hidden_size": p["hidden_size"], "lstm_layers": p["lstm_layers"],
-                      "attention_head_size": p["num_attention_heads"], "dropout": p["dropout"],
-                      "hidden_continuous_size": p["hidden_continuous_size"], "learning_rate": p["lr"]},
-        dataset_params={"max_encoder_length": DEEP_INPUT_HOURS},
-        trainer_params={"max_epochs": p["epochs"], "accelerator": "auto", "enable_progress_bar": False},
-        train_to_dataloader_params={"batch_size": DEEP_BATCH_SIZE},
-        validation_to_dataloader_params={"batch_size": DEEP_BATCH_SIZE},
-    )
-    t = time.perf_counter()
-    model.fit(y=y_hist, X=_calendar(y_hist.index), fh=fh)
-    fit_s = time.perf_counter() - t
-    t = time.perf_counter()
-    out = np.asarray(model.predict(fh=fh, X=_calendar(future_idx))).ravel()[:horizon]
-    predict_s = time.perf_counter() - t
-    return out.astype(float), fit_s, predict_s, 0.0
-
-
 def _run_model(name: str, y_hist: pd.Series, horizon: int = HORIZON_HOURS):
     """Return forecast array and fit/predict/feature-build timings for one model."""
     p = BEST_PARAMS[name]
@@ -435,12 +350,6 @@ def _run_model(name: str, y_hist: pd.Series, horizon: int = HORIZON_HOURS):
 
     if name in ("darts_TiDE", "darts_TSMixer", "darts_TFT"):
         return _run_darts_deep(name, y_hist, horizon)
-
-    if name in ("neuralforecast_TiDE", "neuralforecast_TSMixer", "neuralforecast_TFT"):
-        return _run_neuralforecast_deep(name, y_hist, horizon)
-
-    if name == "sktime_TFT":
-        return _run_sktime_tft(y_hist, horizon)
 
     raise KeyError(f"Unknown forecasting model: {name}")
 
