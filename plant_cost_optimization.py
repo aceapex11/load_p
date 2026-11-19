@@ -21,8 +21,18 @@ import pandas as pd
 # =====================================================================================
 # 1. SETTINGS + TARIFF
 # =====================================================================================
-TARIFF_BANDS = ["Off-peak", "Morning", "Morning peak", "Day", "Evening peak"]
+# Single source of truth for the tariff: (band, start hour, end hour, rate in INR per kWh). Off-peak wraps past midnight.
+TARIFF_SCHEDULE = [
+    ("Off-peak",     22, 6,  6.50),
+    ("Morning",       6, 9,  8.00),
+    ("Morning peak",  9, 12, 9.50),
+    ("Day",          12, 18, 8.00),
+    ("Evening peak", 18, 22, 10.00),
+]
+TARIFF_BANDS = [b[0] for b in TARIFF_SCHEDULE]
 TARIFF_ORDER = {name: i for i, name in enumerate(TARIFF_BANDS)}
+TARIFF_RATES = {b: rate for b, _, _, rate in TARIFF_SCHEDULE}
+TARIFF_TIME_WINDOWS = {b: f"{start:02d}:00–{end:02d}:00" for b, start, end, _ in TARIFF_SCHEDULE}   # e.g. "22:00–06:00"
 MIN_TARIFF_DIFF = 1.0
 INTERVAL_HOURS = 1.0
 
@@ -30,15 +40,11 @@ INTERVAL_HOURS = 1.0
 def get_tariff_rate(dt: pd.Timestamp) -> tuple[str, float]:
     """Return (tariff band name, rate in INR per kWh) for the hour of `dt`."""
     hr = pd.Timestamp(dt).hour
-    if 6 <= hr < 9:
-        return "Morning", 8.00
-    if 9 <= hr < 12:
-        return "Morning peak", 9.50
-    if 12 <= hr < 18:
-        return "Day", 8.00
-    if 18 <= hr < 22:
-        return "Evening peak", 10.00
-    return "Off-peak", 6.50
+    for band, start, end, rate in TARIFF_SCHEDULE:
+        in_band = (start <= hr < end) if start < end else (hr >= start or hr < end)   # wrap-around band (22:00-06:00)
+        if in_band:
+            return band, rate
+    raise ValueError(f"No tariff band covers hour {hr}.")
 
 
 # =====================================================================================
@@ -161,6 +167,8 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
         original_cost_inr=("original_cost_inr", "sum"),
         optimised_cost_inr=("optimised_cost_inr", "sum"),
     ).reindex(TARIFF_BANDS).fillna(0).reset_index()
+    band_summary.insert(1, "time_window", band_summary["tariff_band"].map(TARIFF_TIME_WINDOWS))   # shown in the tariff-band table
+    band_summary.insert(2, "rate_inr", band_summary["tariff_band"].map(TARIFF_RATES))
     band_summary["energy_change_kwh"] = band_summary["optimised_energy_kwh"] - band_summary["original_energy_kwh"]
     band_summary["cost_change_inr"] = band_summary["optimised_cost_inr"] - band_summary["original_cost_inr"]
 
