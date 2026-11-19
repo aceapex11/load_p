@@ -1404,214 +1404,26 @@ def plant_render_model_comparison(result):
 
 
 def plant_render_recommendation(result):
-    """
-    Generate an industrial energy-management recommendation.
-
-    The recommendation considers:
-    1. Forecast-based tariff savings.
-    2. Peak-period load reduction opportunities.
-    3. Lower-tariff scheduling windows.
-    4. Demand-limit validation.
-    5. Operational flexibility requirements.
-
-    Contract demand is optional. If unavailable, the system must
-    not claim that additional load can safely be scheduled.
-    """
-
-    # ---------------------------------------------------------
-    # 1. Extract optimization results
-    # ---------------------------------------------------------
-    shifted = float(result.get("total_shifted_kwh", 0))
-    saving = float(result.get("savings_inr", 0))
-    savings_pct = float(result.get("savings_pct", 0))
-
-    # Optional demand-validation information.
-    # These fields must be supplied by the demand-analysis module.
-    demand_limit_known = result.get("demand_limit_known", False)
-    demand_safe = result.get("demand_safe", None)
-    demand_risk = result.get("demand_risk", False)
-
-    # Optional tariff-period information.
-    source_periods = result.get(
-        "source_periods",
-        ["Morning Peak", "Evening Peak"]
-    )
-
-    destination_periods = result.get(
-        "destination_periods",
-        ["Morning", "Day"]
-    )
-
-    # ---------------------------------------------------------
-    # 2. Determine the recommendation status
-    # ---------------------------------------------------------
-
+    """Green / amber recommendation banner (shift opportunity found or not)."""
+    shifted, saving = result["total_shifted_kwh"], result["savings_inr"]
     if shifted > 1e-6 and saving > 0:
-
-        if demand_risk:
-            title = "Demand risk detected: review load scheduling"
-            status = "Demand constraint warning"
-
-            text = (
-                "The forecast-based tariff optimizer identifies a "
-                f"potential transfer of {shifted:,.0f} kWh from "
-                f"{', '.join(source_periods)} to lower-tariff periods. "
-                "However, the projected plant demand may exceed the "
-                "configured demand limit or demand reference. "
-                "Avoid recommending additional simultaneous high-load "
-                "operations until demand headroom is verified."
-            )
-
-            bg, border, fg = (
-                "#FFF1F2", "#FECDD3", "#BE123C"
-            )
-
-        elif demand_limit_known and demand_safe is True:
-            title = "Recommended: optimize peak-period operations"
-            status = "Demand validated"
-
-            text = (
-                f"The 7-day plant load forecast identifies approximately "
-                f"{shifted:,.0f} kWh of potential load-shifting opportunity "
-                f"from {', '.join(source_periods)} into "
-                f"{', '.join(destination_periods)}. "
-                "Projected demand remains within the configured "
-                "demand constraint. Prioritize rescheduling eligible "
-                "flexible high-energy operations outside peak-tariff hours. "
-                f"Estimated energy-charge saving: ₹{saving:,.0f} "
-                f"({savings_pct:.2f}%)."
-            )
-
-            bg, border, fg = (
-                "#E8FAF3", "#A7F3D0", "#047857"
-            )
-
-        else:
-            title = "Peak-period cost opportunity identified"
-            status = "Demand validation required"
-
-            text = (
-                f"The 7-day plant load forecast identifies approximately "
-                f"{shifted:,.0f} kWh of theoretical load-shifting "
-                f"opportunity from {', '.join(source_periods)}. "
-                "Review flexible high-energy production operations "
-                f"during these periods and evaluate scheduling them "
-                f"during {', '.join(destination_periods)} where "
-                "lower-tariff capacity is available. "
-                f"Estimated energy-charge saving: ₹{saving:,.0f} "
-                f"({savings_pct:.2f}%)."
-            )
-
-            bg, border, fg = (
-                "#FFF7E6", "#FDE68A", "#B45309"
-            )
-
+        title, status = "Recommended: shift eligible peak-period load", "Recommended opportunity"
+        text = (f"The sktime_XGBoost 7-day forecast indicates that approximately {shifted:,.0f} kWh can be shifted "
+                f"from Morning Peak / Evening Peak into eligible Morning / Day hours. Estimated energy-charge saving: "
+                f"₹{saving:,.0f} ({result['savings_pct']:.2f}%).")
+        bg, border, fg = "#E8FAF3", "#A7F3D0", "#047857"
     else:
-        title = "No validated cost-saving opportunity identified"
-        status = "No shift opportunity"
-
-        text = (
-            "The current tariff optimization did not identify a "
-            "positive energy-charge saving from the configured "
-            "load-shifting opportunities. Continue monitoring "
-            "forecast demand and tariff-period consumption."
-        )
-
-        bg, border, fg = (
-            "#F1F5F9", "#CBD5E1", "#475569"
-        )
-
-    # ---------------------------------------------------------
-    # 3. Generate demand-validation information
-    # ---------------------------------------------------------
-
-    if not demand_limit_known:
-        demand_note = (
-            "Contract demand is not configured. Historical demand "
-            "can be used as a provisional reference, but it does "
-            "not establish contractual demand headroom."
-        )
-
-    elif demand_risk:
-        demand_note = (
-            "Demand validation indicates a potential constraint. "
-            "Review the proposed operating schedule before implementation."
-        )
-
-    elif demand_safe is True:
-        demand_note = (
-            "Projected demand passed the configured demand constraint "
-            "check. Production and equipment flexibility must still "
-            "be verified."
-        )
-
-    else:
-        demand_note = (
-            "Demand safety has not been established. Verify available "
-            "demand headroom before implementing the schedule."
-        )
-
-    # ---------------------------------------------------------
-    # 4. Render the recommendation banner
-    # ---------------------------------------------------------
-
+        title, status = "No cost-saving shift identified", "No shift opportunity"
+        text = "Under the configured time-of-use tariffs and Off-Peak receiving-load benchmark, no eligible load transfer produced a positive saving."
+        bg, border, fg = "#FFF4DD", "#FDE68A", "#B45309"
     st.markdown(
-        f"""
-        <div style="
-            background:{bg};
-            border:1px solid {border};
-            border-radius:16px;
-            padding:16px 18px;
-            margin:4px 0 14px;
-        ">
-
-            <div style="
-                display:flex;
-                justify-content:space-between;
-                gap:12px;
-                align-items:center;
-                flex-wrap:wrap;
-            ">
-                <div style="
-                    font-size:1rem;
-                    font-weight:750;
-                    color:{TEXT_COLOR};
-                ">
-                    {title}
-                </div>
-
-                <span style="
-                    font-size:.75rem;
-                    font-weight:700;
-                    color:{fg};
-                ">
-                    {status}
-                </span>
-            </div>
-
-            <div style="
-                font-size:.88rem;
-                color:#475569;
-                margin-top:9px;
-                line-height:1.6;
-            ">
-                {text}
-            </div>
-
-            <div style="
-                font-size:.76rem;
-                color:#64748B;
-                margin-top:10px;
-                line-height:1.5;
-            ">
-                {demand_note}
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
+        f'<div style="background:{bg};border:1px solid {border};border-radius:16px;padding:16px 18px;margin:4px 0 14px;">'
+        f'<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
+        f'<div style="font-size:1rem;font-weight:750;color:{TEXT_COLOR};">{title}</div>'
+        f'<span style="font-size:.75rem;font-weight:700;color:{fg};">{status}</span></div>'
+        f'<div style="font-size:.88rem;color:#475569;margin-top:7px;line-height:1.5;">{text}</div>'
+        f'<div style="font-size:.75rem;color:#64748B;margin-top:6px;">Indicative forecast-based estimate using the configured tariffs. Confirm equipment/process flexibility before applying any schedule change.</div>'
+        f'</div>', unsafe_allow_html=True)
 
 
 def plant_render_cost_optimization(result):
