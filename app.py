@@ -1424,7 +1424,7 @@ def plant_render_recommendation(result):
         title = f"⚡ Recommended: Reschedule heavy loads out of Evening Peak ({win['Evening peak']})"
         savings_line = (f"Estimated Savings: ₹{saving:,.0f} / week (~₹{saving * 52 / 1e5:,.1f} Lakhs / year, {result['savings_pct']:.2f}% energy cost reduction) "
                         f"while keeping contracted night (Off-peak) operations untouched.")
-        bg, border, fg, status = "#E8FAF3", "#A7F3D0", "#047857", "Recommended opportunity"
+        bg, border, fg, status = "#E8FAF3", "#A7F3D0", "#047857"
     else:
         title, status = "⚡ No cost-saving shift identified", "No shift opportunity"
         body = "Under the configured time-of-use tariffs and Off-Peak receiving-load benchmark, no eligible load transfer produced a positive saving."
