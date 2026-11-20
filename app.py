@@ -946,17 +946,17 @@ def load_plant_series(path_str, mtime):
 
 
 def plant_appbar_html():
-    """App-bar info shown on the plant tab: the overall hourly kW file instead of the device file."""
+    """App-bar info shown on the plant tab: the overall hourly kW file instead of the device file (no file-name / readings-count chips)."""
     path = APP_DIR / PLANT_HOURLY_DATA_FILE_NAME
     try: hourly_kw = load_plant_series(str(path), path.stat().st_mtime)
     except Exception: return '<span class="pill warn"><span class="dot"></span>Plant data not available</span>'
-    return (f'<span class="pill idle"><span class="dot"></span>Overall plant load · hourly</span><span class="chip">{path.name}</span>'
-            f'<span class="chip">{hourly_kw.index.min():%d %b %Y} → {hourly_kw.index.max():%d %b %Y}</span><span class="chip">{len(hourly_kw):,} hourly readings</span>'
+    return (f'<span class="pill idle"><span class="dot"></span>Overall plant load · hourly</span>'
+            f'<span class="chip">{hourly_kw.index.min():%d %b %Y} → {hourly_kw.index.max():%d %b %Y}</span>'
             f'<span class="chip">average {hourly_kw.mean():,.0f} kW</span><span class="chip">peak {hourly_kw.max():,.0f} kW</span>')
 
 
 app_bar_placeholder.markdown(f"""<div class="appbar"><div class="logo">⚡</div><div><div class="t">GridSense</div><div class="s">Load forecasting · phase balance · plant optimization</div></div><div class="sp"></div>
-<span class="grp-dev">{status_pill_html}<span class="chip">{data_file_label}</span><span class="chip">{minute_rows.Timestamps.min():%d %b} → {minute_rows.Timestamps.max():%d %b %Y}</span><span class="chip">{len(minute_rows):,} readings</span>{clock_chip_html}</span><span class="grp-plant">{plant_appbar_html()}</span></div>""", unsafe_allow_html=True)
+<span class="grp-dev">{status_pill_html}<span class="chip">{minute_rows.Timestamps.min():%d %b} → {minute_rows.Timestamps.max():%d %b %Y}</span>{clock_chip_html}</span><span class="grp-plant">{plant_appbar_html()}</span></div>""", unsafe_allow_html=True)
 
 # three pages: overview, load forecast, phase balance
 tab_overview, tab_load, tab_phase, tab_plant = st.tabs(["Overview", "Load forecast", "Phase balance", "Plant load forecasting & optimization"])
@@ -1312,11 +1312,15 @@ def plant_style_plot(fig, height=390):
     return fig
 
 
-def plant_kpi(col, label, value, sub, icon):
-    """Draw one KPI card (the .kpi CSS above) inside the given column."""
-    with col:
-        st.markdown(f'<div class="kpi"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div>'
-                    f'<div class="v">{value}</div><div class="s">{sub}</div></div>', unsafe_allow_html=True)
+def plant_kpi_row(cards, value_style=""):
+    """One full-width flex row: every card gets flex:1 and the same height, so the row spans left edge to right edge with no blank space.
+    cards = list of (label, value, sub, icon)."""
+    html = ""
+    for label, value, sub, icon in cards:
+        html += (f'<div class="kpi" style="flex:1 1 0;min-width:0;height:auto;">'
+                 f'<div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div>'
+                 f'<div class="v" style="{value_style}">{value}</div><div class="s">{sub}</div></div>')
+    st.markdown(f'<div style="display:flex;width:100%;gap:1rem;align-items:stretch;">{html}</div>', unsafe_allow_html=True)
 
 
 def plant_add_forecast_boundary(fig, boundary, end):
@@ -1326,20 +1330,21 @@ def plant_add_forecast_boundary(fig, boundary, end):
 
 
 def plant_render_forecast_kpis(result):
-    """Five KPI cards in one row: forecast energy, last-7-day energy, forecast peak, low-demand average, rolling P90 error."""
+    """Five KPI cards in one full-width row, equal height: forecast energy, last-7-day energy, forecast peak, low-demand average, rolling P90 error."""
     y = result["series"]; fc = result["future_forecasts"][plf.BEST_MODEL_NAME]
     forecast_energy = float(fc.sum())                                          # hourly kW summed over 1-hour steps -> kWh
     previous_energy = float(y.iloc[-plf.HORIZON_HOURS:].sum())
     peak = float(fc.max())
     low_count = max(1, int(np.ceil(len(fc) * 0.25)))                           # lowest 25 % of forecast hours
     low_average = float(np.sort(fc.to_numpy())[:low_count].mean())
-    st.markdown('<div class="ph"><b>Plant load forecast · key indicators</b><span>Cost optimization uses sktime_XGBoost</span></div>', unsafe_allow_html=True)
-    cols = st.columns(5)
-    plant_kpi(cols[0], "Forecast load · next 7 days", f"{forecast_energy / 1000:,.1f} MWh", f"{forecast_energy:,.0f} kWh · sktime_XGBoost", "🔮")
-    plant_kpi(cols[1], "Actual load · last 7 days", f"{previous_energy / 1000:,.1f} MWh", f"{previous_energy:,.0f} kWh · historical meter data", "📊")
-    plant_kpi(cols[2], "Forecast peak demand", f"{peak:,.1f} kW", "Highest hourly average over next 7 days", "📈")
-    plant_kpi(cols[3], "Low-demand average", f"{low_average:,.1f} kW", f"Average of the lowest 25% forecast hours ({low_count} hours)", "🌙")
-    plant_kpi(cols[4], "Rolling P90 error", f"± {result['latest_p90']:.2f} kW", "Uncertainty error<br>90 % of hours miss by less than this", "🎯")
+    st.markdown('<div class="ph"><b>Plant load forecast · key indicators</b></div>', unsafe_allow_html=True)
+    plant_kpi_row([
+        ("Forecast load · next 7 days", f"{forecast_energy / 1000:,.1f} MWh", f"{forecast_energy:,.0f} kWh · sktime_XGBoost", "🔮"),
+        ("Actual load · last 7 days", f"{previous_energy / 1000:,.1f} MWh", f"{previous_energy:,.0f} kWh · historical meter data", "📊"),
+        ("Forecast peak demand", f"{peak:,.1f} kW", "Highest hourly average over next 7 days", "📈"),
+        ("Low-demand average", f"{low_average:,.1f} kW", "&nbsp;", "🌙"),
+        ("Rolling P90 error", f"± {result['latest_p90']:.2f} kW", "Uncertainty error", "🎯"),
+    ])
 
 
 def plant_render_selected_forecast(result):
@@ -1358,7 +1363,6 @@ def plant_render_selected_forecast(result):
     fig.add_trace(go.Scatter(x=future.index, y=future.values, name="Forecast (next 7 days)", line=dict(color=ACCENT, width=2.7)))
     fig.update_layout(title="Last 7 days actual and next 7 days forecast", xaxis_title="Timestamp", yaxis_title="Load (kW)")
     show_figure(plant_style_plot(fig, 400), key="plant_selected_forecast")
-    st.caption(f"Band = forecast ± rolling P90 of the absolute error (60-day window; {result['uncertainty_hours_used']} hours of test errors are available, so all of them are used). Lower edge is never below 0 kW.")
 
 
 def plant_render_actual_vs_forecast_all_models(result):
@@ -1387,7 +1391,7 @@ def plant_render_actual_vs_forecast_all_models(result):
 
 def plant_render_model_comparison(result):
     """Model-comparison section: metrics + timing table, failed-model list and the merged all-models chart."""
-    st.markdown('<div class="ph"><b>Model comparison · last 7-day holdout</b><span>Lower error and shorter training time are better</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="ph"><b>Model comparison</b></div>', unsafe_allow_html=True)
     metrics, timing = result["metrics"].copy(), result["timing"].copy()
     if not timing.empty: metrics = metrics.merge(timing[["model", "train_total_s", "predict_7d_s", "speed_rank"]], on="model", how="left")   # timing next to the errors
     else: metrics["train_total_s"], metrics["predict_7d_s"], metrics["speed_rank"] = np.nan, np.nan, np.nan
@@ -1395,7 +1399,6 @@ def plant_render_model_comparison(result):
     metrics = metrics.rename(columns={"model": "Model", "MAE": "MAE (kW)", "RMSE": "RMSE (kW)", "Optimization model": "Dashboard role", "MAPE_pct": "MAPE (%)", "WAPE_pct": "WAPE (%)",
                                       "train_total_s": "Training time (s)", "predict_7d_s": "7-day forecast time (s)", "speed_rank": "Speed rank"})
     st.dataframe(metrics.round(3), width="stretch", hide_index=True)
-    st.caption("Accuracy is measured on the last 168 actual hours. Each model is fitted on earlier hours for testing, then refitted on all available data for the next 168-hour forecast.")
     failed = result["status"][result["status"]["status"] == "Failed"]          # models that crashed (missing package, etc.)
     if not failed.empty:
         with st.expander(f"Models that could not run ({len(failed)})"): st.dataframe(failed, width="stretch", hide_index=True)
@@ -1404,42 +1407,49 @@ def plant_render_model_comparison(result):
 
 
 def plant_render_recommendation(result):
-    """Green / amber recommendation banner (shift opportunity found or not)."""
+    """Full-width recommendation banner (green when a shift saves money, amber otherwise). Every number is bound to the optimizer output."""
     shifted, saving = result["total_shifted_kwh"], result["savings_inr"]
     if shifted > 1e-6 and saving > 0:
-        title, status = "Recommended: shift eligible peak-period load", "Recommended opportunity"
-        text = (f"The sktime_XGBoost 7-day forecast indicates that approximately {shifted:,.0f} kWh can be shifted "
-                f"from Morning Peak / Evening Peak into eligible Morning / Day hours. Estimated energy-charge saving: "
-                f"₹{saving:,.0f} ({result['savings_pct']:.2f}%).")
-        bg, border, fg = "#E8FAF3", "#A7F3D0", "#047857"
+        rates, win = pco.TARIFF_RATES, pco.TARIFF_TIME_WINDOWS
+        dest = result["shifts"].groupby("destination_band")["shifted_kwh"].sum()      # kWh received per destination band
+        cheap = [b for b in ("Day", "Morning") if dest.get(b, 0) > 0]                 # cheapest receiving bands that were actually used
+        cheap_kwh, overflow_kwh = float(sum(dest.get(b, 0) for b in cheap)), float(dest.get("Morning peak", 0))
+        cheap_text = " and ".join(f"{b} ({win[b]})" for b in cheap) or "cheaper hours"
+        cheap_rate = rates[cheap[0]] if cheap else rates["Day"]
+        body = (f"Keep low-power machinery running during {win['Evening peak']} (₹{rates['Evening peak']:.2f}/kWh) and shift "
+                f"~{shifted:,.0f} kWh/week of heavy batch load primarily into {cheap_text} at ₹{cheap_rate:.2f}/kWh ({cheap_kwh:,.0f} kWh)")
+        if overflow_kwh > 1e-6:
+            body += f", with overflow into Morning peak ({win['Morning peak']}) at ₹{rates['Morning peak']:.2f}/kWh ({overflow_kwh:,.0f} kWh)"
+        body += "."
+        title = f"⚡ Recommended: Reschedule heavy loads out of Evening Peak ({win['Evening peak']})"
+        savings_line = (f"Estimated Savings: ₹{saving:,.0f} / week (~₹{saving * 52 / 1e5:,.1f} Lakhs / year, {result['savings_pct']:.2f}% energy cost reduction) "
+                        f"while keeping contracted night (Off-peak) operations untouched.")
+        bg, border, fg, status = "#E8FAF3", "#A7F3D0", "#047857", "Recommended opportunity"
     else:
-        title, status = "No cost-saving shift identified", "No shift opportunity"
-        text = "Under the configured time-of-use tariffs and Off-Peak receiving-load benchmark, no eligible load transfer produced a positive saving."
+        title, status = "⚡ No cost-saving shift identified", "No shift opportunity"
+        body = "Under the configured time-of-use tariffs and Off-Peak receiving-load benchmark, no eligible load transfer produced a positive saving."
+        savings_line = ""
         bg, border, fg = "#FFF4DD", "#FDE68A", "#B45309"
     st.markdown(
-        f'<div style="background:{bg};border:1px solid {border};border-radius:16px;padding:16px 18px;margin:4px 0 14px;">'
+        f'<div style="width:100%;box-sizing:border-box;background:{bg};border:1px solid {border};border-radius:16px;padding:16px 20px;margin:4px 0 14px;">'
         f'<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
-        f'<div style="font-size:1rem;font-weight:750;color:{TEXT_COLOR};">{title}</div>'
+        f'<div style="font-size:1.02rem;font-weight:750;color:{TEXT_COLOR};">{title}</div>'
         f'<span style="font-size:.75rem;font-weight:700;color:{fg};">{status}</span></div>'
-        f'<div style="font-size:.88rem;color:#475569;margin-top:7px;line-height:1.5;">{text}</div>'
-        f'<div style="font-size:.75rem;color:#64748B;margin-top:6px;">Indicative forecast-based estimate using the configured tariffs. Confirm equipment/process flexibility before applying any schedule change.</div>'
+        f'<div style="font-size:.88rem;color:#475569;margin-top:7px;line-height:1.5;">{body}</div>'
+        + (f'<div style="font-size:.9rem;font-weight:700;color:{fg};margin-top:8px;">{savings_line}</div>' if savings_line else "")
+        + f'<div style="font-size:.75rem;color:#64748B;margin-top:6px;">Indicative forecast estimate based on configured electricity tariffs. Confirm machine flexibility before changing shift schedules.</div>'
         f'</div>', unsafe_allow_html=True)
 
 
 def plant_render_cost_optimization(result):
-    """Cost-optimisation KPIs, original-vs-optimised bar charts, demand profile, shift-route chart and tariff-band table."""
-    st.markdown('<div class="ph"><b>Cost optimization · 7-day forecast</b><span>TOU tariff shifting · sktime_XGBoost</span></div>', unsafe_allow_html=True)
-    cols = st.columns(4)
-    cards = [
+    """Cost-optimisation KPIs (3 full-width cards), original-vs-optimised bar charts, demand profile, shift-route chart and tariff-band table."""
+    st.markdown('<div class="ph"><b>Cost optimization · 7-day forecast</b></div>', unsafe_allow_html=True)
+    plant_kpi_row([
         ("Energy shifted", f"{result['total_shifted_kwh']:,.0f} kWh", "Across eligible peak hours", "🔁"),
-        ("Estimated savings", f"₹{result['savings_inr']:,.0f}", f"{result['savings_pct']:.2f}% of forecast energy cost", "💰"),
+        ("Estimated savings", f"₹{result['savings_inr']:,.0f} / week",
+         f"{result['savings_pct']:.2f}% of forecast energy cost · ~₹{result['savings_inr'] * 52 / 1e5:,.1f}L/yr", "💰"),
         ("Original → optimized cost", f"₹{result['original_cost_inr']:,.0f} → ₹{result['optimised_cost_inr']:,.0f}", "7-day energy charge estimate", "🧾"),
-    ]
-    for col, (label, value, sub, icon) in zip(cols, cards):
-        with col:
-            st.markdown(f'<div class="kpi"><div class="top"><div class="ic">{icon}</div><div class="l">{label}</div></div>'
-                        f'<div class="v" style="font-size:1.22rem;letter-spacing:-.4px;">{value}</div>'
-                        f'<div class="s">{sub}</div></div>', unsafe_allow_html=True)
+    ], value_style="font-size:1.22rem;letter-spacing:-.4px;")
 
     df, summary = result["df"], result["band_summary"]
     st.write("")
@@ -1471,8 +1481,7 @@ def plant_render_cost_optimization(result):
     fig.update_yaxes(title_text="Tariff (₹/kWh)", secondary_y=True)
     show_figure(plant_style_plot(fig, 430), key="plant_cost_demand")
 
-    # Where the load was shifted
-    st.markdown('<div class="ph"><b>Where the load was shifted</b><span>kWh moved from each source period into each receiving period</span></div>', unsafe_allow_html=True)
+    # Shift-route chart (heading and subtitle removed; the chart title says what it shows)
     route = result["route_summary"]
     if route.empty:
         st.info("No eligible load shift was made under the current tariff and receiving-capacity rules.")
@@ -1491,8 +1500,6 @@ def plant_render_cost_optimization(result):
             "original_cost_inr": "Original cost (₹)", "optimised_cost_inr": "Optimized cost (₹)",
             "energy_change_kwh": "Energy change (kWh)", "cost_change_inr": "Cost change (₹)"})
         st.dataframe(show.round(2), width="stretch", hide_index=True)
-    st.caption(f"Off-Peak benchmark: {result['benchmark_kw']:,.2f} kW (maximum individual hourly Off-Peak forecast). "
-               "Each hourly kW value is treated as kWh for a one-hour interval. Demand-charge components are not included.")
 
 
 def render_plant_load_tab():
