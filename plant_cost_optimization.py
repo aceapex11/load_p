@@ -9,10 +9,11 @@ Operating rules built into the logic
      Evening peak (18-22, Rs 10.00) -> Morning / Day (Rs 8.00) first, then Morning peak (Rs 9.50) if capacity remains.
      Morning peak (09-12, Rs 9.50)  -> Morning / Day (Rs 8.00) only, and only when the transfer is big enough
                                        to be operationally worthwhile (its own, higher kW minimum).
-3. MEANINGFUL SHIFTS ONLY: a source hour is reduced by 15-20 % of its own load, and by at least a minimum kW
-   (default 100 kW Evening, 150 kW Morning peak). The other 80 %+ (low-power machines) keeps running, so the
-   plant never stops. If the receiving hours cannot absorb at least the minimum, the hour is left unchanged -
-   no 5-20 kW micro-shifts. Every single transfer between two hours is also at least MIN_TRANSFER_KW.
+3. SHIFT AS MUCH AS POSSIBLE, BUT ONLY MEANINGFUL SHIFTS: a source hour gives away as much load as the cheaper
+   hours can take (limited by the Off-peak ceiling), keeping only a protected running load (MIN_RUNNING_PCT of the
+   hour = the low-power machines), so the plant never stops. A shift must be at least MIN_SHIFT_PCT of the hour and
+   at least the kW minimum (default 100 kW Evening, 150 kW Morning peak); if the receiving hours cannot absorb that,
+   the hour is left unchanged - no 5-20 kW micro-shifts. Every single transfer is also >= MIN_TRANSFER_KW.
 4. Same-day shifting only. An hour never both gives and receives load.
 
 This module has NO Streamlit code and NO charts. All plant-tab frontend (banner, KPI cards,
@@ -54,8 +55,9 @@ DESTINATION_BANDS = {                            # allowed receiving bands, in p
     "Morning peak": ["Morning", "Day"],
 }
 MIN_TARIFF_DIFF = 0.5            # Rs/kWh: a destination must be at least this much cheaper (Evening -> Morning peak is Rs 0.50)
-MAX_SHIFT_PCT = 20.0             # a source hour is reduced by at most 20 % of its own load (the rest keeps running)
-MIN_SHIFT_PCT = 15.0             # ...and by at least 15 %, otherwise the hour is left unchanged
+MIN_RUNNING_PCT = 50.0           # this % of every peak hour (low-power machines) always keeps running; the rest is shiftable
+MAX_SHIFT_PCT = 100.0 - MIN_RUNNING_PCT   # largest possible shift of a peak hour (the real limit is usually the Off-peak ceiling)
+MIN_SHIFT_PCT = 15.0             # a shift smaller than this % of the hour is not worthwhile -> the hour is left unchanged
 MIN_SHIFT_KW = {"Evening peak": 100.0, "Morning peak": 150.0}   # absolute minimum per source hour (Morning peak needs a bigger, worthwhile move)
 MIN_TRANSFER_KW = 50.0           # smallest single transfer between two hours (no micro-shifts)
 
@@ -77,7 +79,7 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
     """Shift heavy load out of the peak bands into cheaper bands, day by day, under the operating rules above.
 
     For every source hour (Evening peak first, then Morning peak):
-      1. its maximum shift is MAX_SHIFT_PCT of its own load, its minimum is the larger of MIN_SHIFT_PCT and the kW minimum;
+      1. its maximum shift is its load above the protected running load (100 - MIN_RUNNING_PCT %), its minimum is the larger of MIN_SHIFT_PCT and the kW minimum;
       2. cheaper same-day hours are tried cheapest first (then lowest load first), each limited by the Off-peak ceiling;
       3. the plan is applied only if the total reaches the minimum - otherwise the hour is untouched.
     Returns a dict with the hourly table, shift log, summaries, costs and peak figures.
@@ -108,7 +110,7 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
     df["dest_candidate"] = df["tariff_band"].isin({b for bands in DESTINATION_BANDS.values() for b in bands})
     df["optimised_load_kw"] = df["original_load_kw"].copy()
 
-    # Per source hour: largest allowed shift (20 %), smallest worthwhile shift (15 % and the kW minimum), load that keeps running.
+    # Per source hour: largest allowed shift (everything above the protected running load), smallest worthwhile shift (15 % and the kW minimum), load that keeps running.
     min_kw = df["tariff_band"].map(MIN_SHIFT_KW).fillna(0.0)
     df["max_shift_kw"] = np.where(df["source_candidate"], df["original_load_kw"] * MAX_SHIFT_PCT / 100.0, 0.0)
     df["min_shift_kw"] = np.where(df["source_candidate"], np.maximum(df["original_load_kw"] * MIN_SHIFT_PCT / 100.0, min_kw), 0.0)
@@ -209,7 +211,7 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
         raise AssertionError("A peak hour fell below its protected running load.")
     if (df.loc[gave_mask, "shifted_out_kw"] < df.loc[gave_mask, "min_shift_kw"] - 1e-7).any() or \
        (df.loc[gave_mask, "shifted_out_kw"] > df.loc[gave_mask, "max_shift_kw"] + 1e-7).any():
-        raise AssertionError("A shift fell outside the allowed 15-20 % / minimum-kW range.")
+        raise AssertionError("A shift fell outside the allowed minimum / maximum range.")
 
     original_cost = float(df["original_cost_inr"].sum())
     optimised_cost = float(df["optimised_cost_inr"].sum())
@@ -244,9 +246,9 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
         "benchmark_kw": benchmark,                                                  # Off-peak ceiling (Off-peak itself is untouched)
         "off_peak_untouched": True,
         "base_load_kw": float(df["original_load_kw"].quantile(0.10)),               # information only (10th percentile of the week)
-        "min_peak_running_pct": 100.0 - MAX_SHIFT_PCT,                              # % of each shifted hour that keeps running
+        "min_peak_running_pct": MIN_RUNNING_PCT,                              # % of each shifted hour that keeps running
         "lowest_peak_hour_kw": float(df.loc[src_mask, "optimised_load_kw"].min()) if src_mask.any() else float("nan"),   # proof the plant never hits 0
-        "shiftable_energy_kwh": float(df["shiftable_kw"].sum() * INTERVAL_HOURS),   # heavy load that was allowed to move (<= 20 % of each peak hour)
+        "shiftable_energy_kwh": float(df["shiftable_kw"].sum() * INTERVAL_HOURS),   # heavy load that was allowed to move (everything above the protected running load)
         "shifted_hours": int((df["shifted_out_kw"] > 0).sum()),                     # source hours that really shifted
         "skipped_hours": int(skipped_hours),                                        # source hours left unchanged (too small / no capacity)
         "shifts": shifts,
