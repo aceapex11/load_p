@@ -1385,7 +1385,7 @@ def plant_render_actual_vs_forecast_all_models(result):
             fig.add_trace(go.Scatter(x=future.index, y=future[name], name=f"{name} (forecast)", legendgroup=name, showlegend=False, line=dict(color=colours[name], width=width, dash="dash")))
     fig.add_annotation(x=test.index[len(test) // 2], xref="x", yref="paper", y=1.0, yanchor="bottom", text="Last 7 days · actual vs predicted", showarrow=False, font=dict(size=11, color=MUTED_COLOR))
     fig.add_annotation(x=future.index[len(future) // 2], xref="x", yref="paper", y=1.0, yanchor="bottom", text="Next 7 days · forecast (dashed)", showarrow=False, font=dict(size=11, color=MUTED_COLOR))
-    fig.update_layout(title="Actual vs predicted (last 7 days) and next 7 days forecast · all models", xaxis_title="Timestamp", yaxis_title="Load (kW)")
+    fig.update_layout(title="Actual vs predicted (last 7 days) and next 7 days forecast", xaxis_title="Timestamp", yaxis_title="Load (kW)")
     show_figure(plant_style_plot(fig, 520), key="plant_all_models_merged")
 
 
