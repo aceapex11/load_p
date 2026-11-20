@@ -1434,7 +1434,6 @@ def plant_render_cost_optimization(result):
         ("Energy shifted", f"{result['total_shifted_kwh']:,.0f} kWh", "Across eligible peak hours", "🔁"),
         ("Estimated savings", f"₹{result['savings_inr']:,.0f}", f"{result['savings_pct']:.2f}% of forecast energy cost", "💰"),
         ("Original → optimized cost", f"₹{result['original_cost_inr']:,.0f} → ₹{result['optimised_cost_inr']:,.0f}", "7-day energy charge estimate", "🧾"),
-        ("Peak hourly demand", f"{result['original_peak_kw']:,.0f} → {result['optimised_peak_kw']:,.0f} kW", f"Change: {result['peak_reduction_kw']:,.1f} kW", "📉"),
     ]
     for col, (label, value, sub, icon) in zip(cols, cards):
         with col:
