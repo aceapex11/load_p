@@ -1424,7 +1424,7 @@ def plant_render_recommendation(result):
         title = f"⚡ Recommended: Reschedule heavy loads out of Evening Peak ({win['Evening peak']})"
         savings_line = (f"Estimated Savings: ₹{saving:,.0f} / week (~₹{saving * 52 / 1e5:,.1f} Lakhs / year, {result['savings_pct']:.2f}% energy cost reduction) "
                         f"while keeping contracted night (Off-peak) operations untouched.")
-        bg, border, fg, status = "#E8FAF3", "#A7F3D0", "#047857"
+        bg, border, fg, status = "#E8FAF3", "#A7F3D0", "#047857", "Recommended opportunity"
     else:
         title, status = "⚡ No cost-saving shift identified", "No shift opportunity"
         body = "Under the configured time-of-use tariffs and Off-Peak receiving-load benchmark, no eligible load transfer produced a positive saving."
@@ -1434,7 +1434,7 @@ def plant_render_recommendation(result):
         f'<div style="width:100%;box-sizing:border-box;background:{bg};border:1px solid {border};border-radius:16px;padding:16px 20px;margin:4px 0 14px;">'
         f'<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
         f'<div style="font-size:1.02rem;font-weight:750;color:{TEXT_COLOR};">{title}</div>'
-        f'<span style="font-size:.75rem;font-weight:700;color:{fg};">{status}</span></div>'
+        f'</div>'
         f'<div style="font-size:.88rem;color:#475569;margin-top:7px;line-height:1.5;">{body}</div>'
         + (f'<div style="font-size:.9rem;font-weight:700;color:{fg};margin-top:8px;">{savings_line}</div>' if savings_line else "")
         + f'<div style="font-size:.75rem;color:#64748B;margin-top:6px;">Indicative forecast estimate based on configured electricity tariffs. Confirm machine flexibility before changing shift schedules.</div>'
