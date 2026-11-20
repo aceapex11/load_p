@@ -4,6 +4,11 @@ Uses the tariff windows and load-shifting logic from the user's notebook/current
 agreed logic: no 15% cap and no fixed kW cap; same-day shifting only; destinations
 cannot exceed the maximum hourly Off-Peak forecast load.
 
+NEW RULE - the plant never stops in a peak window:
+  Only HEAVY, high-power equipment may leave a Morning-peak / Evening-peak hour.
+  Each peak hour keeps a protected "keep running" load (the low-power machinery), so the optimised
+  load never falls to 0 kW. Only the load ABOVE that protected floor is shiftable.
+
 This module has NO Streamlit code and NO charts. All plant-tab frontend (banner, KPI cards,
 charts, tables) lives in app.py, which calls optimize_load_shifting() below.
 
@@ -36,6 +41,14 @@ TARIFF_TIME_WINDOWS = {b: f"{start:02d}:00–{end:02d}:00" for b, start, end, _ 
 MIN_TARIFF_DIFF = 1.0
 INTERVAL_HOURS = 1.0
 
+# ---- protected running load (low-power machinery that must keep running in peak hours) - EDIT HERE
+# The protected floor of a peak hour = the larger of
+#   (a) the plant's base load: this quantile of ALL forecast hours of the week (the load that is always there), and
+#   (b) this percentage of the peak hour's OWN forecast load.
+# It can never exceed the hour's own forecast. Raise either value to protect more running load (less is shifted).
+BASE_LOAD_QUANTILE = 0.10          # 0.10 = the load level that is exceeded in 90 % of the week's hours
+MIN_PEAK_RUNNING_PCT = 80.0        # every peak hour keeps at least this % of its own forecast load
+
 
 def get_tariff_rate(dt: pd.Timestamp) -> tuple[str, float]:
     """Return (tariff band name, rate in INR per kWh) for the hour of `dt`."""
@@ -51,10 +64,11 @@ def get_tariff_rate(dt: pd.Timestamp) -> tuple[str, float]:
 # 2. OPTIMISATION
 # =====================================================================================
 def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
-    """Apply same-day max-possible greedy shifting to an hourly forecast series.
+    """Apply same-day greedy shifting of HEAVY load to an hourly forecast series.
 
-    Moves load from Morning peak / Evening peak hours into cheaper Morning / Day hours of the SAME day,
-    never lifting a receiving hour above the maximum Off-Peak forecast load (the benchmark).
+    Moves only the shiftable part (load above the protected running floor) from Morning peak / Evening peak
+    hours into cheaper Morning / Day hours of the SAME day, never lifting a receiving hour above the maximum
+    Off-Peak forecast load (the benchmark). A peak hour is never emptied: it keeps its protected floor.
     Returns a dict with the hourly table, shift log, summaries, costs and peak figures.
     """
     if not isinstance(forecast, pd.Series):
@@ -84,6 +98,13 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
     df["dest_candidate"] = df["tariff_band"].isin(destination_bands)
     df["optimised_load_kw"] = df["original_load_kw"].copy()
 
+    # ---- protected running load: the low-power machinery that stays on in every peak hour
+    base_load_kw = float(df["original_load_kw"].quantile(BASE_LOAD_QUANTILE))            # always-on plant load
+    floor_kw = np.maximum(base_load_kw, MIN_PEAK_RUNNING_PCT / 100.0 * df["original_load_kw"])
+    floor_kw = np.minimum(floor_kw, df["original_load_kw"])                              # never more than the hour itself
+    df["protected_load_kw"] = np.where(df["source_candidate"], floor_kw, 0.0)
+    df["shiftable_kw"] = np.where(df["source_candidate"], df["original_load_kw"] - df["protected_load_kw"], 0.0)   # heavy equipment only
+
     shift_log: list[dict[str, Any]] = []
     total_shifted_kwh = 0.0
 
@@ -102,7 +123,7 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
         )
 
         for src in source_indices:
-            remaining = float(df.loc[src, "optimised_load_kw"])
+            remaining = float(df.loc[src, "shiftable_kw"])        # only the heavy part above the protected floor can move
             src_rate = float(df.loc[src, "rate_inr"])
 
             for dst in destination_indices:
@@ -154,6 +175,9 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
     dest_loads = df.loc[df["dest_candidate"], "optimised_load_kw"]
     if (dest_loads > benchmark + 1e-7).any():
         raise AssertionError("A receiving hour exceeded the Off-Peak benchmark.")
+    src_mask = df["source_candidate"]
+    if (df.loc[src_mask, "optimised_load_kw"] < df.loc[src_mask, "protected_load_kw"] - 1e-7).any():
+        raise AssertionError("A peak hour fell below its protected running load.")
 
     original_cost = float(df["original_cost_inr"].sum())
     optimised_cost = float(df["optimised_cost_inr"].sum())
@@ -184,6 +208,10 @@ def optimize_load_shifting(forecast: pd.Series) -> dict[str, Any]:
     return {
         "df": df,
         "benchmark_kw": benchmark,
+        "base_load_kw": base_load_kw,                                              # always-on load used for the protected floor
+        "min_peak_running_pct": MIN_PEAK_RUNNING_PCT,
+        "lowest_peak_hour_kw": float(df.loc[src_mask, "optimised_load_kw"].min()) if src_mask.any() else float("nan"),   # proof the plant never hits 0
+        "shiftable_energy_kwh": float(df["shiftable_kw"].sum() * INTERVAL_HOURS),  # heavy load that was allowed to move
         "shifts": shifts,
         "band_summary": band_summary,
         "route_summary": route_summary,
