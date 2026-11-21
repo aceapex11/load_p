@@ -59,7 +59,7 @@ MIN_RUNNING_PCT = 50.0           # this % of every peak hour (low-power machines
 MAX_SHIFT_PCT = 100.0 - MIN_RUNNING_PCT   # largest possible shift of a peak hour (the real limit is usually the Off-peak ceiling)
 MIN_SHIFT_PCT = 15.0             # a shift smaller than this % of the hour is not worthwhile -> the hour is left unchanged
 MIN_SHIFT_KW = {"Evening peak": 100.0, "Morning peak": 150.0}   # absolute minimum per source hour (Morning peak needs a bigger, worthwhile move)
-MIN_TRANSFER_KW = 50.0           # smallest single transfer between two hours (no micro-shifts)
+MIN_TRANSFER_KW = 300.0           # smallest single transfer between two hours (no micro-shifts)
 
 
 def get_tariff_rate(dt: pd.Timestamp) -> tuple[str, float]:
